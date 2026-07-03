@@ -487,6 +487,94 @@ const Skeleton = ({ h = 16, w = "100%", r = 8, style }) => (
   <div style={{ height: h, width: w, borderRadius: r, background: `linear-gradient(90deg, ${C.lineSoft} 25%, ${C.line} 50%, ${C.lineSoft} 75%)`, backgroundSize: "200% 100%", animation: "pm-shimmer 1.3s infinite", ...style }} />
 );
 
+// ===== engine.jsx =====
+// ============================================================
+// Transformation Engine (client) — identical logic to the edge fn.
+// Turns internal packs+questions into a customizable external shape.
+// ============================================================
+const TRANSFORMS = [
+  { v: "none", label: "None" },
+  { v: "upper", label: "UPPERCASE" },
+  { v: "lower", label: "lowercase" },
+  { v: "trim", label: "Trim spaces" },
+];
+
+const xf = (val, t) => {
+  if (val == null) return val;
+  switch (t) { case "upper": return String(val).toUpperCase(); case "lower": return String(val).toLowerCase(); case "trim": return String(val).trim(); default: return val; }
+};
+const mapVal = (field, val, vm) => (vm?.[field] && val in vm[field]) ? vm[field][val] : val;
+const projectRow = (row, fields, vm) => {
+  const out = {};
+  for (const f of fields || []) { if (!f.to) continue; let v = xf(row[f.from], f.transform || "none"); v = mapVal(f.to, v, vm); out[f.to] = v; }
+  return out;
+};
+
+// packs: array; byPack: { [packId or slug]: questions[] }; keyField tells which key byPack uses
+const buildOutput = (spec, packs, byPack, keyField = "id") => {
+  const vm = spec.value_maps || {};
+  const qKey = spec.questions_key || "questions";
+  const projectQ = (q) => projectRow(q, spec.question_fields, vm);
+  const k = (p) => p[keyField];
+
+  if (spec.structure === "flat") {
+    const arr = [];
+    for (const p of packs) { const pp = projectRow(p, spec.pack_fields, vm); for (const q of byPack[k(p)] || []) arr.push({ ...pp, ...projectQ(q) }); }
+    return spec.root_key ? { [spec.root_key]: arr } : arr;
+  }
+  if (spec.structure === "keyed") {
+    const obj = {}; const keyBy = spec.key_by || "slug";
+    for (const p of packs) obj[p[keyBy]] = { ...projectRow(p, spec.pack_fields, vm), [qKey]: (byPack[k(p)] || []).map(projectQ) };
+    return spec.root_key ? { [spec.root_key]: obj } : obj;
+  }
+  const arr = packs.map((p) => ({ ...projectRow(p, spec.pack_fields, vm), [qKey]: (byPack[k(p)] || []).map(projectQ) }));
+  return spec.root_key ? { [spec.root_key]: arr } : arr;
+};
+
+const withMeta = (spec, body, counts) => {
+  if (spec.include_meta === false) return body;
+  const meta = { generated_at: new Date().toISOString(), profile: spec.__name || "", pack_count: counts.packs, question_count: counts.questions };
+  return Array.isArray(body) ? { meta, data: body } : { meta, ...body };
+};
+
+// Field names available to map from
+const PACK_SOURCE_FIELDS = ["slug", "name", "emoji", "description", "color", "difficulty", "status", "is_custom", "tags"];
+const QUESTION_SOURCE_FIELDS = ["template", "answer", "alt_answer", "letters_hidden", "difficulty", "status", "notes"];
+
+const emptySpec = () => ({
+  structure: "nested", root_key: "packs", questions_key: "questions", key_by: "slug",
+  include_meta: true, filters: { status: "published", question_status: "active" },
+  pack_fields: [{ from: "slug", to: "id", transform: "none" }, { from: "name", to: "name", transform: "none" }],
+  question_fields: [{ from: "template", to: "template", transform: "none" }, { from: "answer", to: "answer", transform: "none" }],
+  value_maps: {},
+});
+
+const db_profiles = {
+  list: () => rest("pm_export_profiles?order=created_at.asc&limit=1000").then(r => r.data || []),
+  create: (p) => rest("pm_export_profiles", { method: "POST", body: p }).then(r => r.data?.[0]),
+  update: (id, p) => rest(`pm_export_profiles?id=eq.${id}`, { method: "PATCH", body: p }).then(r => r.data?.[0]),
+  remove: (id) => rest(`pm_export_profiles?id=eq.${id}`, { method: "DELETE" }),
+};
+const db_sync = {
+  log: (row) => rest("pm_sync_log", { method: "POST", body: row }).catch(() => {}),
+  history: () => rest("pm_sync_log?order=created_at.desc&limit=100").then(r => r.data || []),
+  markReleased: (packIds) => Promise.all(packIds.map(id => rest(`pm_packs?id=eq.${id}`, { method: "PATCH", body: { released_at: new Date().toISOString(), released_version: null } }))),
+};
+
+// Fetch all content for building an export
+const fetchAllContent = async (filters = {}) => {
+  let pQ = "pm_packs?order=sort_order.asc&limit=10000";
+  if (filters.status) pQ += `&status=eq.${filters.status}`;
+  const packs = (await rest(pQ)).data || [];
+  let qQ = "pm_questions?order=sort_order.asc&limit=10000";
+  if (filters.question_status) qQ += `&status=eq.${filters.question_status}`;
+  const questions = (await rest(qQ)).data || [];
+  const byPack = {};
+  for (const q of questions) (byPack[q.pack_id] = byPack[q.pack_id] || []).push(q);
+  const packList = packs.filter(p => (byPack[p.id]?.length || 0) > 0 || filters.include_empty);
+  return { packs: packList, byPack, questionCount: questions.length };
+};
+
 // ===== editors.jsx =====
 // ============================================================
 // Editors
@@ -1040,6 +1128,463 @@ function ThemeToggle({ theme, mini }) {
   );
 }
 
+// ===== publish1.jsx =====
+// ============================================================
+// Field-mapping row (visual builder)
+// ============================================================
+function FieldMapRow({ map, sources, onChange, onRemove }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr auto auto", gap: 8, alignItems: "center" }}>
+      <Select value={map.from} onChange={(e) => onChange({ ...map, from: e.target.value })} style={{ padding: "7px 10px", fontSize: 13 }}>
+        {sources.map(s => <option key={s} value={s}>{s}</option>)}
+      </Select>
+      <span style={{ color: C.faint, fontSize: 14 }}>→</span>
+      <Input value={map.to} onChange={(e) => onChange({ ...map, to: e.target.value })} placeholder="output name" style={{ padding: "7px 10px", fontSize: 13 }} />
+      <Select value={map.transform || "none"} onChange={(e) => onChange({ ...map, transform: e.target.value })} style={{ padding: "7px 10px", fontSize: 12.5, minWidth: 92 }}>
+        {TRANSFORMS.map(t => <option key={t.v} value={t.v}>{t.label}</option>)}
+      </Select>
+      <button onClick={onRemove} aria-label="Remove" style={{ background: "none", border: "none", cursor: "pointer", color: C.faint, fontSize: 16, padding: 4 }}>×</button>
+    </div>
+  );
+}
+
+// ============================================================
+// Profile Builder — visual + JSON, with live preview
+// ============================================================
+function ProfileBuilder({ profile, sampleContent, onSave, onClose }) {
+  const isNew = !profile?.id;
+  const [name, setName] = useState(profile?.name || "New profile");
+  const [desc, setDesc] = useState(profile?.description || "");
+  const [spec, setSpec] = useState(profile?.spec || emptySpec());
+  const [tab, setTab] = useState("visual"); // visual | json | preview
+  const [jsonText, setJsonText] = useState(JSON.stringify(profile?.spec || emptySpec(), null, 2));
+  const [jsonErr, setJsonErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [saveErr, setSaveErr] = useState("");
+
+  const setSpecField = (k, v) => setSpec(s => ({ ...s, [k]: v }));
+  const setFilter = (k, v) => setSpec(s => ({ ...s, filters: { ...(s.filters || {}), [k]: v } }));
+
+  // keep JSON tab in sync when leaving visual
+  const syncToJson = () => setJsonText(JSON.stringify(spec, null, 2));
+  const applyJson = () => {
+    try { const parsed = JSON.parse(jsonText); setSpec(parsed); setJsonErr(""); return true; }
+    catch (e) { setJsonErr(e.message); return false; }
+  };
+  const switchTab = (t) => {
+    if (tab === "json" && t !== "json") { if (!applyJson()) return; }
+    if (t === "json") syncToJson();
+    setTab(t);
+  };
+
+  // live preview
+  const preview = useMemo(() => {
+    try {
+      const s = { ...spec, __name: name };
+      const packs = sampleContent.packs.slice(0, 2);
+      const body = buildOutput(s, packs, sampleContent.byPack, "id");
+      const out = withMeta(s, body, { packs: packs.length, questions: sampleContent.questionCount });
+      return JSON.stringify(out, null, 2);
+    } catch (e) { return "// Preview error: " + e.message; }
+  }, [spec, name, sampleContent]);
+
+  const submit = async () => {
+    if (tab === "json" && !applyJson()) { setTab("json"); return; }
+    setBusy(true); setSaveErr("");
+    try { await onSave({ name, description: desc, spec: tab === "json" ? JSON.parse(jsonText) : spec }, profile?.id); onClose(); }
+    catch (e) { setSaveErr(e.message); setBusy(false); }
+  };
+
+  const updateFields = (key, fields) => setSpec(s => ({ ...s, [key]: fields }));
+
+  return (
+    <>
+      <ModalHead title={isNew ? "New export profile" : "Edit profile"} subtitle="Define how content is shaped for a game backend" />
+      <div style={{ padding: `${S.lg}px ${S.xl}px 0` }}>
+        <div className="pm-form-2">
+          <Field label="Profile name"><Input value={name} onChange={(e) => setName(e.target.value)} autoFocus /></Field>
+          <Field label="Description"><Input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="e.g. Firebase import format" /></Field>
+        </div>
+      </div>
+      {/* tabs */}
+      <div style={{ display: "flex", gap: 4, padding: `${S.md}px ${S.xl}px 0` }}>
+        {[["visual", "◫ Visual"], ["json", "{ } JSON"], ["preview", "◉ Preview"]].map(([v, l]) => (
+          <button key={v} onClick={() => switchTab(v)} style={{ padding: "8px 14px", borderRadius: R.sm, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 700, background: tab === v ? C.brandSoft : "transparent", color: tab === v ? C.brandInk : C.sub }}>{l}</button>
+        ))}
+      </div>
+
+      <div style={{ padding: S.xl, maxHeight: "56vh", overflowY: "auto" }}>
+        {tab === "visual" && (
+          <div style={{ display: "grid", gap: S.xl }}>
+            {/* structure */}
+            <div>
+              <SectionLabel>Output structure</SectionLabel>
+              <div className="pm-form-2">
+                <Field label="Shape">
+                  <Select value={spec.structure} onChange={(e) => setSpecField("structure", e.target.value)}>
+                    <option value="nested">Nested — packs with questions inside</option>
+                    <option value="flat">Flat — one array of questions</option>
+                    <option value="keyed">Keyed — dictionary by slug</option>
+                  </Select>
+                </Field>
+                <Field label="Root key" hint="Top-level wrapper (blank = bare)">
+                  <Input value={spec.root_key || ""} onChange={(e) => setSpecField("root_key", e.target.value)} placeholder="packs" />
+                </Field>
+              </div>
+              <div className="pm-form-2" style={{ marginTop: S.md }}>
+                {spec.structure !== "flat" && <Field label="Questions key" hint="Name of the questions array"><Input value={spec.questions_key || "questions"} onChange={(e) => setSpecField("questions_key", e.target.value)} /></Field>}
+                {spec.structure === "keyed" && <Field label="Key by"><Select value={spec.key_by || "slug"} onChange={(e) => setSpecField("key_by", e.target.value)}><option value="slug">slug</option><option value="name">name</option></Select></Field>}
+              </div>
+              <label style={{ display: "flex", alignItems: "center", gap: 9, marginTop: S.md, cursor: "pointer" }}>
+                <input type="checkbox" checked={spec.include_meta !== false} onChange={(e) => setSpecField("include_meta", e.target.checked)} style={{ width: 16, height: 16, accentColor: C.brand }} />
+                <span style={{ fontSize: 13.5, color: C.ink, fontWeight: 600 }}>Include metadata envelope (version, counts, timestamp)</span>
+              </label>
+            </div>
+
+            {/* filters */}
+            <div>
+              <SectionLabel>What to include</SectionLabel>
+              <div className="pm-form-2">
+                <Field label="Pack status"><Select value={spec.filters?.status || ""} onChange={(e) => setFilter("status", e.target.value)}><option value="">All</option><option value="published">Published only</option><option value="draft">Draft only</option></Select></Field>
+                <Field label="Question status"><Select value={spec.filters?.question_status || ""} onChange={(e) => setFilter("question_status", e.target.value)}><option value="">All</option><option value="active">Active only</option><option value="inactive">Inactive only</option></Select></Field>
+              </div>
+            </div>
+
+            {/* pack fields */}
+            <div>
+              <SectionLabel>Pack fields <span style={{ fontWeight: 500, color: C.faint }}>· source → output</span></SectionLabel>
+              <div style={{ display: "grid", gap: 8 }}>
+                {(spec.pack_fields || []).map((m, i) => (
+                  <FieldMapRow key={i} map={m} sources={PACK_SOURCE_FIELDS}
+                    onChange={(nm) => updateFields("pack_fields", spec.pack_fields.map((x, j) => j === i ? nm : x))}
+                    onRemove={() => updateFields("pack_fields", spec.pack_fields.filter((_, j) => j !== i))} />
+                ))}
+              </div>
+              <Btn variant="ghost" size="sm" style={{ marginTop: 8 }} onClick={() => updateFields("pack_fields", [...(spec.pack_fields || []), { from: "slug", to: "", transform: "none" }])}>+ Add pack field</Btn>
+            </div>
+
+            {/* question fields */}
+            <div>
+              <SectionLabel>Question fields <span style={{ fontWeight: 500, color: C.faint }}>· source → output</span></SectionLabel>
+              <div style={{ display: "grid", gap: 8 }}>
+                {(spec.question_fields || []).map((m, i) => (
+                  <FieldMapRow key={i} map={m} sources={QUESTION_SOURCE_FIELDS}
+                    onChange={(nm) => updateFields("question_fields", spec.question_fields.map((x, j) => j === i ? nm : x))}
+                    onRemove={() => updateFields("question_fields", spec.question_fields.filter((_, j) => j !== i))} />
+                ))}
+              </div>
+              <Btn variant="ghost" size="sm" style={{ marginTop: 8 }} onClick={() => updateFields("question_fields", [...(spec.question_fields || []), { from: "template", to: "", transform: "none" }])}>+ Add question field</Btn>
+            </div>
+
+            {/* value maps */}
+            <div>
+              <SectionLabel>Value maps <span style={{ fontWeight: 500, color: C.faint }}>· remap specific values</span></SectionLabel>
+              <ValueMapEditor maps={spec.value_maps || {}} onChange={(vm) => setSpecField("value_maps", vm)} />
+            </div>
+          </div>
+        )}
+
+        {tab === "json" && (
+          <div>
+            <div style={{ fontSize: 12.5, color: C.sub, marginBottom: 8 }}>Edit the raw spec. This is the same config the visual editor produces.</div>
+            <Textarea value={jsonText} onChange={(e) => { setJsonText(e.target.value); setJsonErr(""); }} rows={20} style={{ fontFamily: "ui-monospace, monospace", fontSize: 12.5 }} />
+            {jsonErr && <div style={{ color: C.danger, fontSize: 13, marginTop: 8, fontWeight: 600 }}>Invalid JSON: {jsonErr}</div>}
+          </div>
+        )}
+
+        {tab === "preview" && (
+          <div>
+            <div style={{ fontSize: 12.5, color: C.sub, marginBottom: 8 }}>Live output using your first 2 packs as a sample.</div>
+            <pre style={{ background: C.bgDeep, borderRadius: R.md, padding: 16, fontSize: 12.5, lineHeight: 1.5, overflowX: "auto", color: C.ink2, margin: 0, maxHeight: 400, fontFamily: "ui-monospace, monospace" }}>{preview}</pre>
+          </div>
+        )}
+        {saveErr && <div style={{ marginTop: S.md }}><ErrorState error={saveErr} /></div>}
+      </div>
+      <ModalFoot>
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn onClick={submit} disabled={busy}>{busy ? "Saving…" : isNew ? "Create profile" : "Save profile"}</Btn>
+      </ModalFoot>
+    </>
+  );
+}
+const SectionLabel = ({ children }) => <div style={{ fontSize: 12, fontWeight: 800, color: C.ink2, letterSpacing: 0.3, marginBottom: 10, textTransform: "uppercase" }}>{children}</div>;
+
+function ValueMapEditor({ maps, onChange }) {
+  const entries = Object.entries(maps);
+  const [nf, setNf] = useState("");
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      {entries.map(([field, m]) => (
+        <div key={field} style={{ background: C.bg, borderRadius: R.md, padding: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            <span style={{ fontSize: 13, fontWeight: 800, color: C.brandInk }}>{field}</span>
+            <div style={{ flex: 1 }} />
+            <button onClick={() => { const c = { ...maps }; delete c[field]; onChange(c); }} style={{ background: "none", border: "none", cursor: "pointer", color: C.faint, fontSize: 12, fontWeight: 700 }}>remove</button>
+          </div>
+          {Object.entries(m).map(([k, v]) => (
+            <div key={k} style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr auto", gap: 6, alignItems: "center", marginBottom: 5 }}>
+              <Input value={k} onChange={(e) => { const nm = { ...m }; delete nm[k]; nm[e.target.value] = v; onChange({ ...maps, [field]: nm }); }} style={{ padding: "6px 9px", fontSize: 12.5 }} />
+              <span style={{ color: C.faint }}>→</span>
+              <Input value={String(v)} onChange={(e) => { let nv = e.target.value; if (/^-?\d+$/.test(nv)) nv = parseInt(nv); onChange({ ...maps, [field]: { ...m, [k]: nv } }); }} style={{ padding: "6px 9px", fontSize: 12.5 }} />
+              <button onClick={() => { const nm = { ...m }; delete nm[k]; onChange({ ...maps, [field]: nm }); }} style={{ background: "none", border: "none", cursor: "pointer", color: C.faint, fontSize: 14 }}>×</button>
+            </div>
+          ))}
+          <button onClick={() => onChange({ ...maps, [field]: { ...m, "": "" } })} style={{ fontSize: 12, color: C.brandInk, background: "none", border: "none", cursor: "pointer", fontWeight: 700, marginTop: 2 }}>+ add value</button>
+        </div>
+      ))}
+      <div style={{ display: "flex", gap: 8 }}>
+        <Input value={nf} onChange={(e) => setNf(e.target.value)} placeholder="output field name (e.g. level)" style={{ padding: "7px 10px", fontSize: 13 }} />
+        <Btn variant="soft" size="sm" onClick={() => { if (nf.trim()) { onChange({ ...maps, [nf.trim()]: {} }); setNf(""); } }}>+ Map a field's values</Btn>
+      </div>
+    </div>
+  );
+}
+
+// ===== publish2.jsx =====
+// ============================================================
+// Publishing Hub — profiles, channels, controls, history
+// ============================================================
+const FEED_BASE = `${CFG.url}/functions/v1/game-feed`;
+const PUSH_CFG_KEY = "pm_push_config";
+const getPushCfg = () => { try { return JSON.parse(localStorage.getItem(PUSH_CFG_KEY) || "{}"); } catch { return {}; } };
+const setPushCfg = (c) => { try { localStorage.setItem(PUSH_CFG_KEY, JSON.stringify(c)); } catch {} };
+
+function PublishHub({ packs }) {
+  const profilesState = useAsync(() => db_profiles.list(), []);
+  const profiles = profilesState.data || [];
+  const [editProfile, setEditProfile] = useState(null);
+  const [sample, setSample] = useState({ packs: [], byPack: {}, questionCount: 0 });
+  const [sub, setSub] = useState("profiles"); // profiles | channels | history
+  const [busyId, setBusyId] = useState(null);
+
+  useEffect(() => { fetchAllContent({ status: "published", question_status: "active" }).then(setSample).catch(() => {}); }, []);
+
+  const pendingCount = (packs || []).filter(p => p.has_pending_changes && p.status === "published").length;
+
+  const saveProfile = async (payload, id) => {
+    if (id) await db_profiles.update(id, payload); else await db_profiles.create(payload);
+    await profilesState.reload(); notify(id ? "Profile saved" : "Profile created");
+  };
+  const deleteProfile = async (p) => {
+    const ok = await confirmDialog({ title: `Delete "${p.name}"?`, message: "This removes the export profile. Content is unaffected.", confirmLabel: "Delete", danger: true });
+    if (!ok) return;
+    await db_profiles.remove(p.id); await profilesState.reload(); notify("Profile deleted");
+  };
+
+  // Build + download a file through a profile
+  const exportFile = async (profile) => {
+    setBusyId(profile.id);
+    try {
+      const content = await fetchAllContent(profile.spec.filters || {});
+      const spec = { ...profile.spec, __name: profile.name };
+      const body = buildOutput(spec, content.packs, content.byPack, "id");
+      const out = withMeta(spec, body, { packs: content.packs.length, questions: content.questionCount });
+      const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob); const a = document.createElement("a");
+      a.href = url; a.download = `game-content-${slugify(profile.name)}-${Date.now()}.json`; a.click(); URL.revokeObjectURL(url);
+      await db_sync.log({ profile_id: profile.id, profile_name: profile.name, channel: "file", mode: "manual", status: "success", pack_count: content.packs.length, question_count: content.questionCount });
+      logActivity("profile", profile.id, profile.name, "import", `exported ${content.packs.length} packs to file`);
+      notify(`Exported ${content.packs.length} packs`);
+    } catch (e) { notify("Export failed: " + e.message, { kind: "error" }); }
+    finally { setBusyId(null); }
+  };
+
+  // Push to configured game backend
+  const pushToGame = async (profile) => {
+    const cfg = getPushCfg();
+    if (!cfg.url) { notify("Set a push target URL in Channels first", { kind: "error" }); setSub("channels"); return; }
+    setBusyId(profile.id);
+    try {
+      const content = await fetchAllContent(profile.spec.filters || {});
+      const spec = { ...profile.spec, __name: profile.name };
+      const body = buildOutput(spec, content.packs, content.byPack, "id");
+      const out = withMeta(spec, body, { packs: content.packs.length, questions: content.questionCount });
+      const headers = { "Content-Type": "application/json" };
+      if (cfg.secret) headers[cfg.header || "Authorization"] = cfg.secret;
+      const res = await fetch(cfg.url, { method: cfg.method || "POST", headers, body: JSON.stringify(out) });
+      const okay = res.ok;
+      await db_sync.log({ profile_id: profile.id, profile_name: profile.name, channel: "push", mode: "manual", status: okay ? "success" : "error", pack_count: content.packs.length, question_count: content.questionCount, detail: `HTTP ${res.status}` });
+      if (okay) { logActivity("profile", profile.id, profile.name, "import", `pushed to game (${content.packs.length} packs)`); notify(`Pushed ${content.packs.length} packs to game`); }
+      else notify(`Push returned HTTP ${res.status}`, { kind: "error" });
+    } catch (e) {
+      await db_sync.log({ profile_id: profile.id, profile_name: profile.name, channel: "push", mode: "manual", status: "error", detail: e.message });
+      notify("Push failed: " + e.message + " (CORS or unreachable target?)", { kind: "error", duration: 6000 });
+    } finally { setBusyId(null); }
+  };
+
+  return (
+    <div>
+      <div style={{ marginBottom: S.lg }}>
+        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Publishing</h1>
+        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>Shape content with profiles, then sync to the game via file, feed, or push.</p>
+      </div>
+
+      {pendingCount > 0 && (
+        <div style={{ background: C.warnSoft, borderRadius: R.md, padding: "12px 16px", marginBottom: S.lg, fontSize: 13.5, color: C.warnInk, display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 16 }}>⚡</span><b>{pendingCount}</b> published pack{pendingCount === 1 ? " has" : "s have"} changes not yet synced to the game.
+        </div>
+      )}
+
+      {/* sub-tabs */}
+      <div style={{ display: "flex", gap: 4, marginBottom: S.lg, borderBottom: "1px solid " + C.line }}>
+        {[["profiles", "Export profiles"], ["channels", "Channels & sync"], ["history", "Sync history"]].map(([v, l]) => (
+          <button key={v} onClick={() => setSub(v)} style={{ padding: "10px 16px", border: "none", borderBottom: "2px solid " + (sub === v ? C.brand : "transparent"), background: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 14, fontWeight: 700, color: sub === v ? C.ink : C.sub, marginBottom: -1 }}>{l}</button>
+        ))}
+      </div>
+
+      {sub === "profiles" && (
+        <div>
+          <div className="pm-toolbar" style={{ marginBottom: S.lg }}>
+            <div style={{ fontSize: 13.5, color: C.sub }}>{profiles.length} profile{profiles.length === 1 ? "" : "s"} — each defines a target format</div>
+            <div className="pm-grow" />
+            <Btn size="sm" onClick={() => setEditProfile({})} icon="＋">New profile</Btn>
+          </div>
+          {profilesState.loading ? <div style={{ display: "grid", gap: 10 }}>{[0,1,2].map(i => <Skeleton key={i} h={72} r={12} />)}</div>
+            : profiles.length === 0 ? <EmptyState icon="🧩" title="No profiles yet" body="Create a profile to define how your content maps to a game backend's format." action={<Btn onClick={() => setEditProfile({})} icon="＋">Create profile</Btn>} />
+            : (
+              <div style={{ display: "grid", gap: 12 }}>
+                {profiles.map(p => (
+                  <div key={p.id} style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg }}>
+                    <div style={{ display: "flex", alignItems: "flex-start", gap: 14, flexWrap: "wrap" }}>
+                      <div style={{ flex: 1, minWidth: 200 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ fontSize: 15.5, fontWeight: 800, color: C.ink }}>{p.name}</span>
+                          {p.is_builtin && <Pill tone="info">starter</Pill>}
+                          <Pill tone="muted">{p.spec?.structure || "nested"}</Pill>
+                        </div>
+                        {p.description && <div style={{ fontSize: 13, color: C.sub, marginTop: 4 }}>{p.description}</div>}
+                        <div style={{ fontSize: 12, color: C.faint, marginTop: 6 }}>
+                          {(p.spec?.pack_fields?.length || 0)} pack fields · {(p.spec?.question_fields?.length || 0)} question fields · {p.spec?.filters?.status || "all"} packs
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        <Btn variant="ghost" size="sm" onClick={() => setEditProfile(p)}>Edit</Btn>
+                        <Btn variant="ghost" size="sm" disabled={busyId === p.id} onClick={() => exportFile(p)} icon="⭱">File</Btn>
+                        <Btn variant="soft" size="sm" disabled={busyId === p.id} onClick={() => pushToGame(p)} icon="⇧">{busyId === p.id ? "…" : "Push"}</Btn>
+                        {!p.is_builtin && <Btn variant="danger" size="sm" onClick={() => deleteProfile(p)}>Delete</Btn>}
+                      </div>
+                    </div>
+                    {/* feed URL for this profile */}
+                    <FeedRow profile={p} />
+                  </div>
+                ))}
+              </div>
+            )}
+        </div>
+      )}
+
+      {sub === "channels" && <ChannelsPanel profiles={profiles} />}
+      {sub === "history" && <SyncHistory />}
+
+      <Modal open={editProfile !== null} onClose={() => setEditProfile(null)} width={720}>
+        {editProfile !== null && <ProfileBuilder profile={editProfile.id ? editProfile : null} sampleContent={sample} onSave={saveProfile} onClose={() => setEditProfile(null)} />}
+      </Modal>
+    </div>
+  );
+}
+
+function FeedRow({ profile }) {
+  const url = `${FEED_BASE}?profile=${encodeURIComponent(profile.name)}`;
+  const [copied, setCopied] = useState(false);
+  const copy = () => { navigator.clipboard?.writeText(url).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }); };
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, paddingTop: 12, borderTop: "1px solid " + C.lineSoft }}>
+      <span style={{ fontSize: 11.5, fontWeight: 700, color: C.faint, whiteSpace: "nowrap" }}>PULL FEED</span>
+      <code style={{ flex: 1, fontSize: 11.5, color: C.ink2, background: C.bg, padding: "6px 10px", borderRadius: R.sm, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{url}</code>
+      <Btn variant="ghost" size="xs" onClick={copy}>{copied ? "Copied ✓" : "Copy"}</Btn>
+    </div>
+  );
+}
+
+function ChannelsPanel({ profiles }) {
+  const [cfg, setCfg] = useState(getPushCfg());
+  const [mode, setMode] = useState(cfg.mode || "manual");
+  const save = (next) => { const merged = { ...cfg, ...next }; setCfg(merged); setPushCfg(merged); };
+
+  return (
+    <div style={{ display: "grid", gap: S.lg }}>
+      {/* Feed */}
+      <Channel icon="🔗" title="Pull feed (game fetches on its own)" desc="A stable public URL that returns transformed content. The game backend polls this on its schedule. Most robust — works with any backend.">
+        <div style={{ fontSize: 12.5, color: C.sub, marginBottom: 6 }}>Base endpoint:</div>
+        <code style={{ display: "block", fontSize: 12, color: C.ink2, background: C.bg, padding: "10px 12px", borderRadius: R.sm, overflowX: "auto" }}>{FEED_BASE}?profile=&lt;name&gt;</code>
+        <div style={{ fontSize: 12, color: C.faint, marginTop: 8 }}>Add <code>?list=1</code> to enumerate profiles. Content is cached ~60s. Uses each profile's filters (published/active).</div>
+      </Channel>
+
+      {/* Push */}
+      <Channel icon="⇧" title="Push (CMS sends to game on publish)" desc="The CMS POSTs the transformed payload to your game backend endpoint. Configure the target below.">
+        <div style={{ display: "grid", gap: S.md }}>
+          <Field label="Target URL" hint="Your game backend endpoint (Firebase function, custom API, etc.)">
+            <Input value={cfg.url || ""} onChange={(e) => save({ url: e.target.value })} placeholder="https://your-game-backend.com/ingest" />
+          </Field>
+          <div className="pm-form-2">
+            <Field label="Method"><Select value={cfg.method || "POST"} onChange={(e) => save({ method: e.target.value })}><option>POST</option><option>PUT</option></Select></Field>
+            <Field label="Auth header name" hint="Optional"><Input value={cfg.header || ""} onChange={(e) => save({ header: e.target.value })} placeholder="Authorization" /></Field>
+          </div>
+          <Field label="Auth header value / secret" hint="Optional — sent with each push">
+            <Input type="password" value={cfg.secret || ""} onChange={(e) => save({ secret: e.target.value })} placeholder="Bearer …" />
+          </Field>
+          <div style={{ fontSize: 12, color: C.warnInk, background: C.warnSoft, padding: "8px 12px", borderRadius: R.sm }}>
+            Note: the target must allow browser (CORS) requests, or run pushes from a server. Since the game backend isn't finalized, this is ready to point at it once decided.
+          </div>
+        </div>
+      </Channel>
+
+      {/* Control mode */}
+      <Channel icon="⚙" title="Sync control" desc="How and when content flows to the game.">
+        <div style={{ display: "grid", gap: 8 }}>
+          {[["manual", "Manual", "You click Push / export a file when you're ready. Full control."],
+            ["auto", "Auto on publish", "Pushes automatically whenever a pack is published or edited. (Requires push target.)"],
+            ["scheduled", "Scheduled", "Batched syncs on an interval. (Runs via a scheduled job — set up server-side.)"]].map(([v, l, d]) => (
+            <label key={v} style={{ display: "flex", gap: 11, alignItems: "flex-start", padding: 12, borderRadius: R.md, border: "1px solid " + (mode === v ? C.brand : C.line), background: mode === v ? C.brandSoft : C.panel, cursor: "pointer" }}>
+              <input type="radio" name="syncmode" checked={mode === v} onChange={() => { setMode(v); save({ mode: v }); }} style={{ marginTop: 2, accentColor: C.brand }} />
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>{l}</div>
+                <div style={{ fontSize: 12.5, color: C.sub, marginTop: 2 }}>{d}</div>
+              </div>
+            </label>
+          ))}
+        </div>
+        {mode === "auto" && <div style={{ fontSize: 12, color: C.sub, marginTop: 10, background: C.infoSoft, padding: "8px 12px", borderRadius: R.sm }}>Auto-push fires from the app when you're signed in and make a change. For guaranteed delivery even when the CMS is closed, pair with the pull feed.</div>}
+      </Channel>
+    </div>
+  );
+}
+function Channel({ icon, title, desc, children }) {
+  return (
+    <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.xl }}>
+      <div style={{ display: "flex", gap: 12, marginBottom: S.md }}>
+        <div style={{ fontSize: 22 }}>{icon}</div>
+        <div><div style={{ fontSize: 15.5, fontWeight: 800, color: C.ink }}>{title}</div><div style={{ fontSize: 13, color: C.sub, marginTop: 2, lineHeight: 1.5 }}>{desc}</div></div>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function SyncHistory() {
+  const { loading, error, data, reload } = useAsync(() => db_sync.history(), []);
+  if (error) return <ErrorState error={error} onRetry={reload} />;
+  const rows = data || [];
+  const chIcon = { file: "⭱", feed: "🔗", push: "⇧" };
+  const rel = (iso) => { const d = (Date.now() - new Date(iso)) / 1000; if (d < 60) return "just now"; if (d < 3600) return Math.floor(d / 60) + "m ago"; if (d < 86400) return Math.floor(d / 3600) + "h ago"; return Math.floor(d / 86400) + "d ago"; };
+  return loading ? <div style={{ display: "grid", gap: 8 }}>{[0,1,2].map(i => <Skeleton key={i} h={52} r={10} />)}</div>
+    : rows.length === 0 ? <EmptyState icon="🕓" title="No syncs yet" body="Every file export, feed pull, and push to the game will be logged here." />
+    : (
+      <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, overflow: "hidden" }}>
+        {rows.map((r, i) => (
+          <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "13px 18px", borderTop: i ? "1px solid " + C.lineSoft : "none" }}>
+            <div style={{ width: 30, height: 30, borderRadius: 8, background: r.status === "error" ? C.dangerSoft : C.brandSoft, color: r.status === "error" ? C.dangerInk : C.brandInk, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, flexShrink: 0 }}>{chIcon[r.channel] || "•"}</div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13.5, color: C.ink }}><b style={{ fontWeight: 700, textTransform: "capitalize" }}>{r.channel}</b> · {r.profile_name || "—"} {r.status === "error" && <span style={{ color: C.danger, fontWeight: 700 }}>· failed</span>}</div>
+              <div style={{ fontSize: 12, color: C.sub, marginTop: 1 }}>{r.pack_count} packs · {r.question_count} questions{r.detail ? ` · ${r.detail}` : ""}</div>
+            </div>
+            <div style={{ fontSize: 12, color: C.faint, whiteSpace: "nowrap" }}>{rel(r.created_at)}</div>
+          </div>
+        ))}
+      </div>
+    );
+}
+
 // ===== views1.jsx =====
 // ============================================================
 // Dashboard
@@ -1510,10 +2055,11 @@ const NAV = [
   { id: "library", label: "Packs", icon: "▦" },
   { id: "questions", label: "Questions", icon: "⌕" },
   { id: "health", label: "Health", icon: "◉" },
+  { id: "publish", label: "Publishing", icon: "⇧" },
   { id: "activity", label: "Activity", icon: "≡" },
 ];
 // Phone shows a subset in the bottom bar; the rest live in the ⋯ menu.
-const NAV_PHONE = ["dashboard", "library", "questions", "health"];
+const NAV_PHONE = ["dashboard", "library", "questions", "publish"];
 
 // ============================================================
 // Root App
@@ -1634,6 +2180,7 @@ function App() {
       { id: "nav-library", label: "Go to Packs", icon: "▦", section: "Go", keywords: ["library", "packs"], run: () => goNav("library") },
       { id: "nav-questions", label: "Search all questions", icon: "⌕", section: "Go", keywords: ["find", "questions"], run: () => goNav("questions") },
       { id: "nav-health", label: "Go to Content health", icon: "◉", section: "Go", keywords: ["lint", "issues", "duplicates"], run: () => goNav("health") },
+      { id: "nav-publish", label: "Go to Publishing", icon: "⇧", section: "Go", keywords: ["sync", "export", "profile", "feed", "game"], run: () => goNav("publish") },
       { id: "nav-activity", label: "Go to Activity log", icon: "≡", section: "Go", keywords: ["history", "changes"], run: () => goNav("activity") },
       { id: "act-newpack", label: "Create new pack", icon: "＋", section: "Action", keywords: ["add pack"], run: () => setEditPack({}) },
       { id: "act-import", label: "Import packs from JSON", icon: "⭳", section: "Action", keywords: ["upload"], run: onImportFile },
@@ -1706,7 +2253,8 @@ function App() {
                 {menuOpen && (<>
                   <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 60 }} />
                   <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", background: C.panel, borderRadius: R.md, border: "1px solid " + C.line, boxShadow: SH.lg, zIndex: 61, minWidth: 210, overflow: "hidden" }}>
-                    <button onClick={() => { goNav("activity"); }} style={menuItem}>≡ Activity log</button>
+                    <button onClick={() => { goNav("health"); }} style={menuItem}>◉ Content health</button>
+                    <button onClick={() => { goNav("activity"); }} style={{ ...menuItem, borderTop: "1px solid " + C.line }}>≡ Activity log</button>
                     <div style={{ padding: "10px 12px", borderTop: "1px solid " + C.line }}><ThemeToggle theme={theme} /></div>
                     <button onClick={() => { setMenuOpen(false); setChangePw(true); }} style={{ ...menuItem, borderTop: "1px solid " + C.line }}>⚙ Change password</button>
                     <button onClick={() => { setMenuOpen(false); auth.logout(); setAuthed(false); setActive(null); }} style={{ ...menuItem, borderTop: "1px solid " + C.line, color: C.danger }}>⏻ Sign out</button>
@@ -1730,6 +2278,8 @@ function App() {
             <AllQuestions onOpenPack={openPackById} />
           ) : nav === "health" ? (
             <HealthView onOpenPack={openPackById} />
+          ) : nav === "publish" ? (
+            <PublishHub packs={packs} />
           ) : (
             <ActivityView />
           )}
