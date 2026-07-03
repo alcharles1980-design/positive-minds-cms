@@ -47,6 +47,21 @@ const auth = {
     if (!res.ok) throw new Error(d.error_description || d.msg || "Incorrect password");
     session.save(d.access_token, d.refresh_token); return true;
   },
+  // Exchange the refresh token for a fresh access token. Returns true on success.
+  async refresh() {
+    if (!session.refresh) return false;
+    try {
+      const res = await fetch(`${CFG.url}/auth/v1/token?grant_type=refresh_token`, {
+        method: "POST", headers: { apikey: CFG.key, "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: session.refresh }),
+      });
+      if (!res.ok) return false;
+      const d = await res.json();
+      if (!d.access_token) return false;
+      session.save(d.access_token, d.refresh_token || session.refresh);
+      return true;
+    } catch { return false; }
+  },
   async changePassword(pw) {
     const res = await fetch(`${CFG.url}/auth/v1/user`, {
       method: "PUT", headers: { apikey: CFG.key, Authorization: `Bearer ${session.token}`, "Content-Type": "application/json" },
@@ -59,10 +74,14 @@ const auth = {
   logout() { session.clear(); },
 };
 
+// Notify the app when the session dies so it can show the login screen.
+const authEvents = (() => { let fn = null; return { onExpire: (f) => { fn = f; }, expire: () => fn && fn() }; })();
+
 // ============================================================
 // Data layer — REST + RPC with a paginating helper
 // ============================================================
-const rest = async (path, { method = "GET", body, headers = {}, range } = {}) => {
+const rest = async (path, opts = {}, _retried = false) => {
+  const { method = "GET", body, headers = {}, range } = opts;
   const bearer = session.token || CFG.key;
   const h = {
     apikey: CFG.key, Authorization: `Bearer ${bearer}`,
@@ -71,8 +90,13 @@ const rest = async (path, { method = "GET", body, headers = {}, range } = {}) =>
   if (range) { h.Range = `${range[0]}-${range[1]}`; h.Prefer = "count=exact"; }
   const res = await fetch(`${CFG.url}/rest/v1/${path}`, { method, headers: h, body: body ? JSON.stringify(body) : undefined });
   if (!res.ok) {
+    // Token likely expired — try one silent refresh + retry before giving up.
+    if (res.status === 401 && session.token && !_retried) {
+      const ok = await auth.refresh();
+      if (ok) return rest(path, opts, true);
+      session.clear(); authEvents.expire();
+    }
     const t = await res.text();
-    if (res.status === 401 && session.token) session.clear();
     throw new Error(friendlyError(res.status, t));
   }
   const total = res.headers.get("content-range");
@@ -82,16 +106,37 @@ const rest = async (path, { method = "GET", body, headers = {}, range } = {}) =>
   return { data, total: total ? parseInt(total.split("/")[1]) : (Array.isArray(data) ? data.length : null) };
 };
 
-const rpc = async (fn, args = {}) => {
+const rpc = async (fn, args = {}, _retried = false) => {
   const bearer = session.token || CFG.key;
   const res = await fetch(`${CFG.url}/rest/v1/rpc/${fn}`, {
     method: "POST",
     headers: { apikey: CFG.key, Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" },
     body: JSON.stringify(args),
   });
-  if (!res.ok) { const t = await res.text(); if (res.status === 401 && session.token) session.clear(); throw new Error(friendlyError(res.status, t)); }
+  if (!res.ok) {
+    if (res.status === 401 && session.token && !_retried) {
+      const ok = await auth.refresh();
+      if (ok) return rpc(fn, args, true);
+      session.clear(); authEvents.expire();
+    }
+    const t = await res.text();
+    throw new Error(friendlyError(res.status, t));
+  }
   const t = await res.text();
   return t ? JSON.parse(t) : null;
+};
+
+// Fetch ALL rows for a table path, paging past the PostgREST 1000-row cap.
+const restAll = async (pathBase) => {
+  const out = []; const size = 1000; let from = 0;
+  for (let i = 0; i < 1000; i++) { // hard safety ceiling
+    const { data } = await rest(pathBase, { range: [from, from + size - 1] });
+    if (!data || data.length === 0) break;
+    out.push(...data);
+    if (data.length < size) break;
+    from += size;
+  }
+  return out;
 };
 
 const friendlyError = (status, raw) => {
@@ -104,7 +149,7 @@ const friendlyError = (status, raw) => {
 
 // Domain API — every function here is the ONLY way features touch data.
 const db = {
-  packsOverview: () => rest("pm_pack_overview?order=sort_order.asc&limit=10000").then(r => r.data || []),
+  packsOverview: () => restAll("pm_pack_overview?order=sort_order.asc"),
   dashboard: () => rpc("pm_dashboard_stats"),
   createPack: (p) => rest("pm_packs", { method: "POST", body: p }).then(r => r.data?.[0]),
   updatePack: (id, p) => rest(`pm_packs?id=eq.${id}`, { method: "PATCH", body: p }).then(r => r.data?.[0]),
@@ -123,8 +168,8 @@ const db = {
   setQuestionsStatus: (ids, status) => rest(`pm_questions?id=in.(${ids.join(",")})`, { method: "PATCH", body: { status } }),
 
   exportAll: async () => {
-    const packs = (await rest("pm_packs?order=sort_order.asc&limit=10000")).data || [];
-    const qs = (await rest("pm_questions?order=sort_order.asc&limit=10000")).data || [];
+    const packs = await restAll("pm_packs?order=sort_order.asc");
+    const qs = await restAll("pm_questions?order=sort_order.asc");
     return { packs, questions: qs };
   },
 };
@@ -432,7 +477,13 @@ const ConfirmHost = () => {
 };
 const confirmBus = (() => {
   let setter = null;
-  return { register: (fn) => { setter = fn; }, ask: (opts) => new Promise((resolve) => setter && setter({ ...opts, resolve })) };
+  return {
+    register: (fn) => { setter = fn; },
+    ask: (opts) => new Promise((resolve) => {
+      if (!setter) { resolve(false); return; } // host not mounted — fail safe rather than hang
+      setter({ ...opts, resolve });
+    }),
+  };
 })();
 const confirmDialog = (opts) => confirmBus.ask(opts);
 
@@ -558,17 +609,18 @@ const db_profiles = {
 const db_sync = {
   log: (row) => rest("pm_sync_log", { method: "POST", body: row }).catch(() => {}),
   history: () => rest("pm_sync_log?order=created_at.desc&limit=100").then(r => r.data || []),
-  markReleased: (packIds) => Promise.all(packIds.map(id => rest(`pm_packs?id=eq.${id}`, { method: "PATCH", body: { released_at: new Date().toISOString(), released_version: null } }))),
+  // Advance released_version = content_version so "pending changes" clears. null = all published.
+  markReleased: (packIds = null) => rpc("pm_mark_released", { pack_ids: packIds }),
 };
 
-// Fetch all content for building an export
+// Fetch all content for building an export (paginated — no silent 1000 cap).
 const fetchAllContent = async (filters = {}) => {
-  let pQ = "pm_packs?order=sort_order.asc&limit=10000";
+  let pQ = "pm_packs?order=sort_order.asc";
   if (filters.status) pQ += `&status=eq.${filters.status}`;
-  const packs = (await rest(pQ)).data || [];
-  let qQ = "pm_questions?order=sort_order.asc&limit=10000";
+  const packs = await restAll(pQ);
+  let qQ = "pm_questions?order=sort_order.asc";
   if (filters.question_status) qQ += `&status=eq.${filters.question_status}`;
-  const questions = (await rest(qQ)).data || [];
+  const questions = await restAll(qQ);
   const byPack = {};
   for (const q of questions) (byPack[q.pack_id] = byPack[q.pack_id] || []).push(q);
   const packList = packs.filter(p => (byPack[p.id]?.length || 0) > 0 || filters.include_empty);
@@ -965,6 +1017,7 @@ function CommandPalette({ open, onClose, commands }) {
 
   const run = (c) => { onClose(); c.run(); };
   const onKey = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); onClose(); return; }
     if (e.key === "ArrowDown") { e.preventDefault(); setSel(s => Math.min(s + 1, results.length - 1)); }
     else if (e.key === "ArrowUp") { e.preventDefault(); setSel(s => Math.max(s - 1, 0)); }
     else if (e.key === "Enter") { e.preventDefault(); results[sel] && run(results[sel]); }
@@ -1669,7 +1722,7 @@ const PUSH_CFG_KEY = "pm_push_config";
 const getPushCfg = () => { try { return JSON.parse(localStorage.getItem(PUSH_CFG_KEY) || "{}"); } catch { return {}; } };
 const setPushCfg = (c) => { try { localStorage.setItem(PUSH_CFG_KEY, JSON.stringify(c)); } catch {} };
 
-function PublishHub({ packs }) {
+function PublishHub({ packs, onSynced }) {
   const profilesState = useAsync(() => db_profiles.list(), []);
   const profiles = profilesState.data || [];
   const targetsState = useAsync(() => db_targets.list(), []);
@@ -1710,8 +1763,10 @@ function PublishHub({ packs }) {
     setBusyId(t.id);
     try {
       const r = await runFirebaseSync(t, profile);
+      await db_sync.markReleased(null); // clear pending-changes on published packs
       await db_sync.log({ profile_id: profile.id, profile_name: profile.name, target_name: t.name, channel: "push", mode: "manual", status: "success", pack_count: r.packCount, question_count: r.questionCount, detail: `${r.opCount} writes → Firebase` });
       logActivity("target", t.id, t.name, "import", `synced ${r.packCount} packs to Firebase`);
+      onSynced && onSynced();
       notify(`Synced ${r.opCount} writes to ${t.name}`);
     } catch (e) {
       await db_sync.log({ profile_id: t.profile_id, target_name: t.name, channel: "push", mode: "manual", status: "error", detail: e.message });
@@ -1752,7 +1807,7 @@ function PublishHub({ packs }) {
       const res = await fetch(cfg.url, { method: cfg.method || "POST", headers, body: JSON.stringify(out) });
       const okay = res.ok;
       await db_sync.log({ profile_id: profile.id, profile_name: profile.name, channel: "push", mode: "manual", status: okay ? "success" : "error", pack_count: content.packs.length, question_count: content.questionCount, detail: `HTTP ${res.status}` });
-      if (okay) { logActivity("profile", profile.id, profile.name, "import", `pushed to game (${content.packs.length} packs)`); notify(`Pushed ${content.packs.length} packs to game`); }
+      if (okay) { await db_sync.markReleased(null); logActivity("profile", profile.id, profile.name, "import", `pushed to game (${content.packs.length} packs)`); onSynced && onSynced(); notify(`Pushed ${content.packs.length} packs to game`); }
       else notify(`Push returned HTTP ${res.status}`, { kind: "error" });
     } catch (e) {
       await db_sync.log({ profile_id: profile.id, profile_name: profile.name, channel: "push", mode: "manual", status: "error", detail: e.message });
@@ -2594,6 +2649,11 @@ function App() {
     return [...base, ...packCmds];
   }, [packs, theme]); // eslint-disable-line
 
+  // If a token refresh fails mid-session, drop back to the login screen.
+  useEffect(() => {
+    authEvents.onExpire(() => { setAuthed(false); setActive(null); notify("Your session expired — please sign in again", { kind: "error" }); });
+  }, []);
+
   // hotkeys
   useHotkey("mod+k", (e) => { e.preventDefault(); setPaletteOpen(true); }, authed);
 
@@ -2678,7 +2738,7 @@ function App() {
           ) : nav === "health" ? (
             <HealthView onOpenPack={openPackById} />
           ) : nav === "publish" ? (
-            <PublishHub packs={packs} />
+            <PublishHub packs={packs} onSynced={reloadPacks} />
           ) : (
             <ActivityView />
           )}
