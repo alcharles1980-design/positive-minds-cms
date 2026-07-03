@@ -1,24 +1,4 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Positive Minds — Pack Content Manager</title>
-<meta name="description" content="Content management for the Positive Minds CBMT word-game pack library." />
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧠%3C/text%3E%3C/svg%3E" />
-<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-<style>
-  html,body{margin:0;padding:0}
-  #root{min-height:100vh}
-  .boot{min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#6B6880;background:#F7F6FB}
-</style>
-</head>
-<body>
-<div id="root"><div class="boot">Loading Positive Minds…</div></div>
-<script type="text/babel" data-presets="react">
-const { useState, useEffect, useMemo, useCallback } = React;
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 
 // ============================================================
 // Positive Minds — Pack CMS
@@ -802,7 +782,7 @@ const hdrBtn = { background: "none", border: "1px solid " + T.line, borderRadius
 // ============================================================
 // Root app
 // ============================================================
-function App() {
+export default function App() {
   const [authed, setAuthed] = useState(() => !!session.load());
   const [packs, setPacks] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -921,11 +901,3 @@ function App() {
     </div>
   );
 }
-
-
-const root = ReactDOM.createRoot(document.getElementById("root"));
-root.render(<App />);
-
-</script>
-</body>
-</html>
