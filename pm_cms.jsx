@@ -264,14 +264,58 @@ const cx = (...a) => a.filter(Boolean).join(" ");
 const uid = () => Math.random().toString(36).slice(2, 9);
 
 // Render a question the way a child sees it.
-const previewQuestion = (template, answer, alt, letters, difficulty) => {
+// Mask a word by hiding `letters` characters, controlling WHERE they sit
+// (start/middle/end/random) and whether multiple hidden letters are grouped
+// together or spread apart.
+const maskWord = (word, letters, position = "end", grouping = "grouped") => {
+  word = (word || "____").toUpperCase();
+  const n = word.length;
+  letters = Math.max(0, Math.min(letters, n));
+  if (letters === 0) return word;
+  if (letters >= n) return "_".repeat(Math.max(3, n));
+
+  let idx = [];
+  if (grouping === "spread" && letters >= 2) {
+    // Distribute hidden letters as evenly as possible across the word.
+    const step = (n - 1) / letters;
+    const picks = new Set();
+    for (let k = 0; k < letters; k++) {
+      let p = Math.round(step * (k + 0.5));
+      p = Math.max(0, Math.min(n - 1, p));
+      while (picks.has(p)) p = (p + 1) % n;
+      picks.add(p);
+    }
+    idx = [...picks].sort((a, b) => a - b);
+  } else {
+    // Grouped: a contiguous block placed by position.
+    let start;
+    if (position === "start") start = 0;
+    else if (position === "end") start = n - letters;
+    else if (position === "middle") start = Math.floor((n - letters) / 2);
+    else start = Math.floor(Math.random() * (n - letters + 1)); // random
+    for (let k = 0; k < letters; k++) idx.push(start + k);
+  }
+  const chars = word.split("");
+  for (const i of idx) chars[i] = "_";
+  return chars.join("");
+};
+
+// Resolve the effective blank-shape settings for a question:
+// question override → its level's default → pack's level default → fallback.
+const effectiveMask = (q, packLevel, levels) => {
+  const lvlNum = q?.level ?? packLevel ?? 1;
+  const def = (levels || []).find(l => l.level === lvlNum) || {};
+  return {
+    position: q?.letter_position || def.letter_position || "end",
+    grouping: q?.letter_grouping || def.letter_grouping || "grouped",
+  };
+};
+
+const previewQuestion = (template, answer, alt, letters, difficulty, position = "end", grouping = "grouped") => {
   const word = (answer || "____").toUpperCase();
   let blank;
   if (difficulty === "advanced" || letters >= word.length) blank = "_".repeat(Math.max(3, word.length));
-  else {
-    const start = Math.max(0, word.length - letters);
-    blank = word.slice(0, start) + "_".repeat(letters);
-  }
+  else blank = maskWord(word, letters, position, grouping);
   const sentence = (template || "").replace(/\{blank\}/g, blank);
   const opts = [answer, alt].filter(Boolean).map(w => w.toUpperCase()).join(" / ");
   return { sentence, opts };
@@ -861,6 +905,8 @@ function QuestionEditor({ question, packId, packDifficulty, packLevel, levels, o
     answer: question?.answer || "", alt_answer: question?.alt_answer || "",
     letters_hidden: question?.letters_hidden ?? 2,
     level: question?.level ?? null,
+    letter_position: question?.letter_position ?? null,
+    letter_grouping: question?.letter_grouping ?? null,
     difficulty: question?.difficulty || (packDifficulty === "advanced" ? "advanced" : "basic"),
     status: question?.status || "active", notes: question?.notes || "",
   });
@@ -868,7 +914,8 @@ function QuestionEditor({ question, packId, packDifficulty, packLevel, levels, o
   const [errs, setErrs] = useState({});
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
   const hasBlank = f.template.includes("{blank}");
-  const pv = previewQuestion(f.template, f.answer, f.alt_answer, f.letters_hidden, f.difficulty);
+  const em = effectiveMask(f, packLevel, levels);
+  const pv = previewQuestion(f.template, f.answer, f.alt_answer, f.letters_hidden, f.difficulty, em.position, em.grouping);
 
   const submit = async () => {
     const e = {};
@@ -916,6 +963,26 @@ function QuestionEditor({ question, packId, packDifficulty, packLevel, levels, o
             ))}
           </Select>
         </Field>
+        {f.difficulty !== "advanced" && (
+          <div className="pm-form-2">
+            <Field label="Missing letters position" hint="Override, or inherit the level">
+              <Select value={f.letter_position ?? ""} onChange={(e) => set("letter_position", e.target.value === "" ? null : e.target.value)}>
+                <option value="">Inherit level</option>
+                <option value="start">Towards the start</option>
+                <option value="middle">Towards the middle</option>
+                <option value="end">Towards the end</option>
+                <option value="random">Random</option>
+              </Select>
+            </Field>
+            <Field label="When 2+ hidden" hint="Override, or inherit the level">
+              <Select value={f.letter_grouping ?? ""} onChange={(e) => set("letter_grouping", e.target.value === "" ? null : e.target.value)}>
+                <option value="">Inherit level</option>
+                <option value="grouped">Grouped together</option>
+                <option value="spread">Spread apart</option>
+              </Select>
+            </Field>
+          </div>
+        )}
         <div style={{ background: C.brandSoft, borderRadius: R.lg, padding: `${S.lg}px ${S.lg + 2}px` }}>
           <div style={{ fontSize: 11, fontWeight: 800, color: C.brandInk, letterSpacing: 0.5, marginBottom: 8 }}>HOW THE CHILD SEES IT</div>
           <div style={{ fontSize: 17, color: C.ink, fontWeight: 500, lineHeight: 1.4 }}>{pv.sentence}</div>
@@ -1075,7 +1142,7 @@ const kbdStyle = { fontSize: 11, fontWeight: 700, color: C.sub, background: C.li
 // ============================================================
 // Play Mode — experience a pack like a child would
 // ============================================================
-function PlayMode({ pack, onClose }) {
+function PlayMode({ pack, levels, onClose }) {
   const [questions, setQuestions] = useState(null);
   const [i, setI] = useState(0);
   const [picked, setPicked] = useState(null);
@@ -1107,7 +1174,8 @@ function PlayMode({ pack, onClose }) {
   };
 
   const restart = () => { setI(0); setPicked(null); setCorrect(0); setDone(false); };
-  const pv = q ? previewQuestion(q.template, q.answer, q.alt_answer, q.letters_hidden, q.difficulty) : null;
+  const em = q ? effectiveMask(q, pack.level, levels) : null;
+  const pv = q ? previewQuestion(q.template, q.answer, q.alt_answer, q.letters_hidden, q.difficulty, em.position, em.grouping) : null;
 
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 150, background: `linear-gradient(160deg, ${pack.color}22, ${C.bg} 55%)`, display: "flex", flexDirection: "column", fontFamily: FONT }}>
@@ -2145,8 +2213,11 @@ config → data layer → design tokens → hooks → primitives → feature vie
 - \`pm_dev_notes\` — singleton row (id=1) holding the editable Developer-Notes scratchpad.
 - \`pm_levels\` — the game's progression structure (levels 1–10, editable): level (PK),
   name, tagline, letters_rule, word_rule, theme, age_hint, tier (basic/advanced),
-  hidden_mode, letters_hidden_default, color. Packs have a \`level\` (default); questions
-  have a nullable \`level\` (null = inherit the pack's level).
+  hidden_mode, letters_hidden_default, letter_position (start/middle/end/random),
+  letter_grouping (grouped/spread), color. Packs have a \`level\` (default); questions
+  have nullable \`level\`, \`letter_position\`, \`letter_grouping\` (null = inherit).
+  The blank SHAPE is computed by maskWord(word, letters, position, grouping) and the
+  effective settings resolve question-override → level-default (effectiveMask helper).
 
 **View:** \`pm_pack_overview\` — packs + active_questions + total_questions +
 has_pending_changes (= content_version > released_version).
@@ -2236,6 +2307,12 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Blank shape control:** levels now also define WHERE missing letters sit
+  (letter_position: start/middle/end/random) and whether multiple hidden letters are
+  grouped or spread (letter_grouping). maskWord() generates the actual blank; the "how the
+  child sees it" preview, the question rows, PlayMode, and search all reflect it.
+  Question-level overrides fall back to the level default (effectiveMask). Defaults were
+  seeded to match the concept deck (b__ve style = middle/grouped for the gentle levels).
 - **10-level progression structure:** a \`pm_levels\` table defines levels 1–10, each with
   letter-hiding rules, word-length/complexity, emotional theme, and age hint (grounded in
   the concept deck: Basic ≈ levels 1–6 partial letters, Advanced ≈ 7–10 whole word). Packs
@@ -2314,8 +2391,12 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
   pm_lint_details, pm_log, pm_mark_released.
 - Levels: pm_levels holds the 10 editable level definitions. Packs have a default \`level\`;
   questions have a nullable \`level\` (null = inherit pack). Effective level = coalesce(
-  question.level, pack.level). If you add a column to pm_packs, DROP+recreate pm_pack_overview
-  (it uses p.*) — this already bit us once when adding \`level\`.
+  question.level, pack.level). Levels also define blank SHAPE: letter_position (start/
+  middle/end/random) and letter_grouping (grouped/spread), overridable per question.
+  maskWord(word, letters, position, grouping) generates the blank; effectiveMask(q, packLevel,
+  levels) resolves the override→default chain. If you change how blanks render, update
+  maskWord in ONE place — every view (preview, rows, PlayMode) and the search RPC use it.
+  If you add a column to pm_packs, DROP+recreate pm_pack_overview (it uses p.*).
 - RLS: anon read-only, authenticated full write. Never add anon write policies.
 
 ## Editing / build workflow
@@ -2638,6 +2719,8 @@ function LevelsView() {
                     <Rule label="Letters" value={l.letters_rule} />
                     <Rule label="Words" value={l.word_rule} />
                     <Rule label="Theme" value={l.theme} />
+                    {l.hidden_mode !== "word" && <Rule label="Position" value={{ start: "Towards start", middle: "Towards middle", end: "Towards end", random: "Random" }[l.letter_position] || l.letter_position} />}
+                    {l.hidden_mode !== "word" && <Rule label="Grouping" value={l.letter_grouping === "spread" ? "Spread apart" : "Grouped together"} />}
                   </div>
                 </div>
                 <Btn variant="ghost" size="sm" onClick={() => setEdit(l)}>Edit</Btn>
@@ -2665,7 +2748,7 @@ function LevelEditor({ level, onSave, onClose }) {
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
   const submit = async () => {
     setBusy(true);
-    try { await onSave(level.level, { name: f.name, tagline: f.tagline, letters_rule: f.letters_rule, word_rule: f.word_rule, theme: f.theme, age_hint: f.age_hint, tier: f.tier, hidden_mode: f.hidden_mode, letters_hidden_default: f.letters_hidden_default, color: f.color }); onClose(); }
+    try { await onSave(level.level, { name: f.name, tagline: f.tagline, letters_rule: f.letters_rule, word_rule: f.word_rule, theme: f.theme, age_hint: f.age_hint, tier: f.tier, hidden_mode: f.hidden_mode, letters_hidden_default: f.letters_hidden_default, letter_position: f.letter_position, letter_grouping: f.letter_grouping, color: f.color }); onClose(); }
     catch { setBusy(false); }
   };
   return (
@@ -2687,6 +2770,32 @@ function LevelEditor({ level, onSave, onClose }) {
         <Field label="Hidden mode" hint="Authoring guidance">
           <Select value={f.hidden_mode} onChange={(e) => set("hidden_mode", e.target.value)}><option value="letters">Hide some letters</option><option value="word">Hide the whole word</option></Select>
         </Field>
+        <div className="pm-form-2">
+          <Field label="Missing letters position" hint="Where the gaps sit in the word">
+            <Select value={f.letter_position} onChange={(e) => set("letter_position", e.target.value)} disabled={f.hidden_mode === "word"}>
+              <option value="start">Towards the start</option>
+              <option value="middle">Towards the middle</option>
+              <option value="end">Towards the end</option>
+              <option value="random">Random</option>
+            </Select>
+          </Field>
+          <Field label="When 2+ are hidden" hint="Group them or space them out">
+            <Select value={f.letter_grouping} onChange={(e) => set("letter_grouping", e.target.value)} disabled={f.hidden_mode === "word"}>
+              <option value="grouped">Grouped together</option>
+              <option value="spread">Spread apart</option>
+            </Select>
+          </Field>
+        </div>
+        <div style={{ background: C.bg, borderRadius: R.md, padding: "11px 14px" }}>
+          <div style={{ fontSize: 10.5, fontWeight: 800, color: C.faint, letterSpacing: 0.3, textTransform: "uppercase", marginBottom: 6 }}>Example shape</div>
+          <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+            {["BRAVE", "HELPFUL", "KIND"].map(w => (
+              <span key={w} style={{ fontFamily: "ui-monospace, monospace", fontSize: 16, fontWeight: 700, letterSpacing: 3, color: C.brandInk }}>
+                {f.hidden_mode === "word" ? "_".repeat(Math.max(3, w.length)) : maskWord(w, Math.min(f.letters_hidden_default, w.length - 1), f.letter_position, f.letter_grouping)}
+              </span>
+            ))}
+          </div>
+        </div>
         <Field label="Color">
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
             {["#00B894","#55EFC4","#0984E3","#74B9FF","#6C4CE0","#A29BFE","#E17055","#E84393","#D63031","#2D3436","#F39C12","#00CEC9"].map(c => (
@@ -2998,7 +3107,8 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
             </div>
             <div style={{ display: "grid", gap: 10 }}>
               {shown.map(q => {
-                const pv = previewQuestion(q.template, q.answer, q.alt_answer, q.letters_hidden, q.difficulty);
+                const em = effectiveMask(q, pack.level, levels);
+                const pv = previewQuestion(q.template, q.answer, q.alt_answer, q.letters_hidden, q.difficulty, em.position, em.grouping);
                 const selected = sel.has(q.id);
                 return (
                   <div key={q.id} className="pm-qrow" style={{ background: selected ? C.brandSoft : C.panel, borderRadius: R.md, border: "1px solid " + (selected ? C.brand : C.line), opacity: q.status === "active" ? 1 : 0.6 }}>
@@ -3030,7 +3140,7 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
       <Modal open={bulk} onClose={() => setBulk(false)} labelledBy="pm-imp-title">
         {bulk && <BulkImport packId={pack.id} onDone={importQ} onClose={() => setBulk(false)} />}
       </Modal>
-      {play && <PlayMode pack={pack} onClose={() => setPlay(false)} />}
+      {play && <PlayMode pack={pack} levels={levels} onClose={() => setPlay(false)} />}
     </div>
   );
 }
@@ -3090,7 +3200,7 @@ function AllQuestions({ onOpenPack, levels }) {
           <>
             <div style={{ display: "grid", gap: 10 }}>
               {rows.map(r => {
-                const pv = previewQuestion(r.template, r.answer, r.alt_answer, r.letters_hidden, r.difficulty);
+                const pv = previewQuestion(r.template, r.answer, r.alt_answer, r.letters_hidden, r.difficulty, r.letter_position, r.letter_grouping);
                 return (
                   <div key={r.id} className="pm-qrow pm-qrow-search" style={{ background: C.panel, borderRadius: R.md, border: "1px solid " + C.line, opacity: r.status === "active" ? 1 : 0.6 }}>
                     <button className="pm-qrow-pack" onClick={() => onOpenPack(r.pack_id)} title={`Open ${r.pack_name}`} style={{ display: "flex", alignItems: "center", gap: 7, background: r.pack_color + "18", border: "none", borderRadius: R.sm, padding: "6px 10px", cursor: "pointer", flexShrink: 0 }}>
