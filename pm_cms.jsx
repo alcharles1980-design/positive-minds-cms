@@ -2043,7 +2043,7 @@ function SyncHistory() {
 // ============================================================
 // Dashboard
 // ============================================================
-function Dashboard({ onGoLibrary, onGoQuestions, onNewPack }) {
+function Dashboard({ packs, onOpenPack, onGoLibrary, onGoQuestions, onNewPack }) {
   const { loading, error, data, reload } = useAsync(() => db.dashboard(), []);
   if (error) return <ErrorState error={error} onRetry={reload} />;
   const d = data || {};
@@ -2082,6 +2082,31 @@ function Dashboard({ onGoLibrary, onGoQuestions, onNewPack }) {
             <Btn variant="ghost" full onClick={onGoQuestions} icon="⌕">Search all questions</Btn>
           </div>
         </div>
+      </div>
+
+      {/* At-a-glance index of every pack */}
+      <div style={{ marginTop: S.xl }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: S.md }}>
+          <h2 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: C.ink }}>All packs</h2>
+          <span style={{ fontSize: 12.5, color: C.faint, fontWeight: 600 }}>{(packs || []).length} total · tap to open</span>
+        </div>
+        {!packs ? (
+          <div className="pm-index-grid">{[0,1,2,3,4,5].map(i => <Skeleton key={i} h={38} r={9} />)}</div>
+        ) : packs.length === 0 ? (
+          <div style={{ fontSize: 13.5, color: C.sub }}>No packs yet.</div>
+        ) : (
+          <div className="pm-index-grid">
+            {packs.map(p => (
+              <button key={p.id} onClick={() => onOpenPack(p)} title={`${p.name} — ${p.active_questions || 0} active of ${p.total_questions || 0}`}
+                style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 12px", background: C.panel, border: "1px solid " + C.line, borderLeft: `3px solid ${p.color}`, borderRadius: R.sm, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%", overflow: "hidden" }}>
+                <span style={{ fontSize: 16, flexShrink: 0 }}>{p.emoji}</span>
+                <span style={{ fontSize: 13.5, fontWeight: 700, color: C.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1 }}>{p.name}</span>
+                <span style={{ fontSize: 12, fontWeight: 700, color: C.faint, flexShrink: 0 }}>{p.total_questions || 0}</span>
+                {p.status !== "published" && <span style={{ width: 6, height: 6, borderRadius: 99, background: p.status === "draft" ? C.faint : C.warn, flexShrink: 0 }} title={p.status} />}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2732,7 +2757,7 @@ function App() {
           {active ? (
             <PackDetail pack={active} onBack={closePack} refreshPacks={reloadPacks} onEditPack={setEditPack} />
           ) : nav === "dashboard" ? (
-            <Dashboard onGoLibrary={() => goNav("library")} onGoQuestions={() => goNav("questions")} onNewPack={() => setEditPack({})} />
+            <Dashboard packs={packs} onOpenPack={goPack} onGoLibrary={() => goNav("library")} onGoQuestions={() => goNav("questions")} onNewPack={() => setEditPack({})} />
           ) : nav === "library" ? (
             <Library packs={packs} loading={packsState.loading} error={packsState.error} reload={reloadPacks}
               onOpen={goPack} onNew={() => setEditPack({})} onEdit={setEditPack} onExport={exportJSON} onImportFile={onImportFile}
@@ -2802,6 +2827,7 @@ function GlobalStyle() {
 
     .pm-stats{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
     .pm-pack-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(290px,1fr)); gap:16px; }
+    .pm-index-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:8px; }
     .pm-form-2{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }
 
     .pm-toolbar{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
@@ -2838,6 +2864,7 @@ function GlobalStyle() {
       .pm-main{ padding:16px 14px; }
       .pm-stats{ grid-template-columns:repeat(2,1fr); gap:10px; }
       .pm-pack-grid{ grid-template-columns:1fr; gap:12px; }
+      .pm-index-grid{ grid-template-columns:1fr 1fr; gap:7px; }
       .pm-form-2{ grid-template-columns:1fr; gap:14px; }
       .pm-toolbar > *{ flex:1 1 auto; }
       .pm-search{ width:100%; order:-1; flex-basis:100%; }

@@ -5144,6 +5144,8 @@ function SyncHistory() {
 // Dashboard
 // ============================================================
 function Dashboard({
+  packs,
+  onOpenPack,
   onGoLibrary,
   onGoQuestions,
   onNewPack
@@ -5287,7 +5289,94 @@ function Dashboard({
     full: true,
     onClick: onGoQuestions,
     icon: "⌕"
-  }, "Search all questions")))));
+  }, "Search all questions")))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: S.xl
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "baseline",
+      gap: 8,
+      marginBottom: S.md
+    }
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      fontSize: 16,
+      fontWeight: 800,
+      color: C.ink
+    }
+  }, "All packs"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12.5,
+      color: C.faint,
+      fontWeight: 600
+    }
+  }, (packs || []).length, " total · tap to open")), !packs ? /*#__PURE__*/React.createElement("div", {
+    className: "pm-index-grid"
+  }, [0, 1, 2, 3, 4, 5].map(i => /*#__PURE__*/React.createElement(Skeleton, {
+    key: i,
+    h: 38,
+    r: 9
+  }))) : packs.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13.5,
+      color: C.sub
+    }
+  }, "No packs yet.") : /*#__PURE__*/React.createElement("div", {
+    className: "pm-index-grid"
+  }, packs.map(p => /*#__PURE__*/React.createElement("button", {
+    key: p.id,
+    onClick: () => onOpenPack(p),
+    title: `${p.name} — ${p.active_questions || 0} active of ${p.total_questions || 0}`,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 9,
+      padding: "8px 12px",
+      background: C.panel,
+      border: "1px solid " + C.line,
+      borderLeft: `3px solid ${p.color}`,
+      borderRadius: R.sm,
+      cursor: "pointer",
+      fontFamily: "inherit",
+      textAlign: "left",
+      width: "100%",
+      overflow: "hidden"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 16,
+      flexShrink: 0
+    }
+  }, p.emoji), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13.5,
+      fontWeight: 700,
+      color: C.ink,
+      whiteSpace: "nowrap",
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      flex: 1
+    }
+  }, p.name), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: C.faint,
+      flexShrink: 0
+    }
+  }, p.total_questions || 0), p.status !== "published" && /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 6,
+      height: 6,
+      borderRadius: 99,
+      background: p.status === "draft" ? C.faint : C.warn,
+      flexShrink: 0
+    },
+    title: p.status
+  }))))));
 }
 const Row = ({
   label,
@@ -7238,6 +7327,8 @@ function App() {
     refreshPacks: reloadPacks,
     onEditPack: setEditPack
   }) : nav === "dashboard" ? /*#__PURE__*/React.createElement(Dashboard, {
+    packs: packs,
+    onOpenPack: goPack,
     onGoLibrary: () => goNav("library"),
     onGoQuestions: () => goNav("questions"),
     onNewPack: () => setEditPack({})
@@ -7379,6 +7470,7 @@ function GlobalStyle() {
 
     .pm-stats{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
     .pm-pack-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(290px,1fr)); gap:16px; }
+    .pm-index-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:8px; }
     .pm-form-2{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }
 
     .pm-toolbar{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
@@ -7415,6 +7507,7 @@ function GlobalStyle() {
       .pm-main{ padding:16px 14px; }
       .pm-stats{ grid-template-columns:repeat(2,1fr); gap:10px; }
       .pm-pack-grid{ grid-template-columns:1fr; gap:12px; }
+      .pm-index-grid{ grid-template-columns:1fr 1fr; gap:7px; }
       .pm-form-2{ grid-template-columns:1fr; gap:14px; }
       .pm-toolbar > *{ flex:1 1 auto; }
       .pm-search{ width:100%; order:-1; flex-basis:100%; }
