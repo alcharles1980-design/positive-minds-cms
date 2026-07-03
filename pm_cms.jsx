@@ -160,6 +160,7 @@ const db = {
   questions: (packId, { page = 0, size = CFG.pageSize } = {}) =>
     rest(`pm_questions?pack_id=eq.${packId}&order=sort_order.asc,created_at.asc`, { range: [page * size, page * size + size - 1] }),
   searchQuestions: (args) => rpc("pm_search_questions", args),
+  // args: { q, pack, diff, stat, lvl, lim, off } — lvl filters by effective level
   createQuestion: (q) => rest("pm_questions", { method: "POST", body: q }).then(r => r.data?.[0]),
   createQuestions: (rows) => rest("pm_questions", { method: "POST", body: rows }).then(r => r.data),
   updateQuestion: (id, q) => rest(`pm_questions?id=eq.${id}`, { method: "PATCH", body: q }).then(r => r.data?.[0]),
@@ -292,7 +293,13 @@ const maskWord = (word, letters, position = "end", grouping = "grouped") => {
     if (position === "start") start = 0;
     else if (position === "end") start = n - letters;
     else if (position === "middle") start = Math.floor((n - letters) / 2);
-    else start = Math.floor(Math.random() * (n - letters + 1)); // random
+    else {
+      // "random" — but DETERMINISTIC per word so the blank is stable across renders
+      // and matches what the game will compute. Seed from the word's char codes.
+      let seed = 0;
+      for (let i = 0; i < word.length; i++) seed = (seed * 31 + word.charCodeAt(i)) >>> 0;
+      start = seed % (n - letters + 1);
+    }
     for (let k = 0; k < letters; k++) idx.push(start + k);
   }
   const chars = word.split("");
@@ -2256,7 +2263,7 @@ has_pending_changes (= content_version > released_version).
 
 **Functions (RPC):**
 - \`pm_dashboard_stats()\` — aggregate counts for the Overview.
-- \`pm_search_questions(q,pack,diff,stat,lim,off)\` — global paginated question search.
+- \`pm_search_questions(q,pack,diff,stat,lvl,lim,off)\` — global paginated question search.
 - \`pm_clone_pack(src,new_slug,new_name)\` — duplicate a pack + its questions (as draft).
 - \`pm_lint()\` / \`pm_lint_details()\` — content health checks (invalid templates,
   missing 2nd option, duplicates, thin packs).
@@ -2336,6 +2343,12 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Level filters + audit:** the question bank (global search), the in-pack question list,
+  and the Library now all have a Level filter (pm_search_questions gained an \`lvl\` param
+  matching effective level). Fixed three mislabeled "All levels" dropdowns that were really
+  difficulty filters. Fixed a real bug: maskWord "random" position used Math.random() so the
+  blank flickered every render and wouldn't match the game — it's now deterministic (seeded
+  from the word), stable across renders and identical client/edge.
 - **Audit fixes:** (1) level data now reaches the game — the export engine + game-feed
   (v4) attach effective_level to every question and, when a profile enables "Expand levels",
   add a \`levels\` array with the sentence + blank for all 10 levels (client and edge kept in
@@ -2513,7 +2526,7 @@ is the authoring + publishing layer; a separate game backend consumes the conten
 - View pm_pack_overview: packs + active_questions + total_questions + has_pending_changes
   (content_version > released_version)
 - Triggers: touch updated_at; bump pack content_version on any question change
-- RPCs: pm_dashboard_stats, pm_search_questions(q,pack,diff,stat,lim,off) [paginated],
+- RPCs: pm_dashboard_stats, pm_search_questions(q,pack,diff,stat,lvl,lim,off) [paginated],
   pm_clone_pack(src,slug,name), pm_lint + pm_lint_details, pm_log, pm_mark_released(uuid[])
 - CRITICAL: paginate all list reads in 1000-row batches (restAll) — PostgREST caps at 1000.
 
@@ -3094,6 +3107,7 @@ function Library({ packs, levels, loading, error, onOpen, onNew, onEdit, onExpor
   const [search, setSearch] = useState("");
   const [statusF, setStatusF] = useState("all");
   const [diffF, setDiffF] = useState("all");
+  const [lvlF, setLvlF] = useState("all");
   const [dragId, setDragId] = useState(null);
   const [order, setOrder] = useState(packs || []);
   useEffect(() => { setOrder(packs || []); }, [packs]);
@@ -3101,10 +3115,11 @@ function Library({ packs, levels, loading, error, onOpen, onNew, onEdit, onExpor
   const shown = order.filter(p => {
     if (statusF !== "all" && p.status !== statusF) return false;
     if (diffF !== "all" && p.difficulty !== diffF) return false;
+    if (lvlF !== "all" && (p.level || 1) !== parseInt(lvlF)) return false;
     if (search && !`${p.name} ${p.slug} ${p.description}`.toLowerCase().includes(search.toLowerCase())) return false;
     return true;
   });
-  const canReorder = !search && statusF === "all" && diffF === "all";
+  const canReorder = !search && statusF === "all" && diffF === "all" && lvlF === "all";
 
   const onDrop = (targetId) => {
     if (!dragId || dragId === targetId) { setDragId(null); return; }
@@ -3133,7 +3148,13 @@ function Library({ packs, levels, loading, error, onOpen, onNew, onEdit, onExpor
           <option value="all">All statuses</option><option value="published">Published</option><option value="draft">Draft</option><option value="archived">Archived</option>
         </Select>
         <Select value={diffF} onChange={(e) => setDiffF(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
-          <option value="all">All levels</option><option value="basic">Basic</option><option value="advanced">Advanced</option><option value="mixed">Mixed</option>
+          <option value="all">All difficulty</option><option value="basic">Basic</option><option value="advanced">Advanced</option><option value="mixed">Mixed</option>
+        </Select>
+        <Select value={lvlF} onChange={(e) => setLvlF(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
+          <option value="all">All levels</option>
+          {(levels && levels.length ? levels : Array.from({ length: 10 }, (_, i) => ({ level: i + 1, name: "" }))).map(l => (
+            <option key={l.level} value={l.level}>Level {l.level}{l.name ? ` — ${l.name}` : ""}</option>
+          ))}
         </Select>
         <div className="pm-grow" />
         <Btn variant="ghost" size="sm" onClick={onImportFile} icon="⭳">Import</Btn>
@@ -3210,6 +3231,7 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
   const toggleExpand = (id) => setExpanded(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const [search, setSearch] = useState("");
   const [diffF, setDiffF] = useState("all");
+  const [lvlF, setLvlF] = useState("all");
 
   const load = useCallback(async () => {
     setErr("");
@@ -3241,6 +3263,7 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
 
   const shown = (rows || []).filter(q => {
     if (diffF !== "all" && q.difficulty !== diffF) return false;
+    if (lvlF !== "all" && (q.level || pack.level) !== parseInt(lvlF)) return false;
     if (search && !`${q.template} ${q.answer} ${q.alt_answer}`.toLowerCase().includes(search.toLowerCase())) return false;
     return true;
   });
@@ -3285,8 +3308,14 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
           <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: C.ink }}>Question bank</h3>
           <div className="pm-grow" />
           <SearchBox value={search} onChange={setSearch} placeholder="Search…" />
+          <Select value={lvlF} onChange={(e) => setLvlF(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
+            <option value="all">All levels</option>
+            {(levels && levels.length ? levels : Array.from({ length: 10 }, (_, i) => ({ level: i + 1, name: "" }))).map(l => (
+              <option key={l.level} value={l.level}>Level {l.level}{l.name ? ` — ${l.name}` : ""}</option>
+            ))}
+          </Select>
           <Select value={diffF} onChange={(e) => setDiffF(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
-            <option value="all">All levels</option><option value="basic">Basic</option><option value="advanced">Advanced</option>
+            <option value="all">All difficulty</option><option value="basic">Basic</option><option value="advanced">Advanced</option>
           </Select>
           <Btn variant="soft" size="sm" onClick={() => setBulk(true)} icon="⭳">Import</Btn>
           <Btn size="sm" onClick={() => setQEdit({})} icon="＋">Add</Btn>
@@ -3368,6 +3397,7 @@ function AllQuestions({ onOpenPack, levels }) {
   const [q, setQ] = useState("");
   const [diff, setDiff] = useState("all");
   const [stat, setStat] = useState("all");
+  const [lvl, setLvl] = useState("all");
   const [page, setPage] = useState(0);
   const [rows, setRows] = useState(null);
   const [total, setTotal] = useState(0);
@@ -3377,12 +3407,12 @@ function AllQuestions({ onOpenPack, levels }) {
   const load = useCallback(async () => {
     setErr("");
     try {
-      const r = await db.searchQuestions({ q: debounced, pack: null, diff: diff === "all" ? null : diff, stat: stat === "all" ? null : stat, lim: CFG.pageSize, off: page * CFG.pageSize });
+      const r = await db.searchQuestions({ q: debounced, pack: null, diff: diff === "all" ? null : diff, stat: stat === "all" ? null : stat, lvl: lvl === "all" ? null : parseInt(lvl), lim: CFG.pageSize, off: page * CFG.pageSize });
       setRows(r || []); setTotal(r?.[0]?.total_count ? Number(r[0].total_count) : 0);
     } catch (e) { setErr(e.message); }
-  }, [debounced, diff, stat, page]);
+  }, [debounced, diff, stat, lvl, page]);
   useEffect(() => { load(); }, [load]);
-  useEffect(() => { setPage(0); }, [debounced, diff, stat]);
+  useEffect(() => { setPage(0); }, [debounced, diff, stat, lvl]);
 
   const pages = Math.ceil(total / CFG.pageSize);
 
@@ -3394,8 +3424,14 @@ function AllQuestions({ onOpenPack, levels }) {
       </div>
       <div className="pm-toolbar" style={{ marginBottom: S.lg }}>
         <SearchBox value={q} onChange={setQ} placeholder="Search all questions…" autoFocus />
+        <Select value={lvl} onChange={(e) => setLvl(e.target.value)} style={{ minWidth: 140, padding: "8px 12px" }}>
+          <option value="all">All levels</option>
+          {(levels && levels.length ? levels : Array.from({ length: 10 }, (_, i) => ({ level: i + 1, name: "" }))).map(l => (
+            <option key={l.level} value={l.level}>Level {l.level}{l.name ? ` — ${l.name}` : ""}</option>
+          ))}
+        </Select>
         <Select value={diff} onChange={(e) => setDiff(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
-          <option value="all">All levels</option><option value="basic">Basic</option><option value="advanced">Advanced</option>
+          <option value="all">All difficulty</option><option value="basic">Basic</option><option value="advanced">Advanced</option>
         </Select>
         <Select value={stat} onChange={(e) => setStat(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
           <option value="all">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option>
