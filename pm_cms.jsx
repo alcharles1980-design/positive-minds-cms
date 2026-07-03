@@ -2218,6 +2218,11 @@ config → data layer → design tokens → hooks → primitives → feature vie
   have nullable \`level\`, \`letter_position\`, \`letter_grouping\` (null = inherit).
   The blank SHAPE is computed by maskWord(word, letters, position, grouping) and the
   effective settings resolve question-override → level-default (effectiveMask helper).
+- \`pm_question_levels\` — per-question, per-level OVERRIDES. Every question is a single
+  "concept" that auto-renders all 10 levels (buildLevelVariants derives each level's blank
+  from the question + the level rules). A row exists here ONLY when a specific level's
+  version was hand-edited (override sentence/word/letters/position/grouping, or disabled).
+  In the question bank, each row has a "Levels" expand toggle showing all 10 variants.
 
 **View:** \`pm_pack_overview\` — packs + active_questions + total_questions +
 has_pending_changes (= content_version > released_version).
@@ -2307,6 +2312,12 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Questions are multi-level concepts:** each question auto-renders all 10 levels (same
+  affirmation, blank difficulty derived per level via buildLevelVariants). The question bank
+  keeps flat rows with a "Levels" expand toggle that reveals every level's version. Any level
+  can be individually edited (override sentence/word/letters/position/grouping or disabled),
+  stored in pm_question_levels; un-edited levels stay auto-generated. Reset returns a level
+  to auto.
 - **Blank shape control:** levels now also define WHERE missing letters sit
   (letter_position: start/middle/end/random) and whether multiple hidden letters are
   grouped or spread (letter_grouping). maskWord() generates the actual blank; the "how the
@@ -2396,6 +2407,10 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
   maskWord(word, letters, position, grouping) generates the blank; effectiveMask(q, packLevel,
   levels) resolves the override→default chain. If you change how blanks render, update
   maskWord in ONE place — every view (preview, rows, PlayMode) and the search RPC use it.
+- Multi-level concepts: every question renders all 10 levels via buildLevelVariants (question
+  + level rules → per-level blank). Overrides live in pm_question_levels (one row per edited
+  level; absent = auto-generated). The question-bank row expands to show all variants. Don't
+  duplicate a question into 10 rows — it's ONE row, derived.
   If you add a column to pm_packs, DROP+recreate pm_pack_overview (it uses p.*).
 - RLS: anon read-only, authenticated full write. Never add anon write policies.
 
@@ -2666,6 +2681,38 @@ const db_levels = {
   update: (level, patch) => rest(`pm_levels?level=eq.${level}`, { method: "PATCH", body: patch }).then(r => r.data?.[0]),
 };
 
+// Per-question, per-level overrides (rows exist only where a level was hand-edited).
+const db_qlevels = {
+  forQuestion: (qid) => rest(`pm_question_levels?question_id=eq.${qid}&order=level.asc&limit=50`).then(r => r.data || []),
+  upsert: (row) => rest("pm_question_levels", { method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=representation" }, body: row }).then(r => r.data?.[0]),
+  reset: (qid, level) => rest(`pm_question_levels?question_id=eq.${qid}&level=eq.${level}`, { method: "DELETE" }),
+};
+
+// Build all level variants for a question. `overrides` is a map { [level]: overrideRow }.
+// Each variant renders the SAME concept at that level's blank difficulty.
+const buildLevelVariants = (q, levels, overrides = {}) => {
+  return (levels || []).map(lvl => {
+    const ov = overrides[lvl.level] || {};
+    const hasOv = Object.keys(ov).filter(k => !["question_id", "level", "updated_at"].includes(k) && ov[k] != null).length > 0;
+    const template = ov.template ?? q.template;
+    const answer = ov.answer ?? q.answer;
+    const alt = ov.alt_answer ?? q.alt_answer;
+    const word = (answer || "").toUpperCase();
+    const isWord = lvl.hidden_mode === "word";
+    const letters = ov.letters_hidden ?? (isWord ? word.length : Math.min(lvl.letters_hidden_default || 2, Math.max(1, word.length - 1)));
+    const position = ov.letter_position ?? lvl.letter_position ?? "end";
+    const grouping = ov.letter_grouping ?? lvl.letter_grouping ?? "grouped";
+    const blank = (isWord || letters >= word.length) ? "_".repeat(Math.max(3, word.length)) : maskWord(word, letters, position, grouping);
+    const sentence = (template || "").replace(/\{blank\}/g, blank);
+    return {
+      level: lvl.level, name: lvl.name, color: lvl.color, tier: lvl.tier,
+      sentence, blank, letters, position, grouping,
+      opts: [answer, alt].filter(Boolean).map(w => w.toUpperCase()).join(" / "),
+      isOverride: hasOv, enabled: ov.enabled !== false, override: ov,
+    };
+  });
+};
+
 // Small helper: a colored level chip used across the app.
 function LevelChip({ level, levels, size = "sm" }) {
   const def = (levels || []).find(l => l.level === level);
@@ -2807,6 +2854,122 @@ function LevelEditor({ level, onSave, onClose }) {
       <ModalFoot>
         <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
         <Btn onClick={submit} disabled={busy}>{busy ? "Saving…" : "Save level"}</Btn>
+      </ModalFoot>
+    </>
+  );
+}
+
+// ============================================================
+// Expandable per-question level variants (shown in the question bank)
+// ============================================================
+function QuestionLevelsPanel({ question, packLevel, levels }) {
+  const { loading, data, reload } = useAsync(() => db_qlevels.forQuestion(question.id), [question.id]);
+  const [editLevel, setEditLevel] = useState(null);
+  const overrides = {};
+  (data || []).forEach(r => { overrides[r.level] = r; });
+  const variants = buildLevelVariants(question, levels, overrides);
+
+  const saveOverride = async (level, patch) => {
+    await db_qlevels.upsert({ question_id: question.id, level, ...patch });
+    await reload(); notify(`Level ${level} version updated`);
+  };
+  const resetLevel = async (level) => {
+    const ok = await confirmDialog({ title: `Reset Level ${level}?`, body: "This level will go back to the auto-generated version.", confirmText: "Reset", tone: "danger" });
+    if (!ok) return;
+    await db_qlevels.reset(question.id, level); await reload(); notify(`Level ${level} reset to auto`);
+  };
+
+  if (loading) return <div style={{ padding: S.md }}><Spinner label="Loading levels…" /></div>;
+
+  return (
+    <div style={{ padding: "4px 2px 2px", display: "grid", gap: 6 }}>
+      <div style={{ fontSize: 11.5, color: C.faint, fontWeight: 700, padding: "2px 4px 6px" }}>
+        The same affirmation at every level. Auto-generated from the level rules; edit any to customize.
+      </div>
+      {variants.map(v => (
+        <div key={v.level} style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 12px", background: v.enabled ? C.bg : C.lineSoft, borderRadius: R.sm, border: "1px solid " + C.lineSoft, borderLeft: `3px solid ${v.color}`, opacity: v.enabled ? 1 : 0.5 }}>
+          <div style={{ width: 30, flexShrink: 0, fontSize: 12, fontWeight: 900, color: v.color }}>L{v.level}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13.5, color: C.ink, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{v.sentence}</div>
+            <div style={{ fontSize: 11, color: C.faint, marginTop: 1 }}>{v.name}{v.isOverride && <span style={{ color: C.brandInk, fontWeight: 700 }}> · edited</span>}</div>
+          </div>
+          <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 13, fontWeight: 700, letterSpacing: 2, color: v.color, flexShrink: 0 }}>{v.blank}</span>
+          <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+            <button onClick={() => setEditLevel(v)} title="Edit this level" style={miniBtn(C)}>Edit</button>
+            {v.isOverride && <button onClick={() => resetLevel(v.level)} title="Reset to auto" style={miniBtn(C, true)}>↺</button>}
+          </div>
+        </div>
+      ))}
+      <Modal open={editLevel !== null} onClose={() => setEditLevel(null)} width={520}>
+        {editLevel !== null && <QuestionLevelEditor question={question} variant={editLevel} onSave={saveOverride} onClose={() => setEditLevel(null)} />}
+      </Modal>
+    </div>
+  );
+}
+const miniBtn = (C, ghost) => ({ fontSize: 12, fontWeight: 700, padding: "5px 10px", borderRadius: 8, cursor: "pointer", border: "1px solid " + C.line, background: ghost ? "transparent" : C.panel, color: ghost ? C.sub : C.ink2 });
+
+function QuestionLevelEditor({ question, variant, onSave, onClose }) {
+  const ov = variant.override || {};
+  const [f, setF] = useState({
+    template: ov.template ?? "", answer: ov.answer ?? "", alt_answer: ov.alt_answer ?? "",
+    letters_hidden: ov.letters_hidden ?? "", letter_position: ov.letter_position ?? "", letter_grouping: ov.letter_grouping ?? "",
+    enabled: ov.enabled !== false,
+  });
+  const [busy, setBusy] = useState(false);
+  const set = (k, val) => setF(p => ({ ...p, [k]: val }));
+  // live preview using the overrides-on-top-of-concept
+  const merged = { template: f.template || question.template, answer: f.answer || question.answer, alt_answer: f.alt_answer || question.alt_answer };
+  const previewLetters = f.letters_hidden === "" ? variant.letters : parseInt(f.letters_hidden);
+  const pos = f.letter_position || variant.position, grp = f.letter_grouping || variant.grouping;
+  const word = (merged.answer || "").toUpperCase();
+  const blank = (variant.tier === "advanced" && !f.letters_hidden) || previewLetters >= word.length ? "_".repeat(Math.max(3, word.length)) : maskWord(word, previewLetters || 0, pos, grp);
+  const previewSentence = (merged.template || "").replace(/\{blank\}/g, blank);
+
+  const submit = async () => {
+    setBusy(true);
+    const patch = {
+      template: f.template.trim() || null, answer: f.answer.trim().toUpperCase() || null, alt_answer: f.alt_answer.trim().toUpperCase() || null,
+      letters_hidden: f.letters_hidden === "" ? null : parseInt(f.letters_hidden),
+      letter_position: f.letter_position || null, letter_grouping: f.letter_grouping || null, enabled: f.enabled,
+    };
+    try { await onSave(variant.level, patch); onClose(); } catch { setBusy(false); }
+  };
+  return (
+    <>
+      <ModalHead title={`Level ${variant.level} — ${variant.name}`} subtitle="Customize this level's version. Leave a field blank to keep the auto value." />
+      <div style={{ padding: S.xl, display: "grid", gap: S.md, maxHeight: "60vh", overflowY: "auto" }}>
+        <div style={{ background: C.brandSoft, borderRadius: R.md, padding: "12px 14px" }}>
+          <div style={{ fontSize: 10.5, fontWeight: 800, color: C.brandInk, letterSpacing: 0.4, textTransform: "uppercase", marginBottom: 6 }}>How the child sees it</div>
+          <div style={{ fontSize: 15, color: C.ink, fontWeight: 500 }}>{previewSentence}</div>
+          <div style={{ fontSize: 12.5, color: C.brandInk, fontWeight: 800, marginTop: 4 }}>→ {[merged.answer, merged.alt_answer].filter(Boolean).map(w => w.toUpperCase()).join(" / ")}</div>
+        </div>
+        <Field label="Sentence" hint="Blank to inherit the concept's sentence"><Textarea value={f.template} onChange={(e) => set("template", e.target.value)} rows={2} placeholder={question.template} /></Field>
+        <div className="pm-form-2">
+          <Field label="Word" hint="Blank = inherit"><Input value={f.answer} onChange={(e) => set("answer", e.target.value)} placeholder={question.answer} /></Field>
+          <Field label="Alt word" hint="Blank = inherit"><Input value={f.alt_answer} onChange={(e) => set("alt_answer", e.target.value)} placeholder={question.alt_answer || "—"} /></Field>
+        </div>
+        <div className="pm-form-2">
+          <Field label="Letters hidden" hint="Blank = level default"><Input type="number" min={0} value={f.letters_hidden} onChange={(e) => set("letters_hidden", e.target.value)} placeholder={String(variant.letters)} /></Field>
+          <Field label="Enabled" hint="Turn this level off for this concept">
+            <Select value={f.enabled ? "yes" : "no"} onChange={(e) => set("enabled", e.target.value === "yes")}><option value="yes">Enabled</option><option value="no">Disabled</option></Select>
+          </Field>
+        </div>
+        <div className="pm-form-2">
+          <Field label="Position" hint="Blank = level default">
+            <Select value={f.letter_position} onChange={(e) => set("letter_position", e.target.value)}>
+              <option value="">Inherit level</option><option value="start">Towards start</option><option value="middle">Towards middle</option><option value="end">Towards end</option><option value="random">Random</option>
+            </Select>
+          </Field>
+          <Field label="Grouping" hint="Blank = level default">
+            <Select value={f.letter_grouping} onChange={(e) => set("letter_grouping", e.target.value)}>
+              <option value="">Inherit level</option><option value="grouped">Grouped</option><option value="spread">Spread</option>
+            </Select>
+          </Field>
+        </div>
+      </div>
+      <ModalFoot>
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn onClick={submit} disabled={busy}>{busy ? "Saving…" : "Save this level"}</Btn>
       </ModalFoot>
     </>
   );
@@ -3010,6 +3173,8 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
   const [bulk, setBulk] = useState(false);
   const [play, setPlay] = useState(false);
   const [sel, setSel] = useState(new Set());
+  const [expanded, setExpanded] = useState(new Set());
+  const toggleExpand = (id) => setExpanded(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const [search, setSearch] = useState("");
   const [diffF, setDiffF] = useState("all");
 
@@ -3110,22 +3275,32 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
                 const em = effectiveMask(q, pack.level, levels);
                 const pv = previewQuestion(q.template, q.answer, q.alt_answer, q.letters_hidden, q.difficulty, em.position, em.grouping);
                 const selected = sel.has(q.id);
+                const isOpen = expanded.has(q.id);
                 return (
-                  <div key={q.id} className="pm-qrow" style={{ background: selected ? C.brandSoft : C.panel, borderRadius: R.md, border: "1px solid " + (selected ? C.brand : C.line), opacity: q.status === "active" ? 1 : 0.6 }}>
+                  <div key={q.id} style={{ borderRadius: R.md, border: "1px solid " + (selected ? C.brand : isOpen ? C.brand2 : C.line), background: selected ? C.brandSoft : C.panel, overflow: "hidden", opacity: q.status === "active" ? 1 : 0.6 }}>
+                  <div className="pm-qrow" style={{ background: "transparent", border: "none", borderRadius: 0 }}>
                     <input type="checkbox" className="pm-qrow-check" checked={selected} onChange={() => toggleSel(q.id)} aria-label="Select question" style={{ width: 18, height: 18, accentColor: C.brand, flexShrink: 0 }} />
                     <div className="pm-qrow-main">
                       <div className="pm-qrow-sentence" style={{ color: C.ink, fontWeight: 500 }}>{pv.sentence}</div>
                       <div style={{ fontSize: 13.5, color: C.brandInk, fontWeight: 800, marginTop: 4 }}>→ {pv.opts}</div>
                     </div>
                     <div className="pm-qrow-meta">
+                      <button onClick={() => toggleExpand(q.id)} title={isOpen ? "Hide levels" : "Show all levels"} aria-expanded={isOpen} style={{ display: "inline-flex", alignItems: "center", gap: 5, background: isOpen ? C.brandSoft : C.bg, border: "1px solid " + (isOpen ? C.brand : C.line), borderRadius: R.pill, padding: "3px 10px", cursor: "pointer", color: isOpen ? C.brandInk : C.sub, fontSize: 11.5, fontWeight: 700, whiteSpace: "nowrap" }}>
+                        <span style={{ transform: isOpen ? "rotate(90deg)" : "none", transition: "transform .15s", fontSize: 10 }}>▶</span>Levels
+                      </button>
                       <Pill tone="muted">{q.difficulty}</Pill>
-                      <LevelChip level={q.level || pack.level} levels={levels} size="xs" />
                       <button onClick={() => toggleQ(q)} title="Toggle active" style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}><Badge kind={q.status} /></button>
                     </div>
                     <div className="pm-qrow-actions">
                       <Btn variant="ghost" size="sm" onClick={() => setQEdit(q)}>Edit</Btn>
                       <Btn variant="danger" size="sm" onClick={() => delQ(q)}>Delete</Btn>
                     </div>
+                  </div>
+                  {isOpen && (
+                    <div style={{ borderTop: "1px solid " + C.lineSoft, background: C.bg + "80", padding: "8px 12px 10px" }}>
+                      <QuestionLevelsPanel question={q} packLevel={pack.level} levels={levels} />
+                    </div>
+                  )}
                   </div>
                 );
               })}

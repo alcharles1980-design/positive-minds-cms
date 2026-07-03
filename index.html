@@ -5342,6 +5342,11 @@ config → data layer → design tokens → hooks → primitives → feature vie
   have nullable \`level\`, \`letter_position\`, \`letter_grouping\` (null = inherit).
   The blank SHAPE is computed by maskWord(word, letters, position, grouping) and the
   effective settings resolve question-override → level-default (effectiveMask helper).
+- \`pm_question_levels\` — per-question, per-level OVERRIDES. Every question is a single
+  "concept" that auto-renders all 10 levels (buildLevelVariants derives each level's blank
+  from the question + the level rules). A row exists here ONLY when a specific level's
+  version was hand-edited (override sentence/word/letters/position/grouping, or disabled).
+  In the question bank, each row has a "Levels" expand toggle showing all 10 variants.
 
 **View:** \`pm_pack_overview\` — packs + active_questions + total_questions +
 has_pending_changes (= content_version > released_version).
@@ -5431,6 +5436,12 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Questions are multi-level concepts:** each question auto-renders all 10 levels (same
+  affirmation, blank difficulty derived per level via buildLevelVariants). The question bank
+  keeps flat rows with a "Levels" expand toggle that reveals every level's version. Any level
+  can be individually edited (override sentence/word/letters/position/grouping or disabled),
+  stored in pm_question_levels; un-edited levels stay auto-generated. Reset returns a level
+  to auto.
 - **Blank shape control:** levels now also define WHERE missing letters sit
   (letter_position: start/middle/end/random) and whether multiple hidden letters are
   grouped or spread (letter_grouping). maskWord() generates the actual blank; the "how the
@@ -5519,6 +5530,10 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
   maskWord(word, letters, position, grouping) generates the blank; effectiveMask(q, packLevel,
   levels) resolves the override→default chain. If you change how blanks render, update
   maskWord in ONE place — every view (preview, rows, PlayMode) and the search RPC use it.
+- Multi-level concepts: every question renders all 10 levels via buildLevelVariants (question
+  + level rules → per-level blank). Overrides live in pm_question_levels (one row per edited
+  level; absent = auto-generated). The question-bank row expands to show all variants. Don't
+  duplicate a question into 10 rows — it's ONE row, derived.
   If you add a column to pm_packs, DROP+recreate pm_pack_overview (it uses p.*).
 - RLS: anon read-only, authenticated full write. Never add anon write policies.
 
@@ -5942,6 +5957,55 @@ const db_levels = {
   }).then(r => r.data?.[0])
 };
 
+// Per-question, per-level overrides (rows exist only where a level was hand-edited).
+const db_qlevels = {
+  forQuestion: qid => rest(`pm_question_levels?question_id=eq.${qid}&order=level.asc&limit=50`).then(r => r.data || []),
+  upsert: row => rest("pm_question_levels", {
+    method: "POST",
+    headers: {
+      Prefer: "resolution=merge-duplicates,return=representation"
+    },
+    body: row
+  }).then(r => r.data?.[0]),
+  reset: (qid, level) => rest(`pm_question_levels?question_id=eq.${qid}&level=eq.${level}`, {
+    method: "DELETE"
+  })
+};
+
+// Build all level variants for a question. `overrides` is a map { [level]: overrideRow }.
+// Each variant renders the SAME concept at that level's blank difficulty.
+const buildLevelVariants = (q, levels, overrides = {}) => {
+  return (levels || []).map(lvl => {
+    const ov = overrides[lvl.level] || {};
+    const hasOv = Object.keys(ov).filter(k => !["question_id", "level", "updated_at"].includes(k) && ov[k] != null).length > 0;
+    const template = ov.template ?? q.template;
+    const answer = ov.answer ?? q.answer;
+    const alt = ov.alt_answer ?? q.alt_answer;
+    const word = (answer || "").toUpperCase();
+    const isWord = lvl.hidden_mode === "word";
+    const letters = ov.letters_hidden ?? (isWord ? word.length : Math.min(lvl.letters_hidden_default || 2, Math.max(1, word.length - 1)));
+    const position = ov.letter_position ?? lvl.letter_position ?? "end";
+    const grouping = ov.letter_grouping ?? lvl.letter_grouping ?? "grouped";
+    const blank = isWord || letters >= word.length ? "_".repeat(Math.max(3, word.length)) : maskWord(word, letters, position, grouping);
+    const sentence = (template || "").replace(/\{blank\}/g, blank);
+    return {
+      level: lvl.level,
+      name: lvl.name,
+      color: lvl.color,
+      tier: lvl.tier,
+      sentence,
+      blank,
+      letters,
+      position,
+      grouping,
+      opts: [answer, alt].filter(Boolean).map(w => w.toUpperCase()).join(" / "),
+      isOverride: hasOv,
+      enabled: ov.enabled !== false,
+      override: ov
+    };
+  });
+};
+
 // Small helper: a colored level chip used across the app.
 function LevelChip({
   level,
@@ -6363,6 +6427,330 @@ function LevelEditor({
     onClick: submit,
     disabled: busy
   }, busy ? "Saving…" : "Save level")));
+}
+
+// ============================================================
+// Expandable per-question level variants (shown in the question bank)
+// ============================================================
+function QuestionLevelsPanel({
+  question,
+  packLevel,
+  levels
+}) {
+  const {
+    loading,
+    data,
+    reload
+  } = useAsync(() => db_qlevels.forQuestion(question.id), [question.id]);
+  const [editLevel, setEditLevel] = useState(null);
+  const overrides = {};
+  (data || []).forEach(r => {
+    overrides[r.level] = r;
+  });
+  const variants = buildLevelVariants(question, levels, overrides);
+  const saveOverride = async (level, patch) => {
+    await db_qlevels.upsert({
+      question_id: question.id,
+      level,
+      ...patch
+    });
+    await reload();
+    notify(`Level ${level} version updated`);
+  };
+  const resetLevel = async level => {
+    const ok = await confirmDialog({
+      title: `Reset Level ${level}?`,
+      body: "This level will go back to the auto-generated version.",
+      confirmText: "Reset",
+      tone: "danger"
+    });
+    if (!ok) return;
+    await db_qlevels.reset(question.id, level);
+    await reload();
+    notify(`Level ${level} reset to auto`);
+  };
+  if (loading) return /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: S.md
+    }
+  }, /*#__PURE__*/React.createElement(Spinner, {
+    label: "Loading levels…"
+  }));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "4px 2px 2px",
+      display: "grid",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: C.faint,
+      fontWeight: 700,
+      padding: "2px 4px 6px"
+    }
+  }, "The same affirmation at every level. Auto-generated from the level rules; edit any to customize."), variants.map(v => /*#__PURE__*/React.createElement("div", {
+    key: v.level,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 12,
+      padding: "9px 12px",
+      background: v.enabled ? C.bg : C.lineSoft,
+      borderRadius: R.sm,
+      border: "1px solid " + C.lineSoft,
+      borderLeft: `3px solid ${v.color}`,
+      opacity: v.enabled ? 1 : 0.5
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 30,
+      flexShrink: 0,
+      fontSize: 12,
+      fontWeight: 900,
+      color: v.color
+    }
+  }, "L", v.level), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13.5,
+      color: C.ink,
+      fontWeight: 500,
+      whiteSpace: "nowrap",
+      overflow: "hidden",
+      textOverflow: "ellipsis"
+    }
+  }, v.sentence), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: C.faint,
+      marginTop: 1
+    }
+  }, v.name, v.isOverride && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: C.brandInk,
+      fontWeight: 700
+    }
+  }, " · edited"))), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: "ui-monospace, monospace",
+      fontSize: 13,
+      fontWeight: 700,
+      letterSpacing: 2,
+      color: v.color,
+      flexShrink: 0
+    }
+  }, v.blank), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 4,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setEditLevel(v),
+    title: "Edit this level",
+    style: miniBtn(C)
+  }, "Edit"), v.isOverride && /*#__PURE__*/React.createElement("button", {
+    onClick: () => resetLevel(v.level),
+    title: "Reset to auto",
+    style: miniBtn(C, true)
+  }, "↺")))), /*#__PURE__*/React.createElement(Modal, {
+    open: editLevel !== null,
+    onClose: () => setEditLevel(null),
+    width: 520
+  }, editLevel !== null && /*#__PURE__*/React.createElement(QuestionLevelEditor, {
+    question: question,
+    variant: editLevel,
+    onSave: saveOverride,
+    onClose: () => setEditLevel(null)
+  })));
+}
+const miniBtn = (C, ghost) => ({
+  fontSize: 12,
+  fontWeight: 700,
+  padding: "5px 10px",
+  borderRadius: 8,
+  cursor: "pointer",
+  border: "1px solid " + C.line,
+  background: ghost ? "transparent" : C.panel,
+  color: ghost ? C.sub : C.ink2
+});
+function QuestionLevelEditor({
+  question,
+  variant,
+  onSave,
+  onClose
+}) {
+  const ov = variant.override || {};
+  const [f, setF] = useState({
+    template: ov.template ?? "",
+    answer: ov.answer ?? "",
+    alt_answer: ov.alt_answer ?? "",
+    letters_hidden: ov.letters_hidden ?? "",
+    letter_position: ov.letter_position ?? "",
+    letter_grouping: ov.letter_grouping ?? "",
+    enabled: ov.enabled !== false
+  });
+  const [busy, setBusy] = useState(false);
+  const set = (k, val) => setF(p => ({
+    ...p,
+    [k]: val
+  }));
+  // live preview using the overrides-on-top-of-concept
+  const merged = {
+    template: f.template || question.template,
+    answer: f.answer || question.answer,
+    alt_answer: f.alt_answer || question.alt_answer
+  };
+  const previewLetters = f.letters_hidden === "" ? variant.letters : parseInt(f.letters_hidden);
+  const pos = f.letter_position || variant.position,
+    grp = f.letter_grouping || variant.grouping;
+  const word = (merged.answer || "").toUpperCase();
+  const blank = variant.tier === "advanced" && !f.letters_hidden || previewLetters >= word.length ? "_".repeat(Math.max(3, word.length)) : maskWord(word, previewLetters || 0, pos, grp);
+  const previewSentence = (merged.template || "").replace(/\{blank\}/g, blank);
+  const submit = async () => {
+    setBusy(true);
+    const patch = {
+      template: f.template.trim() || null,
+      answer: f.answer.trim().toUpperCase() || null,
+      alt_answer: f.alt_answer.trim().toUpperCase() || null,
+      letters_hidden: f.letters_hidden === "" ? null : parseInt(f.letters_hidden),
+      letter_position: f.letter_position || null,
+      letter_grouping: f.letter_grouping || null,
+      enabled: f.enabled
+    };
+    try {
+      await onSave(variant.level, patch);
+      onClose();
+    } catch {
+      setBusy(false);
+    }
+  };
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(ModalHead, {
+    title: `Level ${variant.level} — ${variant.name}`,
+    subtitle: "Customize this level's version. Leave a field blank to keep the auto value."
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: S.xl,
+      display: "grid",
+      gap: S.md,
+      maxHeight: "60vh",
+      overflowY: "auto"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.brandSoft,
+      borderRadius: R.md,
+      padding: "12px 14px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10.5,
+      fontWeight: 800,
+      color: C.brandInk,
+      letterSpacing: 0.4,
+      textTransform: "uppercase",
+      marginBottom: 6
+    }
+  }, "How the child sees it"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      color: C.ink,
+      fontWeight: 500
+    }
+  }, previewSentence), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: C.brandInk,
+      fontWeight: 800,
+      marginTop: 4
+    }
+  }, "→ ", [merged.answer, merged.alt_answer].filter(Boolean).map(w => w.toUpperCase()).join(" / "))), /*#__PURE__*/React.createElement(Field, {
+    label: "Sentence",
+    hint: "Blank to inherit the concept's sentence"
+  }, /*#__PURE__*/React.createElement(Textarea, {
+    value: f.template,
+    onChange: e => set("template", e.target.value),
+    rows: 2,
+    placeholder: question.template
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "pm-form-2"
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Word",
+    hint: "Blank = inherit"
+  }, /*#__PURE__*/React.createElement(Input, {
+    value: f.answer,
+    onChange: e => set("answer", e.target.value),
+    placeholder: question.answer
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Alt word",
+    hint: "Blank = inherit"
+  }, /*#__PURE__*/React.createElement(Input, {
+    value: f.alt_answer,
+    onChange: e => set("alt_answer", e.target.value),
+    placeholder: question.alt_answer || "—"
+  }))), /*#__PURE__*/React.createElement("div", {
+    className: "pm-form-2"
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Letters hidden",
+    hint: "Blank = level default"
+  }, /*#__PURE__*/React.createElement(Input, {
+    type: "number",
+    min: 0,
+    value: f.letters_hidden,
+    onChange: e => set("letters_hidden", e.target.value),
+    placeholder: String(variant.letters)
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Enabled",
+    hint: "Turn this level off for this concept"
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: f.enabled ? "yes" : "no",
+    onChange: e => set("enabled", e.target.value === "yes")
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "yes"
+  }, "Enabled"), /*#__PURE__*/React.createElement("option", {
+    value: "no"
+  }, "Disabled")))), /*#__PURE__*/React.createElement("div", {
+    className: "pm-form-2"
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Position",
+    hint: "Blank = level default"
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: f.letter_position,
+    onChange: e => set("letter_position", e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "Inherit level"), /*#__PURE__*/React.createElement("option", {
+    value: "start"
+  }, "Towards start"), /*#__PURE__*/React.createElement("option", {
+    value: "middle"
+  }, "Towards middle"), /*#__PURE__*/React.createElement("option", {
+    value: "end"
+  }, "Towards end"), /*#__PURE__*/React.createElement("option", {
+    value: "random"
+  }, "Random"))), /*#__PURE__*/React.createElement(Field, {
+    label: "Grouping",
+    hint: "Blank = level default"
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: f.letter_grouping,
+    onChange: e => set("letter_grouping", e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "Inherit level"), /*#__PURE__*/React.createElement("option", {
+    value: "grouped"
+  }, "Grouped"), /*#__PURE__*/React.createElement("option", {
+    value: "spread"
+  }, "Spread"))))), /*#__PURE__*/React.createElement(ModalFoot, null, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: onClose
+  }, "Cancel"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: submit,
+    disabled: busy
+  }, busy ? "Saving…" : "Save this level")));
 }
 
 // ===== views1.jsx =====
@@ -6981,6 +7369,12 @@ function PackDetail({
   const [bulk, setBulk] = useState(false);
   const [play, setPlay] = useState(false);
   const [sel, setSel] = useState(new Set());
+  const [expanded, setExpanded] = useState(new Set());
+  const toggleExpand = id => setExpanded(prev => {
+    const n = new Set(prev);
+    n.has(id) ? n.delete(id) : n.add(id);
+    return n;
+  });
   const [search, setSearch] = useState("");
   const [diffF, setDiffF] = useState("all");
   const load = useCallback(async () => {
@@ -7305,14 +7699,22 @@ function PackDetail({
     const em = effectiveMask(q, pack.level, levels);
     const pv = previewQuestion(q.template, q.answer, q.alt_answer, q.letters_hidden, q.difficulty, em.position, em.grouping);
     const selected = sel.has(q.id);
+    const isOpen = expanded.has(q.id);
     return /*#__PURE__*/React.createElement("div", {
       key: q.id,
+      style: {
+        borderRadius: R.md,
+        border: "1px solid " + (selected ? C.brand : isOpen ? C.brand2 : C.line),
+        background: selected ? C.brandSoft : C.panel,
+        overflow: "hidden",
+        opacity: q.status === "active" ? 1 : 0.6
+      }
+    }, /*#__PURE__*/React.createElement("div", {
       className: "pm-qrow",
       style: {
-        background: selected ? C.brandSoft : C.panel,
-        borderRadius: R.md,
-        border: "1px solid " + (selected ? C.brand : C.line),
-        opacity: q.status === "active" ? 1 : 0.6
+        background: "transparent",
+        border: "none",
+        borderRadius: 0
       }
     }, /*#__PURE__*/React.createElement("input", {
       type: "checkbox",
@@ -7343,13 +7745,33 @@ function PackDetail({
       }
     }, "→ ", pv.opts)), /*#__PURE__*/React.createElement("div", {
       className: "pm-qrow-meta"
-    }, /*#__PURE__*/React.createElement(Pill, {
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: () => toggleExpand(q.id),
+      title: isOpen ? "Hide levels" : "Show all levels",
+      "aria-expanded": isOpen,
+      style: {
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5,
+        background: isOpen ? C.brandSoft : C.bg,
+        border: "1px solid " + (isOpen ? C.brand : C.line),
+        borderRadius: R.pill,
+        padding: "3px 10px",
+        cursor: "pointer",
+        color: isOpen ? C.brandInk : C.sub,
+        fontSize: 11.5,
+        fontWeight: 700,
+        whiteSpace: "nowrap"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        transform: isOpen ? "rotate(90deg)" : "none",
+        transition: "transform .15s",
+        fontSize: 10
+      }
+    }, "▶"), "Levels"), /*#__PURE__*/React.createElement(Pill, {
       tone: "muted"
-    }, q.difficulty), /*#__PURE__*/React.createElement(LevelChip, {
-      level: q.level || pack.level,
-      levels: levels,
-      size: "xs"
-    }), /*#__PURE__*/React.createElement("button", {
+    }, q.difficulty), /*#__PURE__*/React.createElement("button", {
       onClick: () => toggleQ(q),
       title: "Toggle active",
       style: {
@@ -7370,7 +7792,17 @@ function PackDetail({
       variant: "danger",
       size: "sm",
       onClick: () => delQ(q)
-    }, "Delete")));
+    }, "Delete"))), isOpen && /*#__PURE__*/React.createElement("div", {
+      style: {
+        borderTop: "1px solid " + C.lineSoft,
+        background: C.bg + "80",
+        padding: "8px 12px 10px"
+      }
+    }, /*#__PURE__*/React.createElement(QuestionLevelsPanel, {
+      question: q,
+      packLevel: pack.level,
+      levels: levels
+    })));
   })), pages > 1 && /*#__PURE__*/React.createElement(Pager, {
     page: page,
     pages: pages,
