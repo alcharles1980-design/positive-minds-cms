@@ -132,26 +132,76 @@ const db = {
 // ============================================================
 // Design tokens
 // ============================================================
+// Colors reference CSS variables so a `data-theme` swap re-skins instantly.
+const V = (name) => `var(--${name})`;
 const C = {
-  bg: "#F6F5FB", bgDeep: "#EEEBF7", panel: "#FFFFFF",
-  ink: "#191728", ink2: "#4A4763", sub: "#6E6B85", faint: "#A29FB6",
-  line: "#EAE7F3", lineSoft: "#F2F0F8",
-  brand: "#6C4CE0", brand2: "#8A6EF0", brandSoft: "#EEE9FD", brandInk: "#4A32B0",
-  good: "#12A594", goodSoft: "#DEF5F1", goodInk: "#0A6B60",
-  warn: "#E08A2B", warnSoft: "#FBEEDD", warnInk: "#9C5B14",
-  danger: "#E5484D", dangerSoft: "#FCE9E9", dangerInk: "#B02A2E",
-  info: "#4C82E0", infoSoft: "#E5EDFB",
+  bg: V("bg"), bgDeep: V("bgDeep"), panel: V("panel"),
+  ink: V("ink"), ink2: V("ink2"), sub: V("sub"), faint: V("faint"),
+  line: V("line"), lineSoft: V("lineSoft"),
+  brand: V("brand"), brand2: V("brand2"), brandSoft: V("brandSoft"), brandInk: V("brandInk"),
+  good: V("good"), goodSoft: V("goodSoft"), goodInk: V("goodInk"),
+  warn: V("warn"), warnSoft: V("warnSoft"), warnInk: V("warnInk"),
+  danger: V("danger"), dangerSoft: V("dangerSoft"), dangerInk: V("dangerInk"),
+  info: V("info"), infoSoft: V("infoSoft"),
 };
+// The actual values, per theme — injected as CSS vars in GlobalStyle.
+const THEMES = {
+  light: {
+    bg: "#F6F5FB", bgDeep: "#EEEBF7", panel: "#FFFFFF",
+    ink: "#191728", ink2: "#4A4763", sub: "#6E6B85", faint: "#A29FB6",
+    line: "#EAE7F3", lineSoft: "#F2F0F8",
+    brand: "#6C4CE0", brand2: "#8A6EF0", brandSoft: "#EEE9FD", brandInk: "#4A32B0",
+    good: "#12A594", goodSoft: "#DEF5F1", goodInk: "#0A6B60",
+    warn: "#E08A2B", warnSoft: "#FBEEDD", warnInk: "#9C5B14",
+    danger: "#E5484D", dangerSoft: "#FCE9E9", dangerInk: "#B02A2E",
+    info: "#4C82E0", infoSoft: "#E5EDFB",
+  },
+  dark: {
+    bg: "#131120", bgDeep: "#0D0B16", panel: "#1C1930",
+    ink: "#F3F1FB", ink2: "#C9C5DC", sub: "#9995B0", faint: "#6B6885",
+    line: "#2C2942", lineSoft: "#242138",
+    brand: "#9B7BF0", brand2: "#B49CF6", brandSoft: "#2A2350", brandInk: "#C7B5FA",
+    good: "#2CC7B4", goodSoft: "#123B37", goodInk: "#7EE8DA",
+    warn: "#F0A54C", warnSoft: "#3A2A12", warnInk: "#F5C58A",
+    danger: "#F0666B", dangerSoft: "#3A1618", dangerInk: "#F7A0A3",
+    info: "#6D9BF0", infoSoft: "#1A2540",
+  },
+};
+const themeVars = (name) => Object.entries(THEMES[name]).map(([k, v]) => `--${k}:${v};`).join("");
 const S = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32, xxxl: 48 };
 const R = { sm: 8, md: 11, lg: 14, xl: 18, pill: 999 };
 const SH = {
-  sm: "0 1px 2px rgba(25,23,40,0.06)",
-  md: "0 4px 14px rgba(25,23,40,0.08)",
-  lg: "0 12px 32px rgba(25,23,40,0.12)",
-  xl: "0 24px 60px rgba(25,23,40,0.18)",
+  sm: `0 1px 2px ${V("shadow1")}`,
+  md: `0 4px 14px ${V("shadow2")}`,
+  lg: `0 12px 32px ${V("shadow2")}`,
+  xl: `0 24px 60px ${V("shadow3")}`,
   brand: "0 6px 18px rgba(108,76,224,0.30)",
 };
+// shadow strengths per theme
+THEMES.light.shadow1 = "rgba(25,23,40,0.06)"; THEMES.light.shadow2 = "rgba(25,23,40,0.10)"; THEMES.light.shadow3 = "rgba(25,23,40,0.18)";
+THEMES.dark.shadow1 = "rgba(0,0,0,0.4)"; THEMES.dark.shadow2 = "rgba(0,0,0,0.5)"; THEMES.dark.shadow3 = "rgba(0,0,0,0.65)";
 const FONT = "'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+
+// Theme controller: system | light | dark, persisted.
+const themeCtl = {
+  key: "pm_theme",
+  get() { try { return localStorage.getItem(this.key) || "system"; } catch { return "system"; } },
+  resolved(pref) { const p = pref || this.get(); if (p === "system") return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; return p; },
+  set(pref) { try { localStorage.setItem(this.key, pref); } catch {}; this.apply(pref); },
+  apply(pref) { document.documentElement.setAttribute("data-theme", this.resolved(pref)); },
+};
+const useTheme = () => {
+  const [pref, setPref] = useState(themeCtl.get());
+  useEffect(() => {
+    themeCtl.apply(pref);
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const on = () => { if (themeCtl.get() === "system") themeCtl.apply("system"); };
+    mq.addEventListener?.("change", on);
+    return () => mq.removeEventListener?.("change", on);
+  }, [pref]);
+  const set = (p) => { themeCtl.set(p); setPref(p); };
+  return { pref, resolved: themeCtl.resolved(pref), set };
+};
 
 const STATUS = {
   published: { bg: C.goodSoft, fg: C.goodInk, label: "Published", dot: C.good },
@@ -443,6 +493,7 @@ const Skeleton = ({ h = 16, w = "100%", r = 8, style }) => (
 // ============================================================
 const EMOJIS = ["💪","😊","🧘","🎯","🎓","💡","🛡️","🤝","🫶","🌟","🗣️","👨‍👩‍👧","🌈","🕊️","❤️","🌱","✨","🧠","🔆","🦋","🌞","🏆","🎨","🚀"];
 const COLORS = ["#F39C12","#E84393","#00B894","#0984E3","#6C4CE0","#FDCB6E","#D63031","#00CEC9","#E17055","#FAB1A0","#74B9FF","#A29BFE","#55EFC4","#81ECEC"];
+const PACK_TAG_SUGGESTIONS = ["emotions","confidence","social","calm","focus","resilience","gratitude","school-ready","ages-5-7","ages-8-10","starter","advanced"];
 
 function PackEditor({ pack, onSave, onClose }) {
   const isNew = !pack?.id;
@@ -450,6 +501,7 @@ function PackEditor({ pack, onSave, onClose }) {
     name: pack?.name || "", slug: pack?.slug || "", emoji: pack?.emoji || "💪",
     description: pack?.description || "", color: pack?.color || C.brand,
     difficulty: pack?.difficulty || "basic", status: pack?.status || "draft", is_custom: pack?.is_custom || false,
+    tags: pack?.tags || [],
   });
   const [slugTouched, setSlugTouched] = useState(!isNew);
   const [busy, setBusy] = useState(false);
@@ -486,6 +538,9 @@ function PackEditor({ pack, onSave, onClose }) {
         </div>
         <Field label="Description" hint="Short blurb shown on the pack card">
           <Textarea value={f.description} onChange={(e) => set("description", e.target.value)} rows={2} placeholder="Believe in yourself and take pride in what you do." />
+        </Field>
+        <Field label="Tags" hint="Enter or comma to add — for cross-cutting organization">
+          <TagInput tags={f.tags} onChange={(t) => set("tags", t)} suggestions={PACK_TAG_SUGGESTIONS} />
         </Field>
         <Field label="Icon">
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -668,6 +723,323 @@ function BulkImport({ packId, onDone, onClose }) {
   );
 }
 
+// ===== features.jsx =====
+// ============================================================
+// Command Palette (⌘K) — fuzzy launcher
+// ============================================================
+function CommandPalette({ open, onClose, commands }) {
+  const [q, setQ] = useState("");
+  const [sel, setSel] = useState(0);
+  const listRef = useRef(null);
+  useEffect(() => { if (open) { setQ(""); setSel(0); } }, [open]);
+
+  const fuzzy = (text, query) => {
+    if (!query) return 1;
+    text = text.toLowerCase(); query = query.toLowerCase();
+    if (text.includes(query)) return 2 - text.indexOf(text) / 100;
+    let ti = 0, score = 0;
+    for (const ch of query) { const idx = text.indexOf(ch, ti); if (idx === -1) return 0; score += 1 / (idx - ti + 1); ti = idx + 1; }
+    return score / query.length;
+  };
+  const results = useMemo(() => commands
+    .map(c => ({ ...c, score: Math.max(fuzzy(c.label, q), (c.keywords || []).reduce((m, k) => Math.max(m, fuzzy(k, q)), 0) * 0.8) }))
+    .filter(c => c.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 8), [commands, q]);
+  useEffect(() => { setSel(0); }, [q]);
+
+  const run = (c) => { onClose(); c.run(); };
+  const onKey = (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); setSel(s => Math.min(s + 1, results.length - 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setSel(s => Math.max(s - 1, 0)); }
+    else if (e.key === "Enter") { e.preventDefault(); results[sel] && run(results[sel]); }
+  };
+
+  if (!open) return null;
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(25,23,40,0.5)", backdropFilter: "blur(3px)", zIndex: 200, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "12vh 20px 20px" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: C.panel, borderRadius: R.xl, width: "100%", maxWidth: 560, boxShadow: SH.xl, overflow: "hidden", border: "1px solid " + C.line }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "16px 18px", borderBottom: "1px solid " + C.line }}>
+          <span style={{ fontSize: 18, color: C.faint }}>⌕</span>
+          <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={onKey} placeholder="Type a command or search…" className="pm-input"
+            style={{ flex: 1, border: "none", outline: "none", fontSize: 16, fontFamily: "inherit", background: "transparent", color: C.ink }} />
+          <kbd style={kbdStyle}>esc</kbd>
+        </div>
+        <div ref={listRef} style={{ maxHeight: 340, overflowY: "auto", padding: 8 }}>
+          {results.length === 0 ? (
+            <div style={{ padding: "28px 16px", textAlign: "center", color: C.faint, fontSize: 14 }}>No commands match “{q}”.</div>
+          ) : results.map((c, i) => (
+            <button key={c.id} onClick={() => run(c)} onMouseEnter={() => setSel(i)}
+              style={{ display: "flex", alignItems: "center", gap: 12, width: "100%", textAlign: "left", padding: "11px 12px", borderRadius: R.md, border: "none", cursor: "pointer", fontFamily: "inherit",
+                background: i === sel ? C.brandSoft : "transparent", color: C.ink, transition: "background .1s" }}>
+              <span style={{ fontSize: 17, width: 24, textAlign: "center" }}>{c.icon}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 700 }}>{c.label}</div>
+                {c.hint && <div style={{ fontSize: 12, color: C.sub, marginTop: 1 }}>{c.hint}</div>}
+              </div>
+              {c.section && <span style={{ fontSize: 11, color: C.faint, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>{c.section}</span>}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+const kbdStyle = { fontSize: 11, fontWeight: 700, color: C.sub, background: C.lineSoft, border: "1px solid " + C.line, borderRadius: 6, padding: "2px 7px", fontFamily: "inherit" };
+
+// ============================================================
+// Play Mode — experience a pack like a child would
+// ============================================================
+function PlayMode({ pack, onClose }) {
+  const [questions, setQuestions] = useState(null);
+  const [i, setI] = useState(0);
+  const [picked, setPicked] = useState(null);
+  const [correct, setCorrect] = useState(0);
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const { data } = await db.questions(pack.id, { page: 0, size: 100 });
+      setQuestions((data || []).filter(q => q.status === "active"));
+    })();
+  }, [pack.id]);
+
+  const q = questions?.[i];
+  const options = useMemo(() => {
+    if (!q) return [];
+    const opts = [q.answer, q.alt_answer].filter(Boolean);
+    return opts.sort(() => Math.random() - 0.5); // both are "correct"; order shuffled
+  }, [q]);
+
+  const pick = (opt) => {
+    if (picked) return;
+    setPicked(opt);
+    setCorrect(c => c + 1); // any positive word is a valid choice
+    setTimeout(() => {
+      if (i + 1 >= questions.length) setDone(true);
+      else { setI(i + 1); setPicked(null); }
+    }, 900);
+  };
+
+  const restart = () => { setI(0); setPicked(null); setCorrect(0); setDone(false); };
+  const pv = q ? previewQuestion(q.template, q.answer, q.alt_answer, q.letters_hidden, q.difficulty) : null;
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 150, background: `linear-gradient(160deg, ${pack.color}22, ${C.bg} 55%)`, display: "flex", flexDirection: "column", fontFamily: FONT }}>
+      {/* header */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "16px 20px", borderBottom: "1px solid " + C.line, background: C.panel }}>
+        <div style={{ fontSize: 26 }}>{pack.emoji}</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: C.ink }}>{pack.name}</div>
+          <div style={{ fontSize: 12, color: C.sub }}>Play preview{questions ? ` · ${questions.length} questions` : ""}</div>
+        </div>
+        <Btn variant="ghost" size="sm" onClick={onClose}>✕ Exit</Btn>
+      </div>
+
+      {/* progress bar */}
+      {questions && questions.length > 0 && !done && (
+        <div style={{ height: 5, background: C.line }}>
+          <div style={{ height: "100%", width: `${((i) / questions.length) * 100}%`, background: pack.color, transition: "width .3s" }} />
+        </div>
+      )}
+
+      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, overflowY: "auto" }}>
+        {questions === null ? <Spinner label="Loading pack…" />
+          : questions.length === 0 ? (
+            <EmptyState icon="🫙" title="No active questions" body="This pack has no active questions to play. Add some or activate existing ones." action={<Btn onClick={onClose}>Back to editing</Btn>} />
+          ) : done ? (
+            <div style={{ textAlign: "center", maxWidth: 420 }}>
+              <div style={{ fontSize: 56, marginBottom: 10 }}>🌟</div>
+              <div style={{ fontSize: 26, fontWeight: 800, color: C.ink }}>All done!</div>
+              <div style={{ fontSize: 15, color: C.sub, margin: "8px 0 24px" }}>You completed all {questions.length} affirmations in “{pack.name}”. Every answer is a positive choice.</div>
+              <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
+                <Btn variant="soft" onClick={restart} icon="↻">Play again</Btn>
+                <Btn onClick={onClose}>Back to editing</Btn>
+              </div>
+            </div>
+          ) : (
+            <div style={{ width: "100%", maxWidth: 560, textAlign: "center" }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: C.faint, letterSpacing: 0.5, marginBottom: 20 }}>QUESTION {i + 1} OF {questions.length}</div>
+              <div style={{ background: C.panel, borderRadius: R.xl, padding: "36px 28px", boxShadow: SH.lg, border: "1px solid " + C.line }}>
+                <div style={{ fontSize: 26, fontWeight: 700, color: C.ink, lineHeight: 1.4, marginBottom: 32 }}>{pv.sentence}</div>
+                <div style={{ display: "grid", gap: 12 }}>
+                  {options.map(opt => {
+                    const isPicked = picked === opt;
+                    return (
+                      <button key={opt} onClick={() => pick(opt)} disabled={!!picked}
+                        style={{ padding: "16px 20px", fontSize: 19, fontWeight: 800, borderRadius: R.lg, cursor: picked ? "default" : "pointer", fontFamily: "inherit",
+                          border: "2px solid " + (isPicked ? pack.color : C.line),
+                          background: isPicked ? pack.color : (picked ? C.lineSoft : C.panel),
+                          color: isPicked ? "#fff" : C.ink, transition: "all .2s", transform: isPicked ? "scale(1.02)" : "scale(1)" }}>
+                        {opt}{isPicked && " ✓"}
+                      </button>
+                    );
+                  })}
+                </div>
+                {picked && <div style={{ marginTop: 20, fontSize: 15, fontWeight: 700, color: C.good }}>Great choice! 💚</div>}
+              </div>
+              <div style={{ fontSize: 12.5, color: C.faint, marginTop: 16 }}>Tip: in the real game, both words are positive — the child picks whichever feels most like them.</div>
+            </div>
+          )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// Content Health (lint) — flags dupes, weak, invalid questions
+// ============================================================
+function HealthView({ onOpenPack }) {
+  const { loading, error, data, reload } = useAsync(async () => {
+    const [summary, details] = await Promise.all([rpc("pm_lint"), rpc("pm_lint_details")]);
+    return { summary, details: details || [] };
+  }, []);
+  if (error) return <ErrorState error={error} onRetry={reload} />;
+  const s = data?.summary || {};
+  const details = data?.details || [];
+  const totalIssues = (s.invalid_template || 0) + (s.missing_alt || 0) + (s.duplicates || 0);
+
+  const sevStyle = { error: { bg: C.dangerSoft, fg: C.dangerInk, dot: C.danger, label: "Error" }, warning: { bg: C.warnSoft, fg: C.warnInk, dot: C.warn, label: "Warning" } };
+  const issueLabel = { invalid_template: "Invalid template", missing_alt: "Missing 2nd option", duplicate: "Duplicate" };
+
+  return (
+    <div>
+      <div style={{ marginBottom: S.lg }}>
+        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Content health</h1>
+        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>Automated checks across your whole library.</p>
+      </div>
+      <div className="pm-stats" style={{ marginBottom: S.lg }}>
+        <HealthStat n={loading ? "…" : totalIssues} label="Total issues" color={totalIssues ? C.warn : C.good} />
+        <HealthStat n={loading ? "…" : (s.invalid_template || 0)} label="Invalid templates" color={s.invalid_template ? C.danger : C.faint} />
+        <HealthStat n={loading ? "…" : (s.missing_alt || 0)} label="Missing 2nd option" color={s.missing_alt ? C.warn : C.faint} />
+        <HealthStat n={loading ? "…" : (s.duplicates || 0)} label="Duplicates" color={s.duplicates ? C.warn : C.faint} />
+      </div>
+      {loading ? <div style={{ display: "grid", gap: 10 }}>{[0,1,2].map(i => <Skeleton key={i} h={56} r={12} />)}</div>
+        : totalIssues === 0 ? <EmptyState icon="✅" title="Everything looks healthy" body="No invalid templates, missing options, or duplicates found. Nice work." />
+        : (
+          <div style={{ display: "grid", gap: 10 }}>
+            {details.map((d, idx) => {
+              const sev = sevStyle[d.severity] || sevStyle.warning;
+              return (
+                <div key={idx} style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.md, padding: "14px 16px", display: "flex", alignItems: "center", gap: 14 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 99, background: sev.dot, flexShrink: 0 }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>{d.label || "(untitled)"} <span style={{ fontSize: 12, fontWeight: 600, color: sev.fg, background: sev.bg, padding: "1px 7px", borderRadius: 5, marginLeft: 6 }}>{issueLabel[d.issue] || d.issue}</span></div>
+                    <div style={{ fontSize: 12.5, color: C.sub, marginTop: 2 }}>{d.detail}</div>
+                  </div>
+                  {d.pack_id && <Btn variant="ghost" size="sm" onClick={() => onOpenPack(d.pack_id)}>Open pack</Btn>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      {!loading && s.thin_packs > 0 && (
+        <div style={{ marginTop: S.lg, background: C.infoSoft, borderRadius: R.md, padding: "14px 16px", fontSize: 13.5, color: C.ink2 }}>
+          <b>{s.thin_packs}</b> pack{s.thin_packs === 1 ? " has" : "s have"} only 1–2 questions. Consider adding more so they're satisfying to play.
+        </div>
+      )}
+    </div>
+  );
+}
+const HealthStat = ({ n, label, color }) => (
+  <div style={{ background: C.panel, borderRadius: R.lg, padding: "18px 20px", border: "1px solid " + C.line }}>
+    <div style={{ fontSize: 30, fontWeight: 800, color, lineHeight: 1 }}>{n}</div>
+    <div style={{ fontSize: 12.5, color: C.sub, marginTop: 7, fontWeight: 600 }}>{label}</div>
+  </div>
+);
+
+// ============================================================
+// Activity Log — who changed what, when
+// ============================================================
+function ActivityView() {
+  const { loading, error, data, reload } = useAsync(() => rest("pm_activity?order=created_at.desc&limit=100").then(r => r.data || []), []);
+  if (error) return <ErrorState error={error} onRetry={reload} />;
+  const rows = data || [];
+  const icon = { create: "＋", update: "✎", delete: "🗑", import: "⭳", clone: "⧉", reorder: "↕", bulk: "≡" };
+  const relTime = (iso) => {
+    const d = (Date.now() - new Date(iso)) / 1000;
+    if (d < 60) return "just now";
+    if (d < 3600) return Math.floor(d / 60) + "m ago";
+    if (d < 86400) return Math.floor(d / 3600) + "h ago";
+    return Math.floor(d / 86400) + "d ago";
+  };
+  return (
+    <div>
+      <div style={{ marginBottom: S.lg }}>
+        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Activity</h1>
+        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>A running history of every change.</p>
+      </div>
+      {loading ? <div style={{ display: "grid", gap: 8 }}>{[0,1,2,3,4].map(i => <Skeleton key={i} h={48} r={10} />)}</div>
+        : rows.length === 0 ? <EmptyState icon="📋" title="No activity yet" body="Changes you make — creating packs, editing questions, imports — will appear here." />
+        : (
+          <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, overflow: "hidden" }}>
+            {rows.map((r, i) => (
+              <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "13px 18px", borderTop: i ? "1px solid " + C.lineSoft : "none" }}>
+                <div style={{ width: 32, height: 32, borderRadius: 9, background: C.brandSoft, color: C.brandInk, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, flexShrink: 0 }}>{icon[r.action] || "•"}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, color: C.ink }}><b style={{ fontWeight: 700, textTransform: "capitalize" }}>{r.action}</b> {r.entity} <b style={{ fontWeight: 700 }}>{r.entity_name}</b></div>
+                  {r.detail && <div style={{ fontSize: 12.5, color: C.sub, marginTop: 1 }}>{r.detail}</div>}
+                </div>
+                <div style={{ fontSize: 12, color: C.faint, whiteSpace: "nowrap" }}>{relTime(r.created_at)}</div>
+              </div>
+            ))}
+          </div>
+        )}
+    </div>
+  );
+}
+
+// ============================================================
+// Tag input (used in PackEditor)
+// ============================================================
+function TagInput({ tags, onChange, suggestions = [] }) {
+  const [input, setInput] = useState("");
+  const add = (t) => { const v = t.trim().toLowerCase(); if (v && !tags.includes(v)) onChange([...tags, v]); setInput(""); };
+  const remove = (t) => onChange(tags.filter(x => x !== t));
+  const avail = suggestions.filter(s => !tags.includes(s) && s.includes(input.toLowerCase())).slice(0, 6);
+  return (
+    <div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", padding: "8px 10px", border: "1px solid " + C.line, borderRadius: R.md, background: C.panel, minHeight: 42 }}>
+        {tags.map(t => (
+          <span key={t} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 700, background: C.brandSoft, color: C.brandInk, padding: "3px 8px", borderRadius: R.sm }}>
+            {t}<button onClick={() => remove(t)} style={{ background: "none", border: "none", cursor: "pointer", color: C.brandInk, padding: 0, fontSize: 14, lineHeight: 1 }}>×</button>
+          </span>
+        ))}
+        <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" || e.key === ",") { e.preventDefault(); add(input); } else if (e.key === "Backspace" && !input && tags.length) remove(tags[tags.length - 1]); }}
+          placeholder={tags.length ? "" : "Add tags…"} className="pm-input" style={{ flex: 1, minWidth: 80, border: "none", outline: "none", fontSize: 13.5, fontFamily: "inherit", background: "transparent", color: C.ink, padding: "2px 0" }} />
+      </div>
+      {input && avail.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
+          {avail.map(s => <button key={s} onClick={() => add(s)} style={{ fontSize: 12, fontWeight: 600, background: C.lineSoft, color: C.sub, border: "none", borderRadius: R.sm, padding: "3px 8px", cursor: "pointer", fontFamily: "inherit" }}>+ {s}</button>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// Theme toggle control
+// ============================================================
+function ThemeToggle({ theme, mini }) {
+  const opts = [{ v: "light", i: "☀", l: "Light" }, { v: "dark", i: "☾", l: "Dark" }, { v: "system", i: "◐", l: "Auto" }];
+  if (mini) {
+    const cur = opts.find(o => o.v === theme.pref) || opts[2];
+    const next = opts[(opts.indexOf(cur) + 1) % opts.length];
+    return <button onClick={() => theme.set(next.v)} title={`Theme: ${cur.l} (tap for ${next.l})`} style={{ background: "none", border: "1px solid " + C.line, borderRadius: R.md, padding: "8px 12px", fontSize: 16, cursor: "pointer", color: C.ink2, fontFamily: "inherit" }}>{cur.i}</button>;
+  }
+  return (
+    <div style={{ display: "flex", gap: 3, background: C.lineSoft, borderRadius: R.md, padding: 3 }}>
+      {opts.map(o => (
+        <button key={o.v} onClick={() => theme.set(o.v)} title={o.l}
+          style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "7px 8px", borderRadius: R.sm - 1, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 700,
+            background: theme.pref === o.v ? C.panel : "transparent", color: theme.pref === o.v ? C.ink : C.sub, boxShadow: theme.pref === o.v ? SH.sm : "none" }}>
+          <span style={{ fontSize: 14 }}>{o.i}</span>{o.l}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // ===== views1.jsx =====
 // ============================================================
 // Dashboard
@@ -832,13 +1204,14 @@ const CardBtn = ({ color, border, onClick, children }) => (
 // ============================================================
 // Pack detail — paginated question bank with multi-select
 // ============================================================
-function PackDetail({ pack, onBack, refreshPacks }) {
+function PackDetail({ pack, onBack, refreshPacks, onEditPack }) {
   const [page, setPage] = useState(0);
   const [total, setTotal] = useState(0);
   const [rows, setRows] = useState(null);
   const [err, setErr] = useState("");
   const [qEdit, setQEdit] = useState(null);
   const [bulk, setBulk] = useState(false);
+  const [play, setPlay] = useState(false);
   const [sel, setSel] = useState(new Set());
   const [search, setSearch] = useState("");
   const [diffF, setDiffF] = useState("all");
@@ -894,7 +1267,12 @@ function PackDetail({ pack, onBack, refreshPacks }) {
             <Badge kind={pack.status} /><Pill>{pack.difficulty}</Pill>{pack.is_custom && <Pill tone="muted">custom</Pill>}
           </div>
           {pack.description && <p style={{ margin: "8px 0 0", color: C.sub, fontSize: 14.5, lineHeight: 1.5 }}>{pack.description}</p>}
+          {pack.tags?.length > 0 && <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 8 }}>{pack.tags.map(t => <span key={t} style={{ fontSize: 11.5, fontWeight: 700, background: C.lineSoft, color: C.sub, padding: "2px 8px", borderRadius: R.sm }}>#{t}</span>)}</div>}
           <div style={{ marginTop: S.md, fontSize: 13, color: C.faint }}><b style={{ color: C.ink }}>{total}</b> question{total === 1 ? "" : "s"} · slug <code style={{ background: C.bg, padding: "1px 6px", borderRadius: 5 }}>{pack.slug}</code></div>
+        </div>
+        <div className="pm-pack-actions" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <Btn variant="soft" size="sm" onClick={() => setPlay(true)} icon="▶">Play</Btn>
+          {onEditPack && <Btn variant="ghost" size="sm" onClick={() => onEditPack(pack)} icon="✎">Edit</Btn>}
         </div>
       </div>
 
@@ -961,6 +1339,7 @@ function PackDetail({ pack, onBack, refreshPacks }) {
       <Modal open={bulk} onClose={() => setBulk(false)} labelledBy="pm-imp-title">
         {bulk && <BulkImport packId={pack.id} onDone={importQ} onClose={() => setBulk(false)} />}
       </Modal>
+      {play && <PlayMode pack={pack} onClose={() => setPlay(false)} />}
     </div>
   );
 }
@@ -1129,14 +1508,24 @@ function CloneDialog({ pack, onClone, onClose }) {
 const NAV = [
   { id: "dashboard", label: "Overview", icon: "◈" },
   { id: "library", label: "Packs", icon: "▦" },
-  { id: "questions", label: "All questions", icon: "⌕" },
+  { id: "questions", label: "Questions", icon: "⌕" },
+  { id: "health", label: "Health", icon: "◉" },
+  { id: "activity", label: "Activity", icon: "≡" },
 ];
+// Phone shows a subset in the bottom bar; the rest live in the ⋯ menu.
+const NAV_PHONE = ["dashboard", "library", "questions", "health"];
 
 // ============================================================
 // Root App
 // ============================================================
+// Fire-and-forget activity logger (never blocks the UI)
+const logActivity = (entity, id, name, action, detail = "") => {
+  rpc("pm_log", { _entity: entity, _entity_id: id || null, _entity_name: name || "", _action: action, _detail: detail }).catch(() => {});
+};
+
 function App() {
   const bp = useBreakpoint();
+  const theme = useTheme();
   const [authed, setAuthed] = useState(() => !!session.load());
   const [nav, setNav] = useState("dashboard");
   const [active, setActive] = useState(null);     // open pack
@@ -1144,6 +1533,7 @@ function App() {
   const [clonePack, setClonePack] = useState(null);
   const [changePw, setChangePw] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const fileRef = useRef(null);
 
   const packsState = useAsync(() => db.packsOverview(), [authed]);
@@ -1171,12 +1561,12 @@ function App() {
 
   // pack CRUD
   const savePack = async (payload, id) => {
-    if (id) { await db.updatePack(id, payload); notify("Pack updated"); }
-    else { await db.createPack({ ...payload, sort_order: (packs?.length || 0) + 1 }); notify("Pack created"); }
+    if (id) { await db.updatePack(id, payload); logActivity("pack", id, payload.name, "update"); notify("Pack updated"); }
+    else { const np = await db.createPack({ ...payload, sort_order: (packs?.length || 0) + 1 }); logActivity("pack", np?.id, payload.name, "create"); notify("Pack created"); }
     await reloadPacks();
     if (active && id === active.id) setActive(a => ({ ...a, ...payload }));
   };
-  const doClonePack = async (src, slug, name) => { await db.clonePack(src, slug, name); await reloadPacks(); notify("Pack duplicated"); };
+  const doClonePack = async (src, slug, name) => { await db.clonePack(src, slug, name); logActivity("pack", null, name, "clone", "duplicated from another pack"); await reloadPacks(); notify("Pack duplicated"); };
   const deletePack = async (p) => {
     const ok = await confirmDialog({ title: `Delete "${p.name}"?`, message: `This permanently removes the pack and all ${p.total_questions || 0} of its questions.`, confirmLabel: "Delete pack", danger: true });
     if (!ok) return;
@@ -1185,6 +1575,7 @@ function App() {
     packsState.setData(cur => (cur || []).filter(x => x.id !== p.id));
     try {
       await db.deletePack(p.id);
+      logActivity("pack", p.id, p.name, "delete", `${p.total_questions || 0} questions removed`);
       notify("Pack deleted", { action: { label: "Undo", onClick: async () => {
         await db.createPack({ slug: p.slug, name: p.name, emoji: p.emoji, description: p.description, color: p.color, difficulty: p.difficulty, status: p.status, is_custom: p.is_custom, sort_order: p.sort_order });
         await reloadPacks(); notify("Pack restored");
@@ -1234,12 +1625,33 @@ function App() {
     } catch (err) { notify("Import failed: " + err.message, { kind: "error" }); }
   };
 
+  const goNav = (id) => { setActive(null); setNav(id); setMenuOpen(false); };
+
+  // Command palette entries
+  const commands = useMemo(() => {
+    const base = [
+      { id: "nav-dashboard", label: "Go to Overview", icon: "◈", section: "Go", keywords: ["home", "dashboard"], run: () => goNav("dashboard") },
+      { id: "nav-library", label: "Go to Packs", icon: "▦", section: "Go", keywords: ["library", "packs"], run: () => goNav("library") },
+      { id: "nav-questions", label: "Search all questions", icon: "⌕", section: "Go", keywords: ["find", "questions"], run: () => goNav("questions") },
+      { id: "nav-health", label: "Go to Content health", icon: "◉", section: "Go", keywords: ["lint", "issues", "duplicates"], run: () => goNav("health") },
+      { id: "nav-activity", label: "Go to Activity log", icon: "≡", section: "Go", keywords: ["history", "changes"], run: () => goNav("activity") },
+      { id: "act-newpack", label: "Create new pack", icon: "＋", section: "Action", keywords: ["add pack"], run: () => setEditPack({}) },
+      { id: "act-import", label: "Import packs from JSON", icon: "⭳", section: "Action", keywords: ["upload"], run: onImportFile },
+      { id: "act-export", label: "Export everything to JSON", icon: "⭱", section: "Action", keywords: ["download", "backup"], run: exportJSON },
+      { id: "th-light", label: "Theme: Light", icon: "☀", section: "Theme", run: () => theme.set("light") },
+      { id: "th-dark", label: "Theme: Dark", icon: "☾", section: "Theme", run: () => theme.set("dark") },
+      { id: "th-system", label: "Theme: Auto (system)", icon: "◐", section: "Theme", run: () => theme.set("system") },
+      { id: "act-password", label: "Change admin password", icon: "⚙", section: "Action", run: () => setChangePw(true) },
+    ];
+    // jump straight to any pack
+    const packCmds = (packs || []).map(p => ({ id: "pack-" + p.id, label: `Open “${p.name}”`, icon: p.emoji, section: "Pack", hint: `${p.active_questions || 0} active questions`, keywords: [p.slug, ...(p.tags || [])], run: () => { setNav("library"); goPack(p); } }));
+    return [...base, ...packCmds];
+  }, [packs, theme]); // eslint-disable-line
+
   // hotkeys
-  useHotkey("mod+k", (e) => { e.preventDefault(); setNav("questions"); setActive(null); }, authed);
+  useHotkey("mod+k", (e) => { e.preventDefault(); setPaletteOpen(true); }, authed);
 
   if (!authed) return (<><GlobalStyle /><ConfirmHost /><ToastHost /><Login onSuccess={() => { setAuthed(true); reloadPacks(); }} /></>);
-
-  const goNav = (id) => { setActive(null); setNav(id); setMenuOpen(false); };
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg, fontFamily: FONT, color: C.ink, display: "flex" }}>
@@ -1265,8 +1677,16 @@ function App() {
               </button>
             ))}
           </nav>
+          {!bp.isTablet && (
+            <button onClick={() => setPaletteOpen(true)} style={{ display: "flex", alignItems: "center", gap: 10, margin: "12px 0", padding: "9px 12px", borderRadius: R.md, border: "1px solid " + C.line, background: C.bg, cursor: "pointer", fontFamily: "inherit", color: C.sub, fontSize: 13 }}>
+              <span style={{ fontSize: 14 }}>⌕</span><span style={{ flex: 1, textAlign: "left" }}>Quick actions</span><kbd style={kbdStyle}>⌘K</kbd>
+            </button>
+          )}
           <div style={{ flex: 1 }} />
+          {!bp.isTablet && <div style={{ marginBottom: 10 }}><ThemeToggle theme={theme} /></div>}
           <div style={{ display: "grid", gap: 4 }}>
+            {bp.isTablet && <button onClick={() => setPaletteOpen(true)} title="Quick actions (⌘K)" style={sideBtn(true)}><span style={{ fontSize: 16 }}>⌕</span></button>}
+            {bp.isTablet && <ThemeToggle theme={theme} mini />}
             <button onClick={() => setChangePw(true)} title="Change password" style={sideBtn(bp.isTablet)}><span style={{ fontSize: 16 }}>⚙</span>{!bp.isTablet && "Password"}</button>
             <button onClick={() => { auth.logout(); setAuthed(false); setActive(null); }} title="Sign out" style={{ ...sideBtn(bp.isTablet), color: C.danger }}><span style={{ fontSize: 16 }}>⏻</span>{!bp.isTablet && "Sign out"}</button>
           </div>
@@ -1285,9 +1705,11 @@ function App() {
                 <button onClick={() => setMenuOpen(o => !o)} aria-label="Menu" style={{ background: "none", border: "1px solid " + C.line, borderRadius: R.md, padding: "8px 12px", fontSize: 18, lineHeight: 1, cursor: "pointer", color: C.ink2 }}>⋯</button>
                 {menuOpen && (<>
                   <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 60 }} />
-                  <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", background: C.panel, borderRadius: R.md, border: "1px solid " + C.line, boxShadow: SH.lg, zIndex: 61, minWidth: 180, overflow: "hidden" }}>
-                    <button onClick={() => { setMenuOpen(false); setChangePw(true); }} style={menuItem}>Change password</button>
-                    <button onClick={() => { setMenuOpen(false); auth.logout(); setAuthed(false); setActive(null); }} style={{ ...menuItem, borderTop: "1px solid " + C.line, color: C.danger }}>Sign out</button>
+                  <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", background: C.panel, borderRadius: R.md, border: "1px solid " + C.line, boxShadow: SH.lg, zIndex: 61, minWidth: 210, overflow: "hidden" }}>
+                    <button onClick={() => { goNav("activity"); }} style={menuItem}>≡ Activity log</button>
+                    <div style={{ padding: "10px 12px", borderTop: "1px solid " + C.line }}><ThemeToggle theme={theme} /></div>
+                    <button onClick={() => { setMenuOpen(false); setChangePw(true); }} style={{ ...menuItem, borderTop: "1px solid " + C.line }}>⚙ Change password</button>
+                    <button onClick={() => { setMenuOpen(false); auth.logout(); setAuthed(false); setActive(null); }} style={{ ...menuItem, borderTop: "1px solid " + C.line, color: C.danger }}>⏻ Sign out</button>
                   </div>
                 </>)}
               </div>
@@ -1297,22 +1719,26 @@ function App() {
 
         <main className="pm-main" style={{ flex: 1, paddingBottom: bp.isPhone ? 90 : 60 }}>
           {active ? (
-            <PackDetail pack={active} onBack={closePack} refreshPacks={reloadPacks} />
+            <PackDetail pack={active} onBack={closePack} refreshPacks={reloadPacks} onEditPack={setEditPack} />
           ) : nav === "dashboard" ? (
             <Dashboard onGoLibrary={() => goNav("library")} onGoQuestions={() => goNav("questions")} onNewPack={() => setEditPack({})} />
           ) : nav === "library" ? (
             <Library packs={packs} loading={packsState.loading} error={packsState.error} reload={reloadPacks}
               onOpen={goPack} onNew={() => setEditPack({})} onEdit={setEditPack} onExport={exportJSON} onImportFile={onImportFile}
               onDelete={deletePack} onClone={setClonePack} onReorder={reorderPacks} />
-          ) : (
+          ) : nav === "questions" ? (
             <AllQuestions onOpenPack={openPackById} />
+          ) : nav === "health" ? (
+            <HealthView onOpenPack={openPackById} />
+          ) : (
+            <ActivityView />
           )}
         </main>
 
         {/* Mobile bottom nav */}
         {bp.isPhone && !active && (
           <nav style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: C.panel, borderTop: "1px solid " + C.line, display: "flex", zIndex: 50, paddingBottom: "env(safe-area-inset-bottom)" }}>
-            {NAV.map(n => (
+            {NAV.filter(n => NAV_PHONE.includes(n.id)).map(n => (
               <button key={n.id} onClick={() => goNav(n.id)} style={{ flex: 1, padding: "10px 0 12px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, color: nav === n.id ? C.brand : C.faint }}>
                 <span style={{ fontSize: 20 }}>{n.icon}</span>
                 <span style={{ fontSize: 10.5, fontWeight: 700 }}>{n.label}</span>
@@ -1331,6 +1757,7 @@ function App() {
       <Modal open={changePw} onClose={() => setChangePw(false)} width={460}>
         {changePw && <ChangePassword onClose={() => setChangePw(false)} onDone={() => notify("Password updated")} />}
       </Modal>
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
     </div>
   );
 }
@@ -1344,10 +1771,12 @@ const menuItem = { display: "block", width: "100%", textAlign: "left", backgroun
 function GlobalStyle() {
   return <style>{`
     @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800;900&display=swap');
+    :root, [data-theme="light"]{ ${themeVars("light")} }
+    [data-theme="dark"]{ ${themeVars("dark")} }
     *{box-sizing:border-box}
     html,body{margin:0;padding:0}
-    html{ -webkit-text-size-adjust:100%; }
-    body{ background:${C.bg}; }
+    html{ -webkit-text-size-adjust:100%; transition:background .2s; }
+    body{ background:${C.bg}; transition:background .2s, color .2s; }
     button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,[tabindex]:focus-visible{ outline:2px solid ${C.brand}; outline-offset:2px; }
 
     @keyframes pm-spin{ to{ transform:rotate(360deg);} }

@@ -7,11 +7,45 @@
 <meta name="description" content="Content management for the Positive Minds CBMT word-game pack library." />
 <meta name="theme-color" content="#6C4CE0" />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧠%3C/text%3E%3C/svg%3E" />
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%236C4CE0'/%3E%3Ctext x='50' y='72' font-size='58' text-anchor='middle'%3E🧠%3C/text%3E%3C/svg%3E" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Positive Minds" />
 <style>
   html,body{margin:0;padding:0;background:#F6F5FB}
   #root{min-height:100vh}
   .boot{min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#6E6B85}
 </style>
+<script>
+// PWA: inline manifest via blob + minimal offline-capable service worker
+(function(){
+  var manifest = {
+    name: "Positive Minds — Pack Manager", short_name: "Positive Minds",
+    description: "Content management for the Positive Minds word-game pack library.",
+    start_url: ".", display: "standalone", background_color: "#F6F5FB", theme_color: "#6C4CE0",
+    icons: [
+      { src: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%236C4CE0'/%3E%3Ctext x='50' y='72' font-size='58' text-anchor='middle'%3E🧠%3C/text%3E%3C/svg%3E", sizes: "any", type: "image/svg+xml", purpose: "any maskable" }
+    ]
+  };
+  var blob = new Blob([JSON.stringify(manifest)], { type: "application/json" });
+  var link = document.createElement("link");
+  link.rel = "manifest"; link.href = URL.createObjectURL(blob);
+  document.head.appendChild(link);
+
+  if ("serviceWorker" in navigator) {
+    var swCode = "self.addEventListener('install',function(e){self.skipWaiting();});" +
+      "self.addEventListener('activate',function(e){e.waitUntil(self.clients.claim());});" +
+      "self.addEventListener('fetch',function(e){" +
+      " if(e.request.method!=='GET')return;" +
+      " e.respondWith(fetch(e.request).then(function(r){" +
+      "  var c=r.clone();caches.open('pm-v1').then(function(cache){cache.put(e.request,c);});return r;" +
+      " }).catch(function(){return caches.match(e.request);}));" +
+      "});";
+    var swBlob = new Blob([swCode], { type: "text/javascript" });
+    navigator.serviceWorker.register(URL.createObjectURL(swBlob)).catch(function(){});
+  }
+})();
+</script>
 </head>
 <body>
 <div id="root"><div class="boot">Loading Positive Minds…</div></div>
@@ -276,32 +310,90 @@ const db = {
 // ============================================================
 // Design tokens
 // ============================================================
+// Colors reference CSS variables so a `data-theme` swap re-skins instantly.
+const V = name => `var(--${name})`;
 const C = {
-  bg: "#F6F5FB",
-  bgDeep: "#EEEBF7",
-  panel: "#FFFFFF",
-  ink: "#191728",
-  ink2: "#4A4763",
-  sub: "#6E6B85",
-  faint: "#A29FB6",
-  line: "#EAE7F3",
-  lineSoft: "#F2F0F8",
-  brand: "#6C4CE0",
-  brand2: "#8A6EF0",
-  brandSoft: "#EEE9FD",
-  brandInk: "#4A32B0",
-  good: "#12A594",
-  goodSoft: "#DEF5F1",
-  goodInk: "#0A6B60",
-  warn: "#E08A2B",
-  warnSoft: "#FBEEDD",
-  warnInk: "#9C5B14",
-  danger: "#E5484D",
-  dangerSoft: "#FCE9E9",
-  dangerInk: "#B02A2E",
-  info: "#4C82E0",
-  infoSoft: "#E5EDFB"
+  bg: V("bg"),
+  bgDeep: V("bgDeep"),
+  panel: V("panel"),
+  ink: V("ink"),
+  ink2: V("ink2"),
+  sub: V("sub"),
+  faint: V("faint"),
+  line: V("line"),
+  lineSoft: V("lineSoft"),
+  brand: V("brand"),
+  brand2: V("brand2"),
+  brandSoft: V("brandSoft"),
+  brandInk: V("brandInk"),
+  good: V("good"),
+  goodSoft: V("goodSoft"),
+  goodInk: V("goodInk"),
+  warn: V("warn"),
+  warnSoft: V("warnSoft"),
+  warnInk: V("warnInk"),
+  danger: V("danger"),
+  dangerSoft: V("dangerSoft"),
+  dangerInk: V("dangerInk"),
+  info: V("info"),
+  infoSoft: V("infoSoft")
 };
+// The actual values, per theme — injected as CSS vars in GlobalStyle.
+const THEMES = {
+  light: {
+    bg: "#F6F5FB",
+    bgDeep: "#EEEBF7",
+    panel: "#FFFFFF",
+    ink: "#191728",
+    ink2: "#4A4763",
+    sub: "#6E6B85",
+    faint: "#A29FB6",
+    line: "#EAE7F3",
+    lineSoft: "#F2F0F8",
+    brand: "#6C4CE0",
+    brand2: "#8A6EF0",
+    brandSoft: "#EEE9FD",
+    brandInk: "#4A32B0",
+    good: "#12A594",
+    goodSoft: "#DEF5F1",
+    goodInk: "#0A6B60",
+    warn: "#E08A2B",
+    warnSoft: "#FBEEDD",
+    warnInk: "#9C5B14",
+    danger: "#E5484D",
+    dangerSoft: "#FCE9E9",
+    dangerInk: "#B02A2E",
+    info: "#4C82E0",
+    infoSoft: "#E5EDFB"
+  },
+  dark: {
+    bg: "#131120",
+    bgDeep: "#0D0B16",
+    panel: "#1C1930",
+    ink: "#F3F1FB",
+    ink2: "#C9C5DC",
+    sub: "#9995B0",
+    faint: "#6B6885",
+    line: "#2C2942",
+    lineSoft: "#242138",
+    brand: "#9B7BF0",
+    brand2: "#B49CF6",
+    brandSoft: "#2A2350",
+    brandInk: "#C7B5FA",
+    good: "#2CC7B4",
+    goodSoft: "#123B37",
+    goodInk: "#7EE8DA",
+    warn: "#F0A54C",
+    warnSoft: "#3A2A12",
+    warnInk: "#F5C58A",
+    danger: "#F0666B",
+    dangerSoft: "#3A1618",
+    dangerInk: "#F7A0A3",
+    info: "#6D9BF0",
+    infoSoft: "#1A2540"
+  }
+};
+const themeVars = name => Object.entries(THEMES[name]).map(([k, v]) => `--${k}:${v};`).join("");
 const S = {
   xs: 4,
   sm: 8,
@@ -319,13 +411,68 @@ const R = {
   pill: 999
 };
 const SH = {
-  sm: "0 1px 2px rgba(25,23,40,0.06)",
-  md: "0 4px 14px rgba(25,23,40,0.08)",
-  lg: "0 12px 32px rgba(25,23,40,0.12)",
-  xl: "0 24px 60px rgba(25,23,40,0.18)",
+  sm: `0 1px 2px ${V("shadow1")}`,
+  md: `0 4px 14px ${V("shadow2")}`,
+  lg: `0 12px 32px ${V("shadow2")}`,
+  xl: `0 24px 60px ${V("shadow3")}`,
   brand: "0 6px 18px rgba(108,76,224,0.30)"
 };
+// shadow strengths per theme
+THEMES.light.shadow1 = "rgba(25,23,40,0.06)";
+THEMES.light.shadow2 = "rgba(25,23,40,0.10)";
+THEMES.light.shadow3 = "rgba(25,23,40,0.18)";
+THEMES.dark.shadow1 = "rgba(0,0,0,0.4)";
+THEMES.dark.shadow2 = "rgba(0,0,0,0.5)";
+THEMES.dark.shadow3 = "rgba(0,0,0,0.65)";
 const FONT = "'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+
+// Theme controller: system | light | dark, persisted.
+const themeCtl = {
+  key: "pm_theme",
+  get() {
+    try {
+      return localStorage.getItem(this.key) || "system";
+    } catch {
+      return "system";
+    }
+  },
+  resolved(pref) {
+    const p = pref || this.get();
+    if (p === "system") return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    return p;
+  },
+  set(pref) {
+    try {
+      localStorage.setItem(this.key, pref);
+    } catch {}
+    ;
+    this.apply(pref);
+  },
+  apply(pref) {
+    document.documentElement.setAttribute("data-theme", this.resolved(pref));
+  }
+};
+const useTheme = () => {
+  const [pref, setPref] = useState(themeCtl.get());
+  useEffect(() => {
+    themeCtl.apply(pref);
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const on = () => {
+      if (themeCtl.get() === "system") themeCtl.apply("system");
+    };
+    mq.addEventListener?.("change", on);
+    return () => mq.removeEventListener?.("change", on);
+  }, [pref]);
+  const set = p => {
+    themeCtl.set(p);
+    setPref(p);
+  };
+  return {
+    pref,
+    resolved: themeCtl.resolved(pref),
+    set
+  };
+};
 const STATUS = {
   published: {
     bg: C.goodSoft,
@@ -1190,6 +1337,7 @@ const Skeleton = ({
 // ============================================================
 const EMOJIS = ["💪", "😊", "🧘", "🎯", "🎓", "💡", "🛡️", "🤝", "🫶", "🌟", "🗣️", "👨‍👩‍👧", "🌈", "🕊️", "❤️", "🌱", "✨", "🧠", "🔆", "🦋", "🌞", "🏆", "🎨", "🚀"];
 const COLORS = ["#F39C12", "#E84393", "#00B894", "#0984E3", "#6C4CE0", "#FDCB6E", "#D63031", "#00CEC9", "#E17055", "#FAB1A0", "#74B9FF", "#A29BFE", "#55EFC4", "#81ECEC"];
+const PACK_TAG_SUGGESTIONS = ["emotions", "confidence", "social", "calm", "focus", "resilience", "gratitude", "school-ready", "ages-5-7", "ages-8-10", "starter", "advanced"];
 function PackEditor({
   pack,
   onSave,
@@ -1204,7 +1352,8 @@ function PackEditor({
     color: pack?.color || C.brand,
     difficulty: pack?.difficulty || "basic",
     status: pack?.status || "draft",
-    is_custom: pack?.is_custom || false
+    is_custom: pack?.is_custom || false,
+    tags: pack?.tags || []
   });
   const [slugTouched, setSlugTouched] = useState(!isNew);
   const [busy, setBusy] = useState(false);
@@ -1287,6 +1436,13 @@ function PackEditor({
     onChange: e => set("description", e.target.value),
     rows: 2,
     placeholder: "Believe in yourself and take pride in what you do."
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Tags",
+    hint: "Enter or comma to add — for cross-cutting organization"
+  }, /*#__PURE__*/React.createElement(TagInput, {
+    tags: f.tags,
+    onChange: t => set("tags", t),
+    suggestions: PACK_TAG_SUGGESTIONS
   })), /*#__PURE__*/React.createElement(Field, {
     label: "Icon"
   }, /*#__PURE__*/React.createElement("div", {
@@ -1704,6 +1860,908 @@ function BulkImport({
     onClick: submit,
     disabled: busy || !valid.length
   }, busy ? "Importing…" : `Import ${valid.length} question${valid.length === 1 ? "" : "s"}`)));
+}
+
+// ===== features.jsx =====
+// ============================================================
+// Command Palette (⌘K) — fuzzy launcher
+// ============================================================
+function CommandPalette({
+  open,
+  onClose,
+  commands
+}) {
+  const [q, setQ] = useState("");
+  const [sel, setSel] = useState(0);
+  const listRef = useRef(null);
+  useEffect(() => {
+    if (open) {
+      setQ("");
+      setSel(0);
+    }
+  }, [open]);
+  const fuzzy = (text, query) => {
+    if (!query) return 1;
+    text = text.toLowerCase();
+    query = query.toLowerCase();
+    if (text.includes(query)) return 2 - text.indexOf(text) / 100;
+    let ti = 0,
+      score = 0;
+    for (const ch of query) {
+      const idx = text.indexOf(ch, ti);
+      if (idx === -1) return 0;
+      score += 1 / (idx - ti + 1);
+      ti = idx + 1;
+    }
+    return score / query.length;
+  };
+  const results = useMemo(() => commands.map(c => ({
+    ...c,
+    score: Math.max(fuzzy(c.label, q), (c.keywords || []).reduce((m, k) => Math.max(m, fuzzy(k, q)), 0) * 0.8)
+  })).filter(c => c.score > 0).sort((a, b) => b.score - a.score).slice(0, 8), [commands, q]);
+  useEffect(() => {
+    setSel(0);
+  }, [q]);
+  const run = c => {
+    onClose();
+    c.run();
+  };
+  const onKey = e => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setSel(s => Math.min(s + 1, results.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setSel(s => Math.max(s - 1, 0));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      results[sel] && run(results[sel]);
+    }
+  };
+  if (!open) return null;
+  return /*#__PURE__*/React.createElement("div", {
+    onClick: onClose,
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(25,23,40,0.5)",
+      backdropFilter: "blur(3px)",
+      zIndex: 200,
+      display: "flex",
+      alignItems: "flex-start",
+      justifyContent: "center",
+      padding: "12vh 20px 20px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      background: C.panel,
+      borderRadius: R.xl,
+      width: "100%",
+      maxWidth: 560,
+      boxShadow: SH.xl,
+      overflow: "hidden",
+      border: "1px solid " + C.line
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      padding: "16px 18px",
+      borderBottom: "1px solid " + C.line
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 18,
+      color: C.faint
+    }
+  }, "⌕"), /*#__PURE__*/React.createElement("input", {
+    autoFocus: true,
+    value: q,
+    onChange: e => setQ(e.target.value),
+    onKeyDown: onKey,
+    placeholder: "Type a command or search…",
+    className: "pm-input",
+    style: {
+      flex: 1,
+      border: "none",
+      outline: "none",
+      fontSize: 16,
+      fontFamily: "inherit",
+      background: "transparent",
+      color: C.ink
+    }
+  }), /*#__PURE__*/React.createElement("kbd", {
+    style: kbdStyle
+  }, "esc")), /*#__PURE__*/React.createElement("div", {
+    ref: listRef,
+    style: {
+      maxHeight: 340,
+      overflowY: "auto",
+      padding: 8
+    }
+  }, results.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "28px 16px",
+      textAlign: "center",
+      color: C.faint,
+      fontSize: 14
+    }
+  }, "No commands match “", q, "”.") : results.map((c, i) => /*#__PURE__*/React.createElement("button", {
+    key: c.id,
+    onClick: () => run(c),
+    onMouseEnter: () => setSel(i),
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 12,
+      width: "100%",
+      textAlign: "left",
+      padding: "11px 12px",
+      borderRadius: R.md,
+      border: "none",
+      cursor: "pointer",
+      fontFamily: "inherit",
+      background: i === sel ? C.brandSoft : "transparent",
+      color: C.ink,
+      transition: "background .1s"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 17,
+      width: 24,
+      textAlign: "center"
+    }
+  }, c.icon), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 14,
+      fontWeight: 700
+    }
+  }, c.label), c.hint && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.sub,
+      marginTop: 1
+    }
+  }, c.hint)), c.section && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: C.faint,
+      fontWeight: 700,
+      textTransform: "uppercase",
+      letterSpacing: 0.4
+    }
+  }, c.section))))));
+}
+const kbdStyle = {
+  fontSize: 11,
+  fontWeight: 700,
+  color: C.sub,
+  background: C.lineSoft,
+  border: "1px solid " + C.line,
+  borderRadius: 6,
+  padding: "2px 7px",
+  fontFamily: "inherit"
+};
+
+// ============================================================
+// Play Mode — experience a pack like a child would
+// ============================================================
+function PlayMode({
+  pack,
+  onClose
+}) {
+  const [questions, setQuestions] = useState(null);
+  const [i, setI] = useState(0);
+  const [picked, setPicked] = useState(null);
+  const [correct, setCorrect] = useState(0);
+  const [done, setDone] = useState(false);
+  useEffect(() => {
+    (async () => {
+      const {
+        data
+      } = await db.questions(pack.id, {
+        page: 0,
+        size: 100
+      });
+      setQuestions((data || []).filter(q => q.status === "active"));
+    })();
+  }, [pack.id]);
+  const q = questions?.[i];
+  const options = useMemo(() => {
+    if (!q) return [];
+    const opts = [q.answer, q.alt_answer].filter(Boolean);
+    return opts.sort(() => Math.random() - 0.5); // both are "correct"; order shuffled
+  }, [q]);
+  const pick = opt => {
+    if (picked) return;
+    setPicked(opt);
+    setCorrect(c => c + 1); // any positive word is a valid choice
+    setTimeout(() => {
+      if (i + 1 >= questions.length) setDone(true);else {
+        setI(i + 1);
+        setPicked(null);
+      }
+    }, 900);
+  };
+  const restart = () => {
+    setI(0);
+    setPicked(null);
+    setCorrect(0);
+    setDone(false);
+  };
+  const pv = q ? previewQuestion(q.template, q.answer, q.alt_answer, q.letters_hidden, q.difficulty) : null;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "fixed",
+      inset: 0,
+      zIndex: 150,
+      background: `linear-gradient(160deg, ${pack.color}22, ${C.bg} 55%)`,
+      display: "flex",
+      flexDirection: "column",
+      fontFamily: FONT
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 12,
+      padding: "16px 20px",
+      borderBottom: "1px solid " + C.line,
+      background: C.panel
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 26
+    }
+  }, pack.emoji), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 800,
+      color: C.ink
+    }
+  }, pack.name), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.sub
+    }
+  }, "Play preview", questions ? ` · ${questions.length} questions` : "")), /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    size: "sm",
+    onClick: onClose
+  }, "✕ Exit")), questions && questions.length > 0 && !done && /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 5,
+      background: C.line
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: "100%",
+      width: `${i / questions.length * 100}%`,
+      background: pack.color,
+      transition: "width .3s"
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 24,
+      overflowY: "auto"
+    }
+  }, questions === null ? /*#__PURE__*/React.createElement(Spinner, {
+    label: "Loading pack…"
+  }) : questions.length === 0 ? /*#__PURE__*/React.createElement(EmptyState, {
+    icon: "🫙",
+    title: "No active questions",
+    body: "This pack has no active questions to play. Add some or activate existing ones.",
+    action: /*#__PURE__*/React.createElement(Btn, {
+      onClick: onClose
+    }, "Back to editing")
+  }) : done ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      maxWidth: 420
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 56,
+      marginBottom: 10
+    }
+  }, "🌟"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 26,
+      fontWeight: 800,
+      color: C.ink
+    }
+  }, "All done!"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      color: C.sub,
+      margin: "8px 0 24px"
+    }
+  }, "You completed all ", questions.length, " affirmations in “", pack.name, "”. Every answer is a positive choice."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      justifyContent: "center"
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "soft",
+    onClick: restart,
+    icon: "↻"
+  }, "Play again"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: onClose
+  }, "Back to editing"))) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: "100%",
+      maxWidth: 560,
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      fontWeight: 700,
+      color: C.faint,
+      letterSpacing: 0.5,
+      marginBottom: 20
+    }
+  }, "QUESTION ", i + 1, " OF ", questions.length), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.panel,
+      borderRadius: R.xl,
+      padding: "36px 28px",
+      boxShadow: SH.lg,
+      border: "1px solid " + C.line
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 26,
+      fontWeight: 700,
+      color: C.ink,
+      lineHeight: 1.4,
+      marginBottom: 32
+    }
+  }, pv.sentence), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gap: 12
+    }
+  }, options.map(opt => {
+    const isPicked = picked === opt;
+    return /*#__PURE__*/React.createElement("button", {
+      key: opt,
+      onClick: () => pick(opt),
+      disabled: !!picked,
+      style: {
+        padding: "16px 20px",
+        fontSize: 19,
+        fontWeight: 800,
+        borderRadius: R.lg,
+        cursor: picked ? "default" : "pointer",
+        fontFamily: "inherit",
+        border: "2px solid " + (isPicked ? pack.color : C.line),
+        background: isPicked ? pack.color : picked ? C.lineSoft : C.panel,
+        color: isPicked ? "#fff" : C.ink,
+        transition: "all .2s",
+        transform: isPicked ? "scale(1.02)" : "scale(1)"
+      }
+    }, opt, isPicked && " ✓");
+  })), picked && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 20,
+      fontSize: 15,
+      fontWeight: 700,
+      color: C.good
+    }
+  }, "Great choice! 💚")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: C.faint,
+      marginTop: 16
+    }
+  }, "Tip: in the real game, both words are positive — the child picks whichever feels most like them."))));
+}
+
+// ============================================================
+// Content Health (lint) — flags dupes, weak, invalid questions
+// ============================================================
+function HealthView({
+  onOpenPack
+}) {
+  const {
+    loading,
+    error,
+    data,
+    reload
+  } = useAsync(async () => {
+    const [summary, details] = await Promise.all([rpc("pm_lint"), rpc("pm_lint_details")]);
+    return {
+      summary,
+      details: details || []
+    };
+  }, []);
+  if (error) return /*#__PURE__*/React.createElement(ErrorState, {
+    error: error,
+    onRetry: reload
+  });
+  const s = data?.summary || {};
+  const details = data?.details || [];
+  const totalIssues = (s.invalid_template || 0) + (s.missing_alt || 0) + (s.duplicates || 0);
+  const sevStyle = {
+    error: {
+      bg: C.dangerSoft,
+      fg: C.dangerInk,
+      dot: C.danger,
+      label: "Error"
+    },
+    warning: {
+      bg: C.warnSoft,
+      fg: C.warnInk,
+      dot: C.warn,
+      label: "Warning"
+    }
+  };
+  const issueLabel = {
+    invalid_template: "Invalid template",
+    missing_alt: "Missing 2nd option",
+    duplicate: "Duplicate"
+  };
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: S.lg
+    }
+  }, /*#__PURE__*/React.createElement("h1", {
+    style: {
+      margin: 0,
+      fontSize: 26,
+      fontWeight: 800,
+      color: C.ink,
+      letterSpacing: -0.3
+    }
+  }, "Content health"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "4px 0 0",
+      color: C.sub,
+      fontSize: 14.5
+    }
+  }, "Automated checks across your whole library.")), /*#__PURE__*/React.createElement("div", {
+    className: "pm-stats",
+    style: {
+      marginBottom: S.lg
+    }
+  }, /*#__PURE__*/React.createElement(HealthStat, {
+    n: loading ? "…" : totalIssues,
+    label: "Total issues",
+    color: totalIssues ? C.warn : C.good
+  }), /*#__PURE__*/React.createElement(HealthStat, {
+    n: loading ? "…" : s.invalid_template || 0,
+    label: "Invalid templates",
+    color: s.invalid_template ? C.danger : C.faint
+  }), /*#__PURE__*/React.createElement(HealthStat, {
+    n: loading ? "…" : s.missing_alt || 0,
+    label: "Missing 2nd option",
+    color: s.missing_alt ? C.warn : C.faint
+  }), /*#__PURE__*/React.createElement(HealthStat, {
+    n: loading ? "…" : s.duplicates || 0,
+    label: "Duplicates",
+    color: s.duplicates ? C.warn : C.faint
+  })), loading ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gap: 10
+    }
+  }, [0, 1, 2].map(i => /*#__PURE__*/React.createElement(Skeleton, {
+    key: i,
+    h: 56,
+    r: 12
+  }))) : totalIssues === 0 ? /*#__PURE__*/React.createElement(EmptyState, {
+    icon: "✅",
+    title: "Everything looks healthy",
+    body: "No invalid templates, missing options, or duplicates found. Nice work."
+  }) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gap: 10
+    }
+  }, details.map((d, idx) => {
+    const sev = sevStyle[d.severity] || sevStyle.warning;
+    return /*#__PURE__*/React.createElement("div", {
+      key: idx,
+      style: {
+        background: C.panel,
+        border: "1px solid " + C.line,
+        borderRadius: R.md,
+        padding: "14px 16px",
+        display: "flex",
+        alignItems: "center",
+        gap: 14
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        width: 8,
+        height: 8,
+        borderRadius: 99,
+        background: sev.dot,
+        flexShrink: 0
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 14,
+        fontWeight: 700,
+        color: C.ink
+      }
+    }, d.label || "(untitled)", " ", /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12,
+        fontWeight: 600,
+        color: sev.fg,
+        background: sev.bg,
+        padding: "1px 7px",
+        borderRadius: 5,
+        marginLeft: 6
+      }
+    }, issueLabel[d.issue] || d.issue)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12.5,
+        color: C.sub,
+        marginTop: 2
+      }
+    }, d.detail)), d.pack_id && /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      size: "sm",
+      onClick: () => onOpenPack(d.pack_id)
+    }, "Open pack"));
+  })), !loading && s.thin_packs > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: S.lg,
+      background: C.infoSoft,
+      borderRadius: R.md,
+      padding: "14px 16px",
+      fontSize: 13.5,
+      color: C.ink2
+    }
+  }, /*#__PURE__*/React.createElement("b", null, s.thin_packs), " pack", s.thin_packs === 1 ? " has" : "s have", " only 1–2 questions. Consider adding more so they're satisfying to play."));
+}
+const HealthStat = ({
+  n,
+  label,
+  color
+}) => /*#__PURE__*/React.createElement("div", {
+  style: {
+    background: C.panel,
+    borderRadius: R.lg,
+    padding: "18px 20px",
+    border: "1px solid " + C.line
+  }
+}, /*#__PURE__*/React.createElement("div", {
+  style: {
+    fontSize: 30,
+    fontWeight: 800,
+    color,
+    lineHeight: 1
+  }
+}, n), /*#__PURE__*/React.createElement("div", {
+  style: {
+    fontSize: 12.5,
+    color: C.sub,
+    marginTop: 7,
+    fontWeight: 600
+  }
+}, label));
+
+// ============================================================
+// Activity Log — who changed what, when
+// ============================================================
+function ActivityView() {
+  const {
+    loading,
+    error,
+    data,
+    reload
+  } = useAsync(() => rest("pm_activity?order=created_at.desc&limit=100").then(r => r.data || []), []);
+  if (error) return /*#__PURE__*/React.createElement(ErrorState, {
+    error: error,
+    onRetry: reload
+  });
+  const rows = data || [];
+  const icon = {
+    create: "＋",
+    update: "✎",
+    delete: "🗑",
+    import: "⭳",
+    clone: "⧉",
+    reorder: "↕",
+    bulk: "≡"
+  };
+  const relTime = iso => {
+    const d = (Date.now() - new Date(iso)) / 1000;
+    if (d < 60) return "just now";
+    if (d < 3600) return Math.floor(d / 60) + "m ago";
+    if (d < 86400) return Math.floor(d / 3600) + "h ago";
+    return Math.floor(d / 86400) + "d ago";
+  };
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: S.lg
+    }
+  }, /*#__PURE__*/React.createElement("h1", {
+    style: {
+      margin: 0,
+      fontSize: 26,
+      fontWeight: 800,
+      color: C.ink,
+      letterSpacing: -0.3
+    }
+  }, "Activity"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "4px 0 0",
+      color: C.sub,
+      fontSize: 14.5
+    }
+  }, "A running history of every change.")), loading ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gap: 8
+    }
+  }, [0, 1, 2, 3, 4].map(i => /*#__PURE__*/React.createElement(Skeleton, {
+    key: i,
+    h: 48,
+    r: 10
+  }))) : rows.length === 0 ? /*#__PURE__*/React.createElement(EmptyState, {
+    icon: "📋",
+    title: "No activity yet",
+    body: "Changes you make — creating packs, editing questions, imports — will appear here."
+  }) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.panel,
+      border: "1px solid " + C.line,
+      borderRadius: R.lg,
+      overflow: "hidden"
+    }
+  }, rows.map((r, i) => /*#__PURE__*/React.createElement("div", {
+    key: r.id,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 14,
+      padding: "13px 18px",
+      borderTop: i ? "1px solid " + C.lineSoft : "none"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 32,
+      height: 32,
+      borderRadius: 9,
+      background: C.brandSoft,
+      color: C.brandInk,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: 15,
+      flexShrink: 0
+    }
+  }, icon[r.action] || "•"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 14,
+      color: C.ink
+    }
+  }, /*#__PURE__*/React.createElement("b", {
+    style: {
+      fontWeight: 700,
+      textTransform: "capitalize"
+    }
+  }, r.action), " ", r.entity, " ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      fontWeight: 700
+    }
+  }, r.entity_name)), r.detail && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: C.sub,
+      marginTop: 1
+    }
+  }, r.detail)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.faint,
+      whiteSpace: "nowrap"
+    }
+  }, relTime(r.created_at))))));
+}
+
+// ============================================================
+// Tag input (used in PackEditor)
+// ============================================================
+function TagInput({
+  tags,
+  onChange,
+  suggestions = []
+}) {
+  const [input, setInput] = useState("");
+  const add = t => {
+    const v = t.trim().toLowerCase();
+    if (v && !tags.includes(v)) onChange([...tags, v]);
+    setInput("");
+  };
+  const remove = t => onChange(tags.filter(x => x !== t));
+  const avail = suggestions.filter(s => !tags.includes(s) && s.includes(input.toLowerCase())).slice(0, 6);
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 6,
+      alignItems: "center",
+      padding: "8px 10px",
+      border: "1px solid " + C.line,
+      borderRadius: R.md,
+      background: C.panel,
+      minHeight: 42
+    }
+  }, tags.map(t => /*#__PURE__*/React.createElement("span", {
+    key: t,
+    style: {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 5,
+      fontSize: 12.5,
+      fontWeight: 700,
+      background: C.brandSoft,
+      color: C.brandInk,
+      padding: "3px 8px",
+      borderRadius: R.sm
+    }
+  }, t, /*#__PURE__*/React.createElement("button", {
+    onClick: () => remove(t),
+    style: {
+      background: "none",
+      border: "none",
+      cursor: "pointer",
+      color: C.brandInk,
+      padding: 0,
+      fontSize: 14,
+      lineHeight: 1
+    }
+  }, "×"))), /*#__PURE__*/React.createElement("input", {
+    value: input,
+    onChange: e => setInput(e.target.value),
+    onKeyDown: e => {
+      if (e.key === "Enter" || e.key === ",") {
+        e.preventDefault();
+        add(input);
+      } else if (e.key === "Backspace" && !input && tags.length) remove(tags[tags.length - 1]);
+    },
+    placeholder: tags.length ? "" : "Add tags…",
+    className: "pm-input",
+    style: {
+      flex: 1,
+      minWidth: 80,
+      border: "none",
+      outline: "none",
+      fontSize: 13.5,
+      fontFamily: "inherit",
+      background: "transparent",
+      color: C.ink,
+      padding: "2px 0"
+    }
+  })), input && avail.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 6,
+      marginTop: 6
+    }
+  }, avail.map(s => /*#__PURE__*/React.createElement("button", {
+    key: s,
+    onClick: () => add(s),
+    style: {
+      fontSize: 12,
+      fontWeight: 600,
+      background: C.lineSoft,
+      color: C.sub,
+      border: "none",
+      borderRadius: R.sm,
+      padding: "3px 8px",
+      cursor: "pointer",
+      fontFamily: "inherit"
+    }
+  }, "+ ", s))));
+}
+
+// ============================================================
+// Theme toggle control
+// ============================================================
+function ThemeToggle({
+  theme,
+  mini
+}) {
+  const opts = [{
+    v: "light",
+    i: "☀",
+    l: "Light"
+  }, {
+    v: "dark",
+    i: "☾",
+    l: "Dark"
+  }, {
+    v: "system",
+    i: "◐",
+    l: "Auto"
+  }];
+  if (mini) {
+    const cur = opts.find(o => o.v === theme.pref) || opts[2];
+    const next = opts[(opts.indexOf(cur) + 1) % opts.length];
+    return /*#__PURE__*/React.createElement("button", {
+      onClick: () => theme.set(next.v),
+      title: `Theme: ${cur.l} (tap for ${next.l})`,
+      style: {
+        background: "none",
+        border: "1px solid " + C.line,
+        borderRadius: R.md,
+        padding: "8px 12px",
+        fontSize: 16,
+        cursor: "pointer",
+        color: C.ink2,
+        fontFamily: "inherit"
+      }
+    }, cur.i);
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 3,
+      background: C.lineSoft,
+      borderRadius: R.md,
+      padding: 3
+    }
+  }, opts.map(o => /*#__PURE__*/React.createElement("button", {
+    key: o.v,
+    onClick: () => theme.set(o.v),
+    title: o.l,
+    style: {
+      flex: 1,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+      padding: "7px 8px",
+      borderRadius: R.sm - 1,
+      border: "none",
+      cursor: "pointer",
+      fontFamily: "inherit",
+      fontSize: 13,
+      fontWeight: 700,
+      background: theme.pref === o.v ? C.panel : "transparent",
+      color: theme.pref === o.v ? C.ink : C.sub,
+      boxShadow: theme.pref === o.v ? SH.sm : "none"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 14
+    }
+  }, o.i), o.l)));
 }
 
 // ===== views1.jsx =====
@@ -2214,7 +3272,8 @@ const CardBtn = ({
 function PackDetail({
   pack,
   onBack,
-  refreshPacks
+  refreshPacks,
+  onEditPack
 }) {
   const [page, setPage] = useState(0);
   const [total, setTotal] = useState(0);
@@ -2222,6 +3281,7 @@ function PackDetail({
   const [err, setErr] = useState("");
   const [qEdit, setQEdit] = useState(null);
   const [bulk, setBulk] = useState(false);
+  const [play, setPlay] = useState(false);
   const [sel, setSel] = useState(new Set());
   const [search, setSearch] = useState("");
   const [diffF, setDiffF] = useState("all");
@@ -2371,7 +3431,24 @@ function PackDetail({
       fontSize: 14.5,
       lineHeight: 1.5
     }
-  }, pack.description), /*#__PURE__*/React.createElement("div", {
+  }, pack.description), pack.tags?.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 5,
+      marginTop: 8
+    }
+  }, pack.tags.map(t => /*#__PURE__*/React.createElement("span", {
+    key: t,
+    style: {
+      fontSize: 11.5,
+      fontWeight: 700,
+      background: C.lineSoft,
+      color: C.sub,
+      padding: "2px 8px",
+      borderRadius: R.sm
+    }
+  }, "#", t))), /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: S.md,
       fontSize: 13,
@@ -2387,7 +3464,24 @@ function PackDetail({
       padding: "1px 6px",
       borderRadius: 5
     }
-  }, pack.slug)))), sel.size > 0 ? /*#__PURE__*/React.createElement("div", {
+  }, pack.slug))), /*#__PURE__*/React.createElement("div", {
+    className: "pm-pack-actions",
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "soft",
+    size: "sm",
+    onClick: () => setPlay(true),
+    icon: "▶"
+  }, "Play"), onEditPack && /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    size: "sm",
+    onClick: () => onEditPack(pack),
+    icon: "✎"
+  }, "Edit"))), sel.size > 0 ? /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       alignItems: "center",
@@ -2600,7 +3694,10 @@ function PackDetail({
     packId: pack.id,
     onDone: importQ,
     onClose: () => setBulk(false)
-  })));
+  })), play && /*#__PURE__*/React.createElement(PlayMode, {
+    pack: pack,
+    onClose: () => setPlay(false)
+  }));
 }
 const Pager = ({
   page,
@@ -3070,15 +4167,36 @@ const NAV = [{
   icon: "▦"
 }, {
   id: "questions",
-  label: "All questions",
+  label: "Questions",
   icon: "⌕"
+}, {
+  id: "health",
+  label: "Health",
+  icon: "◉"
+}, {
+  id: "activity",
+  label: "Activity",
+  icon: "≡"
 }];
+// Phone shows a subset in the bottom bar; the rest live in the ⋯ menu.
+const NAV_PHONE = ["dashboard", "library", "questions", "health"];
 
 // ============================================================
 // Root App
 // ============================================================
+// Fire-and-forget activity logger (never blocks the UI)
+const logActivity = (entity, id, name, action, detail = "") => {
+  rpc("pm_log", {
+    _entity: entity,
+    _entity_id: id || null,
+    _entity_name: name || "",
+    _action: action,
+    _detail: detail
+  }).catch(() => {});
+};
 function App() {
   const bp = useBreakpoint();
+  const theme = useTheme();
   const [authed, setAuthed] = useState(() => !!session.load());
   const [nav, setNav] = useState("dashboard");
   const [active, setActive] = useState(null); // open pack
@@ -3086,6 +4204,7 @@ function App() {
   const [clonePack, setClonePack] = useState(null);
   const [changePw, setChangePw] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const fileRef = useRef(null);
   const packsState = useAsync(() => db.packsOverview(), [authed]);
   const packs = packsState.data;
@@ -3128,12 +4247,14 @@ function App() {
   const savePack = async (payload, id) => {
     if (id) {
       await db.updatePack(id, payload);
+      logActivity("pack", id, payload.name, "update");
       notify("Pack updated");
     } else {
-      await db.createPack({
+      const np = await db.createPack({
         ...payload,
         sort_order: (packs?.length || 0) + 1
       });
+      logActivity("pack", np?.id, payload.name, "create");
       notify("Pack created");
     }
     await reloadPacks();
@@ -3144,6 +4265,7 @@ function App() {
   };
   const doClonePack = async (src, slug, name) => {
     await db.clonePack(src, slug, name);
+    logActivity("pack", null, name, "clone", "duplicated from another pack");
     await reloadPacks();
     notify("Pack duplicated");
   };
@@ -3160,6 +4282,7 @@ function App() {
     packsState.setData(cur => (cur || []).filter(x => x.id !== p.id));
     try {
       await db.deletePack(p.id);
+      logActivity("pack", p.id, p.name, "delete", `${p.total_questions || 0} questions removed`);
       notify("Pack deleted", {
         action: {
           label: "Undo",
@@ -3301,12 +4424,115 @@ function App() {
       });
     }
   };
+  const goNav = id => {
+    setActive(null);
+    setNav(id);
+    setMenuOpen(false);
+  };
+
+  // Command palette entries
+  const commands = useMemo(() => {
+    const base = [{
+      id: "nav-dashboard",
+      label: "Go to Overview",
+      icon: "◈",
+      section: "Go",
+      keywords: ["home", "dashboard"],
+      run: () => goNav("dashboard")
+    }, {
+      id: "nav-library",
+      label: "Go to Packs",
+      icon: "▦",
+      section: "Go",
+      keywords: ["library", "packs"],
+      run: () => goNav("library")
+    }, {
+      id: "nav-questions",
+      label: "Search all questions",
+      icon: "⌕",
+      section: "Go",
+      keywords: ["find", "questions"],
+      run: () => goNav("questions")
+    }, {
+      id: "nav-health",
+      label: "Go to Content health",
+      icon: "◉",
+      section: "Go",
+      keywords: ["lint", "issues", "duplicates"],
+      run: () => goNav("health")
+    }, {
+      id: "nav-activity",
+      label: "Go to Activity log",
+      icon: "≡",
+      section: "Go",
+      keywords: ["history", "changes"],
+      run: () => goNav("activity")
+    }, {
+      id: "act-newpack",
+      label: "Create new pack",
+      icon: "＋",
+      section: "Action",
+      keywords: ["add pack"],
+      run: () => setEditPack({})
+    }, {
+      id: "act-import",
+      label: "Import packs from JSON",
+      icon: "⭳",
+      section: "Action",
+      keywords: ["upload"],
+      run: onImportFile
+    }, {
+      id: "act-export",
+      label: "Export everything to JSON",
+      icon: "⭱",
+      section: "Action",
+      keywords: ["download", "backup"],
+      run: exportJSON
+    }, {
+      id: "th-light",
+      label: "Theme: Light",
+      icon: "☀",
+      section: "Theme",
+      run: () => theme.set("light")
+    }, {
+      id: "th-dark",
+      label: "Theme: Dark",
+      icon: "☾",
+      section: "Theme",
+      run: () => theme.set("dark")
+    }, {
+      id: "th-system",
+      label: "Theme: Auto (system)",
+      icon: "◐",
+      section: "Theme",
+      run: () => theme.set("system")
+    }, {
+      id: "act-password",
+      label: "Change admin password",
+      icon: "⚙",
+      section: "Action",
+      run: () => setChangePw(true)
+    }];
+    // jump straight to any pack
+    const packCmds = (packs || []).map(p => ({
+      id: "pack-" + p.id,
+      label: `Open “${p.name}”`,
+      icon: p.emoji,
+      section: "Pack",
+      hint: `${p.active_questions || 0} active questions`,
+      keywords: [p.slug, ...(p.tags || [])],
+      run: () => {
+        setNav("library");
+        goPack(p);
+      }
+    }));
+    return [...base, ...packCmds];
+  }, [packs, theme]); // eslint-disable-line
 
   // hotkeys
   useHotkey("mod+k", e => {
     e.preventDefault();
-    setNav("questions");
-    setActive(null);
+    setPaletteOpen(true);
   }, authed);
   if (!authed) return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(GlobalStyle, null), /*#__PURE__*/React.createElement(ConfirmHost, null), /*#__PURE__*/React.createElement(ToastHost, null), /*#__PURE__*/React.createElement(Login, {
     onSuccess: () => {
@@ -3314,11 +4540,6 @@ function App() {
       reloadPacks();
     }
   }));
-  const goNav = id => {
-    setActive(null);
-    setNav(id);
-    setMenuOpen(false);
-  };
   return /*#__PURE__*/React.createElement("div", {
     style: {
       minHeight: "100vh",
@@ -3414,16 +4635,60 @@ function App() {
     style: {
       fontSize: 17
     }
-  }, n.icon), !bp.isTablet && n.label))), /*#__PURE__*/React.createElement("div", {
+  }, n.icon), !bp.isTablet && n.label))), !bp.isTablet && /*#__PURE__*/React.createElement("button", {
+    onClick: () => setPaletteOpen(true),
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      margin: "12px 0",
+      padding: "9px 12px",
+      borderRadius: R.md,
+      border: "1px solid " + C.line,
+      background: C.bg,
+      cursor: "pointer",
+      fontFamily: "inherit",
+      color: C.sub,
+      fontSize: 13
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 14
+    }
+  }, "⌕"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      textAlign: "left"
+    }
+  }, "Quick actions"), /*#__PURE__*/React.createElement("kbd", {
+    style: kbdStyle
+  }, "⌘K")), /*#__PURE__*/React.createElement("div", {
     style: {
       flex: 1
     }
-  }), /*#__PURE__*/React.createElement("div", {
+  }), !bp.isTablet && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(ThemeToggle, {
+    theme: theme
+  })), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
       gap: 4
     }
-  }, /*#__PURE__*/React.createElement("button", {
+  }, bp.isTablet && /*#__PURE__*/React.createElement("button", {
+    onClick: () => setPaletteOpen(true),
+    title: "Quick actions (⌘K)",
+    style: sideBtn(true)
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 16
+    }
+  }, "⌕")), bp.isTablet && /*#__PURE__*/React.createElement(ThemeToggle, {
+    theme: theme,
+    mini: true
+  }), /*#__PURE__*/React.createElement("button", {
     onClick: () => setChangePw(true),
     title: "Change password",
     style: sideBtn(bp.isTablet)
@@ -3523,16 +4788,31 @@ function App() {
       border: "1px solid " + C.line,
       boxShadow: SH.lg,
       zIndex: 61,
-      minWidth: 180,
+      minWidth: 210,
       overflow: "hidden"
     }
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => {
+      goNav("activity");
+    },
+    style: menuItem
+  }, "≡ Activity log"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "10px 12px",
+      borderTop: "1px solid " + C.line
+    }
+  }, /*#__PURE__*/React.createElement(ThemeToggle, {
+    theme: theme
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
       setMenuOpen(false);
       setChangePw(true);
     },
-    style: menuItem
-  }, "Change password"), /*#__PURE__*/React.createElement("button", {
+    style: {
+      ...menuItem,
+      borderTop: "1px solid " + C.line
+    }
+  }, "⚙ Change password"), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       setMenuOpen(false);
       auth.logout();
@@ -3544,7 +4824,7 @@ function App() {
       borderTop: "1px solid " + C.line,
       color: C.danger
     }
-  }, "Sign out")))))), /*#__PURE__*/React.createElement("main", {
+  }, "⏻ Sign out")))))), /*#__PURE__*/React.createElement("main", {
     className: "pm-main",
     style: {
       flex: 1,
@@ -3553,7 +4833,8 @@ function App() {
   }, active ? /*#__PURE__*/React.createElement(PackDetail, {
     pack: active,
     onBack: closePack,
-    refreshPacks: reloadPacks
+    refreshPacks: reloadPacks,
+    onEditPack: setEditPack
   }) : nav === "dashboard" ? /*#__PURE__*/React.createElement(Dashboard, {
     onGoLibrary: () => goNav("library"),
     onGoQuestions: () => goNav("questions"),
@@ -3571,9 +4852,11 @@ function App() {
     onDelete: deletePack,
     onClone: setClonePack,
     onReorder: reorderPacks
-  }) : /*#__PURE__*/React.createElement(AllQuestions, {
+  }) : nav === "questions" ? /*#__PURE__*/React.createElement(AllQuestions, {
     onOpenPack: openPackById
-  })), bp.isPhone && !active && /*#__PURE__*/React.createElement("nav", {
+  }) : nav === "health" ? /*#__PURE__*/React.createElement(HealthView, {
+    onOpenPack: openPackById
+  }) : /*#__PURE__*/React.createElement(ActivityView, null)), bp.isPhone && !active && /*#__PURE__*/React.createElement("nav", {
     style: {
       position: "fixed",
       bottom: 0,
@@ -3585,7 +4868,7 @@ function App() {
       zIndex: 50,
       paddingBottom: "env(safe-area-inset-bottom)"
     }
-  }, NAV.map(n => /*#__PURE__*/React.createElement("button", {
+  }, NAV.filter(n => NAV_PHONE.includes(n.id)).map(n => /*#__PURE__*/React.createElement("button", {
     key: n.id,
     onClick: () => goNav(n.id),
     style: {
@@ -3632,7 +4915,11 @@ function App() {
   }, changePw && /*#__PURE__*/React.createElement(ChangePassword, {
     onClose: () => setChangePw(false),
     onDone: () => notify("Password updated")
-  })));
+  })), /*#__PURE__*/React.createElement(CommandPalette, {
+    open: paletteOpen,
+    onClose: () => setPaletteOpen(false),
+    commands: commands
+  }));
 }
 const sideBtn = mini => ({
   display: "flex",
@@ -3669,10 +4956,12 @@ const menuItem = {
 function GlobalStyle() {
   return /*#__PURE__*/React.createElement("style", null, `
     @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800;900&display=swap');
+    :root, [data-theme="light"]{ ${themeVars("light")} }
+    [data-theme="dark"]{ ${themeVars("dark")} }
     *{box-sizing:border-box}
     html,body{margin:0;padding:0}
-    html{ -webkit-text-size-adjust:100%; }
-    body{ background:${C.bg}; }
+    html{ -webkit-text-size-adjust:100%; transition:background .2s; }
+    body{ background:${C.bg}; transition:background .2s, color .2s; }
     button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,[tabindex]:focus-visible{ outline:2px solid ${C.brand}; outline-offset:2px; }
 
     @keyframes pm-spin{ to{ transform:rotate(360deg);} }
