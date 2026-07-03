@@ -2039,6 +2039,462 @@ function SyncHistory() {
     );
 }
 
+// ===== devdocs.jsx =====
+// ============================================================
+// Developer Notes — embedded reference documents.
+// These are hardcoded so they always ship with the build.
+// ============================================================
+
+const DOC_ARCHITECTURE = `# Positive Minds CMS — Site Architecture & Structure
+
+## 1. What this is
+A content management system for the **Positive Minds** children's word game
+(CBMT — Cognitive Bias Modification Therapy). The game presents fill-in-the-blank
+affirmation sentences (e.g. "I am ____ when I try something new." → BRAVE / BOLD)
+where both word options are positive. This CMS is the **authoring source of truth**:
+content is created, organized, reviewed, and version-tracked here, then published to
+a separate game backend through a customizable, multi-channel sync pipeline.
+
+The CMS is a **content production + publishing layer**, not the game's live database.
+
+## 2. Tech stack
+- **Frontend:** React 18.3.1 (single self-contained \`index.html\`, no runtime build step).
+  JSX is **pre-compiled to plain JS** via Babel *classic* runtime (React.createElement) —
+  NOT the automatic/dev runtime (which emits \`import jsxDEV\` and breaks a plain <script>).
+- **No in-browser Babel.** React + ReactDOM load from unpkg (pinned to 18.3.1 UMD).
+- **Backend:** Supabase (Postgres + PostgREST + Edge Functions + Auth).
+  Project ref: \`tytrmjjucqijzcrbwjfm\`.
+- **Hosting:** Cloudflare (Worker) at \`positive-minds-cms.<subdomain>.workers.dev\`,
+  auto-deploying from GitHub \`main\` via Cloudflare's Git integration.
+- **Repo:** GitHub \`alcharles1980-design/positive-minds-cms\` (private).
+- **Styling:** inline styles + a small CSS-variable theme system (light/dark). No CSS framework.
+
+## 3. Source layout (authoring → build)
+The app is authored as modular \`.jsx\` files in \`/v2/\`, then concatenated and compiled
+into one file. **Assembly order matters** (const helpers must precede their consumers;
+all cross-file components are \`function\` declarations so they hoist):
+
+    core.jsx        config, session/auth, data layer (rest/rpc/restAll), tokens, hooks
+    primitives.jsx  Btn, Badge, Pill, Field, inputs, Modal, Confirm, Toasts, states
+    engine.jsx      transformation engine (buildOutput), profiles/sync/targets data, fetchAllContent
+    firebase.jsx    Firebase transport (RTDB/Firestore/CloudFn writers), planWrites
+    editors.jsx     PackEditor, QuestionEditor, BulkImport
+    features.jsx    CommandPalette, PlayMode, HealthView, ActivityView, TagInput, ThemeToggle
+    publish1.jsx    ProfileBuilder (visual + JSON + preview), ValueMapEditor, FieldMapRow
+    firebase2.jsx   FirebaseTargetEditor, CloudFnDocs
+    publish2.jsx    PublishHub, ChannelsPanel, SyncHistory, FeedRow
+    devnotes.jsx    Developer Notes page + embedded docs (this file)
+    views1.jsx      Dashboard, Library, PackCard
+    views2.jsx      PackDetail, AllQuestions, Pager
+    shell.jsx       Login, ChangePassword, CloneDialog, App (nav/routing/state), GlobalStyle
+
+Build pipeline (\`/v2/\`):
+- \`assemble.cjs\` — strips React imports, converts \`export default function App\`→\`function App\`,
+  concatenates in order, adds React globals + mount, compiles via @babel/preset-react
+  (runtime: classic, development: false) → \`app.compiled.js\`.
+- \`build_html.cjs\` — wraps compiled JS in the HTML shell (unpkg React, PWA manifest+SW,
+  CDN-failure fallback, viewport-fit=cover) → \`index.html\`.
+- Final outputs copied to \`/repo/\` (git) and pushed; Cloudflare auto-builds.
+
+## 4. Architecture layers (in the app)
+config → data layer → design tokens → hooks → primitives → feature views → app shell.
+
+- **Data layer (core.jsx):** the \`db\` object is the ONLY place features touch data.
+  \`rest()\` and \`rpc()\` wrap PostgREST; both auto-refresh the auth token and retry once
+  on 401, then drop to login if refresh fails (via \`authEvents\`). \`restAll()\` paginates
+  in 1000-row batches to defeat the PostgREST cap.
+- **Design tokens:** \`C\` (colors, as CSS variables), \`S\` (spacing), \`R\` (radius),
+  \`SH\` (shadows), \`FONT\`. Colors resolve to \`var(--name)\`; \`THEMES\` holds the light/dark
+  values injected by GlobalStyle. \`data-theme\` on <html> flips the palette instantly.
+- **Hooks:** useBreakpoint (phone<640/tablet 640–1024/desktop>1024), useAsync,
+  useHotkey, useFocusTrap, useDebounced, useTheme; toast bus (notify), confirm bus.
+
+## 5. Data model (Supabase, all with RLS)
+**Tables:**
+- \`pm_packs\` — id, slug (unique), name, emoji, description, color, difficulty
+  (basic/advanced/mixed), status (draft/published/archived), sort_order, is_custom,
+  tags text[], content_version, released_version, released_at, timestamps.
+- \`pm_questions\` — id, pack_id (FK cascade), template (with \`{blank}\`), answer,
+  alt_answer, letters_hidden, difficulty (basic/advanced), status (active/inactive),
+  sort_order, notes, timestamps.
+- \`pm_activity\` — audit log: entity, entity_id, entity_name, action, actor, detail, created_at.
+- \`pm_export_profiles\` — id, name, description, spec (jsonb transform config), is_builtin.
+- \`pm_sync_log\` — profile/target/channel/mode/status/counts/detail, created_at.
+- \`pm_sync_targets\` — id, name, channel, profile_id, config (jsonb), enabled.
+- \`pm_dev_notes\` — singleton row (id=1) holding the editable scratchpad.
+
+**View:** \`pm_pack_overview\` — packs + active_questions + total_questions +
+has_pending_changes (= content_version > released_version).
+
+**Triggers:** \`pm_touch_updated_at\` (updated_at maintenance); \`pm_bump_pack_version\`
+(bumps pack content_version on any question insert/update/delete).
+
+**Functions (RPC):**
+- \`pm_dashboard_stats()\` — aggregate counts for the Overview.
+- \`pm_search_questions(q,pack,diff,stat,lim,off)\` — global paginated question search.
+- \`pm_clone_pack(src,new_slug,new_name)\` — duplicate a pack + its questions (as draft).
+- \`pm_lint()\` / \`pm_lint_details()\` — content health checks (invalid templates,
+  missing 2nd option, duplicates, thin packs).
+- \`pm_log(...)\` — append an activity row.
+- \`pm_mark_released(pack_ids uuid[])\` — set released_version = content_version
+  (null = all published) so "pending changes" clears after a sync.
+
+**RLS model:** anon = READ-ONLY (published/active content, profiles, logs, targets, notes);
+authenticated = full write. Anon write policies were dropped and the lockdown verified.
+
+## 6. Auth
+Single shared admin password. Auth user \`admin@positiveminds.app\` in Supabase Auth.
+Login uses the password grant → access + refresh tokens stored in sessionStorage.
+Writes send the access token as Bearer. Tokens expire ~1hr; the data layer refreshes
+transparently. Sign-out + change-password built in. Anon (publishable) key is safe to
+embed publicly and authorizes only reads.
+
+## 7. The transformation engine (customizable output)
+Content lives in a stable internal shape; **export profiles** project it into whatever
+a consumer needs. A profile's \`spec\` (jsonb) describes:
+- \`structure\`: "nested" (packs with questions) | "flat" (one question array) | "keyed" (dict by slug)
+- \`root_key\`, \`questions_key\`, \`key_by\`
+- \`include_meta\` (envelope with counts/timestamp)
+- \`filters\`: { status, question_status }
+- \`pack_fields\` / \`question_fields\`: [{ from, to, transform }] — rename + include/exclude
+  + per-field transform (none/upper/lower/trim)
+- \`value_maps\`: { outputField: { fromValue: toValue } } — e.g. difficulty:basic → level:1
+
+\`buildOutput(spec, packs, byPack, keyField)\` runs the projection; \`withMeta\` adds the
+envelope. The engine exists in TWO places that MUST stay in sync: the client (engine.jsx)
+and the \`game-feed\` edge function (server-side mirror).
+
+Three seeded starter profiles: **Firebase (nested)**, **Flat API (question list)**,
+**Unity (keyed dictionary)**.
+
+## 8. Publishing channels
+All emit through a chosen profile:
+- **File** — download the transformed JSON bundle.
+- **Feed (pull):** \`game-feed\` edge function serves content at a stable URL per profile.
+  Endpoints: \`?profile=<name|uuid>\`, \`?list=1\`, \`?health=1\`. verify_jwt disabled;
+  pages past 1000 rows; ~60s cache.
+- **Push:** POST the payload to a configurable target (Channels tab), CORS permitting.
+- **Firebase targets:** saved destinations pairing a profile with a database + layout.
+  Modes: Realtime DB (REST direct), Firestore (REST direct w/ typed-value conversion),
+  Cloud Function (POST \`{writes,payload}\`). Layouts: per-pack / per-question / single-doc,
+  with \`{slug}\`/\`{id}\` path templates. planWrites() builds the op list; fbWriters do the writing.
+
+**Control modes:** manual / auto-on-publish / scheduled (stored in push config).
+**Release state:** content_version vs released_version → "pending changes"; a successful
+sync calls pm_mark_released to clear it.
+
+## 9. Navigation & views
+Sidebar (desktop) / icon rail (tablet) / bottom-tab bar (phone). Routes:
+Overview (Dashboard), Packs (Library), Questions (AllQuestions global search),
+Health (lint), Publishing (profiles/targets/channels/history), Activity, Developer.
+History-based back button (pushState) so browser Back moves within the app.
+Command palette (⌘/Ctrl-K): fuzzy nav/actions/theme/jump-to-pack.
+
+## 10. Responsive & PWA
+Breakpoints 640 / 1024. Question rows are compact single-lines on desktop and
+content-first CARDS below desktop (sentence hero on top, meta+actions footer,
+checkbox floated to the corner). 16px inputs (no iOS zoom), bottom-sheet modals on phone,
+prefers-reduced-motion respected. Installable PWA (inline manifest blob + service worker
+that network-first caches GETs).
+
+## 11. Key gotchas (learned the hard way)
+- **PostgREST 1000-row cap:** a big \`limit=\` does NOT defeat it (server max-rows=1000).
+  Use \`restAll()\` pagination. Applies to the edge function too.
+- **Babel runtime:** must be classic; automatic runtime emits imports that break the <script>.
+- **Assembly/hoisting:** cross-file components must be \`function\` declarations; const
+  helpers must be defined in a file that loads before consumers.
+- **Session expiry:** refresh the token; don't leave the UI "logged in" on 401.
+- **Client/server engine parity:** any change to buildOutput must be mirrored in game-feed.
+- **View column order:** adding a column to pm_packs shifts \`p.*\` in the view — drop &
+  recreate pm_pack_overview rather than CREATE OR REPLACE.
+`;
+
+const DOC_CLAUDE_MD = `# CLAUDE.md — Positive Minds CMS
+
+Guidance for AI assistants (and humans) working on this codebase.
+
+## Project
+Content management system for the Positive Minds children's word game (CBMT
+fill-in-the-blank affirmations). This is the **authoring + publishing** layer; a
+separate game backend reads the content. Single-file React app, Supabase backend,
+Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
+
+## Stack & identifiers
+- React 18.3.1, single self-contained index.html, **NO runtime build** (JSX pre-compiled).
+- Supabase project ref: tytrmjjucqijzcrbwjfm
+- GitHub: alcharles1980-design/positive-minds-cms
+- Live: positive-minds-cms.<subdomain>.workers.dev
+- Feed edge function: /functions/v1/game-feed
+
+## Golden rules (do not break these)
+1. **Babel classic runtime only.** Compile with @babel/preset-react { runtime: "classic",
+   development: false }. The automatic/dev runtime emits \`import jsxDEV\` which breaks a
+   plain <script> and causes a blank "Loading…" screen. Verify the compiled output has
+   React.createElement and NO jsxDEV / NO top-level import.
+2. **PostgREST 1000-row cap.** Never rely on \`limit=10000\`; the server caps at 1000.
+   Use restAll() (paginate in 1000-row batches) for any list that can exceed 1000 rows.
+   The game-feed edge function must paginate too.
+3. **Assembly order + hoisting.** The app is concatenated from /v2/*.jsx in a fixed order
+   (see assemble.cjs). Cross-file COMPONENTS must be \`function\` declarations (hoisted).
+   Cross-file \`const\` helpers must be defined in a file that loads BEFORE their consumers.
+4. **Client/server engine parity.** The transformation engine (buildOutput/projectRow)
+   exists in engine.jsx AND in the game-feed edge function. Any change to one MUST be
+   mirrored in the other or the feed and the in-app export will diverge.
+5. **View column order.** pm_pack_overview uses \`p.*\`. Adding a column to pm_packs shifts
+   positions and CREATE OR REPLACE VIEW will error — DROP and recreate the view instead.
+6. **Auth/session.** Access tokens expire ~1hr. rest()/rpc() auto-refresh + retry once on
+   401 and fall back to the login screen. Don't remove that; don't leave the UI logged-in
+   on a dead token.
+
+## Data access
+- The \`db\` object (core.jsx) is the ONLY way to touch data. Add new queries there.
+- RPCs live in Supabase: pm_dashboard_stats, pm_search_questions, pm_clone_pack, pm_lint,
+  pm_lint_details, pm_log, pm_mark_released.
+- RLS: anon read-only, authenticated full write. Never add anon write policies.
+
+## Editing / build workflow
+- Edit the modular files in /v2/, NOT the compiled output.
+- Rebuild: \`node assemble.cjs && node build_html.cjs\`.
+- Validate before deploy: \`node --check app.compiled.js\`; confirm all JSX components
+  resolve to definitions; confirm all db.* / rpc names resolve; parse each inline <script>.
+- Test DB changes against the live project (RPCs, RLS) before shipping — verify, don't assume.
+- Deploy: copy index.html + source into /repo/, commit, push to main; Cloudflare auto-builds.
+- Always sync final files to the outputs directory and present them.
+
+## Conventions
+- Formatting: inline styles using the C/S/R/SH tokens; keep the CSS-variable theme intact
+  (don't hardcode hex where a token exists — dark mode depends on it).
+- Responsive: question rows are compact rows on desktop, content-first cards below desktop.
+  Use the pm-qrow / pm-qrow-main / pm-qrow-meta / pm-qrow-actions classes.
+- Every mutation should call logActivity(...) so the Activity log stays complete.
+- After a successful sync to the game, call db_sync.markReleased(null) to clear pending flags.
+- Keep responses/docs truthful to the actual schema (query pg_proc / pg_tables to confirm).
+
+## Testing capabilities
+This environment cannot reach *.supabase.co / *.workers.dev / Firebase hosts. So:
+DB work goes through the Supabase tools; HTTP round-trips (feed, push) must be tested by
+the user; the app can't be rendered headless (needs unpkg). Verify everything else
+deterministically (node --check, reference resolution, running engine logic in Node with
+real data pulled via SQL).
+
+## Known-safe "do not touch"
+- The three seeded builtin export profiles (is_builtin=true) unless explicitly asked.
+- pm_dev_notes is a singleton (id=1) — don't insert extra rows.
+`;
+
+const DOC_BUILD_PROMPT = `# Build Prompt — recreate Positive Minds CMS from scratch
+
+Use this as a single instruction to Claude (with code execution + a fresh Supabase
+project + a GitHub repo) to rebuild the entire app.
+
+---
+
+Build a content management web app called "Positive Minds" — a CMS for a children's
+word game based on CBMT (Cognitive Bias Modification Therapy). The game shows
+fill-in-the-blank affirmation sentences like "I am ____ when I try something new."
+with two positive word options (e.g. BRAVE / BOLD); the child picks either. This CMS
+is the authoring + publishing layer; a separate game backend consumes the content.
+
+## Architecture requirements
+- Single self-contained index.html. React 18.3.1 from unpkg (pinned UMD). NO runtime
+  build step and NO in-browser Babel: author modular .jsx, then pre-compile to plain JS
+  with @babel/preset-react { runtime: "classic", development: false } and concatenate.
+  Cross-file components must be function declarations (hoisting); const helpers precede use.
+- Backend: Supabase (Postgres + PostgREST + Edge Functions + Auth).
+- Host on Cloudflare (Worker) auto-deploying from GitHub main.
+- Styling: inline styles + a CSS-variable theme system for light/dark. No CSS framework.
+- Include a CDN-failure fallback message and PWA (inline manifest + service worker).
+
+## Data model (Supabase, all RLS: anon read-only, authenticated full write)
+- pm_packs(id, slug unique, name, emoji, description, color, difficulty
+  [basic/advanced/mixed], status [draft/published/archived], sort_order, is_custom,
+  tags text[], content_version int default 1, released_version int default 0, released_at,
+  timestamps)
+- pm_questions(id, pack_id FK cascade, template with {blank}, answer, alt_answer,
+  letters_hidden int, difficulty [basic/advanced], status [active/inactive], sort_order,
+  notes, timestamps)
+- pm_activity (audit log), pm_export_profiles(spec jsonb, is_builtin), pm_sync_log,
+  pm_sync_targets(config jsonb), pm_dev_notes (singleton id=1)
+- View pm_pack_overview: packs + active_questions + total_questions + has_pending_changes
+  (content_version > released_version)
+- Triggers: touch updated_at; bump pack content_version on any question change
+- RPCs: pm_dashboard_stats, pm_search_questions(q,pack,diff,stat,lim,off) [paginated],
+  pm_clone_pack(src,slug,name), pm_lint + pm_lint_details, pm_log, pm_mark_released(uuid[])
+- CRITICAL: paginate all list reads in 1000-row batches (restAll) — PostgREST caps at 1000.
+
+## Auth
+Single shared admin password (Supabase Auth user). Password grant → access+refresh tokens
+in sessionStorage; Bearer on writes; auto-refresh + retry on 401, fall back to login.
+Anon publishable key authorizes reads only.
+
+## Features to build
+1. **Dashboard/Overview:** aggregate stats (packs, questions, basic/advanced, empty packs,
+   avg/pack) via one RPC; quick actions; and a compact at-a-glance index of ALL pack names
+   (one line each, tap to open).
+2. **Library:** pack cards (emoji, color accent, status, question counts); search + status/
+   difficulty filters; drag-to-reorder; clone (duplicate pack + questions); delete with
+   optimistic Undo; JSON import (round-trip) and export.
+3. **Pack detail:** paginated question bank; add/edit questions with a live "how the child
+   sees it" preview; bulk import (pipe format OR JSON); multi-select bulk activate/deactivate/
+   delete; Play mode (experience the pack as a child, with progress + celebration).
+4. **All questions:** server-side global search across every pack, paginated, click-through
+   to the source pack.
+5. **Content health:** lint flags invalid templates (no {blank}), missing 2nd option,
+   duplicates, thin packs (1–2 questions); links to fix.
+6. **Publishing pipeline — the core differentiator:**
+   - A **transformation engine** with user-defined "export profiles" whose spec (jsonb)
+     controls output shape: structure (nested/flat/keyed), root/questions keys, field
+     rename+include/exclude, per-field transforms (upper/lower/trim), value maps
+     (e.g. difficulty→level), filters, meta envelope.
+   - A **profile builder** UI: visual field-mapper + raw JSON editor + live preview, all synced.
+   - Seed 3 starter profiles: Firebase (nested), Flat API (flat), Unity (keyed).
+   - Three channels, all emitting through a chosen profile: **File** download;
+     **Feed (pull)** via a game-feed edge function serving per-profile content at a stable
+     public URL (endpoints: ?profile, ?list, ?health; paginate; verify_jwt off; ~60s cache);
+     **Push** POST to a configurable target.
+   - **Firebase targets:** saved destinations (a table) pairing a profile with a database +
+     layout. Support Realtime DB (REST), Firestore (REST with typed-value conversion), and
+     Cloud Function (POST {writes,payload}). Configurable layouts (per-pack/per-question/
+     single-doc) with {slug}/{id} path templates. Provide a sample Cloud Function in-app.
+   - Control modes: manual / auto-on-publish / scheduled. Release state: content_version vs
+     released_version → "pending changes"; a successful sync calls pm_mark_released to clear it.
+   - Sync history log of every file/feed/push.
+   - IMPORTANT: mirror the transform engine in the edge function; keep them identical.
+7. **Activity log:** every mutation recorded (who/what/when) via pm_log.
+8. **Developer Notes page:** hardcoded architecture doc + CLAUDE.md + this build prompt,
+   each viewable with copy + download, plus an editable scratchpad saved to pm_dev_notes.
+
+## UX / cross-cutting
+- Dark mode (light/dark/system, persisted, CSS variables). Command palette (⌘/Ctrl-K):
+  fuzzy nav/actions/theme/jump-to-pack. Styled confirm dialogs (no native confirm()).
+  Focus trap + Escape on modals, ARIA dialog roles, visible focus rings. Toasts with
+  actions, skeletons, empty/error states. History-based back button.
+- Responsive: sidebar (desktop) / icon rail (tablet) / bottom-tab bar (phone). Question
+  rows are compact single-lines on desktop and content-first CARDS below desktop (sentence
+  hero on top, meta+actions footer, checkbox in the corner). 16px inputs, bottom-sheet
+  modals on phone, prefers-reduced-motion respected.
+
+## Build & verify discipline
+Edit modular files, not compiled output. Rebuild with assemble+build scripts. Before
+deploy: node --check the compiled JS; confirm every JSX component/db call/RPC resolves;
+parse each inline <script>. Test DB (RPCs, RLS) against the live project. Deploy by pushing
+to main (Cloudflare auto-builds). Verify empirically — never assert a capability works
+without testing it.
+`;
+
+// ===== devnotes.jsx =====
+// ============================================================
+// Developer Notes page — three reference docs + editable scratchpad
+// ============================================================
+const db_notes = {
+  get: () => rest("pm_dev_notes?id=eq.1&limit=1").then(r => r.data?.[0]?.content ?? ""),
+  save: (content) => rest("pm_dev_notes?id=eq.1", { method: "PATCH", body: { content, updated_at: new Date().toISOString() } }),
+};
+
+const DEV_DOCS = [
+  { id: "architecture", label: "Architecture & Structure", file: "ARCHITECTURE.md", icon: "🗂", body: DOC_ARCHITECTURE, desc: "Complete technical reference: modules, data model, engine, channels, build." },
+  { id: "claude_md", label: "CLAUDE.md", file: "CLAUDE.md", icon: "📘", body: DOC_CLAUDE_MD, desc: "Conventions & rules for AI assistants working on this codebase." },
+  { id: "build_prompt", label: "Build Prompt", file: "BUILD_PROMPT.md", icon: "🛠", body: DOC_BUILD_PROMPT, desc: "A single prompt to recreate this entire app from scratch in Claude." },
+];
+
+const downloadText = (filename, text) => {
+  const blob = new Blob([text], { type: "text/markdown" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+};
+
+function DeveloperNotes() {
+  const [active, setActive] = useState("architecture");
+  const [copied, setCopied] = useState(false);
+
+  // scratchpad
+  const [notes, setNotes] = useState(null);
+  const [saved, setSaved] = useState(true);
+  const [savingState, setSavingState] = useState("");
+  const saveTimer = useRef(null);
+
+  useEffect(() => { db_notes.get().then(c => setNotes(c)).catch(() => setNotes("")); }, []);
+
+  const onNotesChange = (val) => {
+    setNotes(val); setSaved(false);
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      setSavingState("saving");
+      try { await db_notes.save(val); setSaved(true); setSavingState("saved"); setTimeout(() => setSavingState(""), 1500); }
+      catch { setSavingState("error"); }
+    }, 800);
+  };
+
+  const doc = active === "scratchpad" ? null : DEV_DOCS.find(d => d.id === active);
+  const copy = () => { if (doc) { navigator.clipboard?.writeText(doc.body); setCopied(true); setTimeout(() => setCopied(false), 1500); } };
+
+  return (
+    <div>
+      <div style={{ marginBottom: S.lg }}>
+        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Developer notes</h1>
+        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>Reference documentation and a shared scratchpad for this project.</p>
+      </div>
+
+      {/* doc tabs */}
+      <div className="pm-dev-tabs" style={{ display: "flex", gap: 8, marginBottom: S.lg, flexWrap: "wrap" }}>
+        {DEV_DOCS.map(d => (
+          <button key={d.id} onClick={() => setActive(d.id)} style={docTabStyle(active === d.id)}>
+            <span style={{ fontSize: 16 }}>{d.icon}</span>{d.label}
+          </button>
+        ))}
+        <button onClick={() => setActive("scratchpad")} style={docTabStyle(active === "scratchpad")}>
+          <span style={{ fontSize: 16 }}>✎</span>Scratchpad
+        </button>
+      </div>
+
+      {doc ? (
+        <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, overflow: "hidden" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, padding: `${S.md + 2}px ${S.lg}px`, borderBottom: "1px solid " + C.line, flexWrap: "wrap" }}>
+            <div style={{ flex: 1, minWidth: 180 }}>
+              <div style={{ fontSize: 14.5, fontWeight: 800, color: C.ink }}>{doc.file}</div>
+              <div style={{ fontSize: 12.5, color: C.sub, marginTop: 1 }}>{doc.desc}</div>
+            </div>
+            <Btn variant="ghost" size="sm" onClick={copy}>{copied ? "Copied ✓" : "⧉ Copy"}</Btn>
+            <Btn variant="soft" size="sm" onClick={() => downloadText(doc.file, doc.body)}>⭳ Download</Btn>
+          </div>
+          <pre style={{ margin: 0, padding: S.lg, fontSize: 12.5, lineHeight: 1.6, color: C.ink2, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", maxHeight: "62vh", overflowY: "auto" }}>{doc.body}</pre>
+        </div>
+      ) : (
+        <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, overflow: "hidden" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, padding: `${S.md + 2}px ${S.lg}px`, borderBottom: "1px solid " + C.line }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 14.5, fontWeight: 800, color: C.ink }}>Shared scratchpad</div>
+              <div style={{ fontSize: 12.5, color: C.sub, marginTop: 1 }}>Free-form notes, saved automatically. Visible to anyone with access.</div>
+            </div>
+            <span style={{ fontSize: 12, fontWeight: 700, color: savingState === "error" ? C.danger : savingState === "saving" ? C.faint : saved ? C.good : C.faint }}>
+              {savingState === "error" ? "Save failed" : savingState === "saving" ? "Saving…" : saved ? "Saved" : "Unsaved"}
+            </span>
+          </div>
+          {notes === null ? <div style={{ padding: S.xl }}><Spinner label="Loading notes…" /></div> : (
+            <>
+              <Textarea value={notes} onChange={(e) => onNotesChange(e.target.value)} rows={16}
+                placeholder="Jot down TODOs, decisions, credentials to rotate, ideas…"
+                style={{ border: "none", borderRadius: 0, fontFamily: "ui-monospace, monospace", fontSize: 13, lineHeight: 1.6 }} />
+              {savingState === "error" && <div style={{ padding: "8px 16px" }}><Btn variant="ghost" size="sm" onClick={() => onNotesChange(notes)}>Retry save</Btn></div>}
+            </>
+          )}
+        </div>
+      )}
+
+      <div style={{ marginTop: S.md, fontSize: 12, color: C.faint }}>
+        Docs are embedded in the build (always current with this version). The scratchpad is stored in the database.
+      </div>
+    </div>
+  );
+}
+
+const docTabStyle = (on) => ({
+  display: "flex", alignItems: "center", gap: 8, padding: "9px 15px", borderRadius: R.md,
+  border: "1px solid " + (on ? C.brand : C.line), background: on ? C.brandSoft : C.panel,
+  color: on ? C.brandInk : C.ink2, cursor: "pointer", fontFamily: "inherit", fontSize: 13.5, fontWeight: 700,
+});
+
 // ===== views1.jsx =====
 // ============================================================
 // Dashboard
@@ -2540,6 +2996,7 @@ const NAV = [
   { id: "health", label: "Health", icon: "◉" },
   { id: "publish", label: "Publishing", icon: "⇧" },
   { id: "activity", label: "Activity", icon: "≡" },
+  { id: "devnotes", label: "Developer", icon: "⌘" },
 ];
 // Phone shows a subset in the bottom bar; the rest live in the ⋯ menu.
 const NAV_PHONE = ["dashboard", "library", "questions", "publish"];
@@ -2665,6 +3122,7 @@ function App() {
       { id: "nav-health", label: "Go to Content health", icon: "◉", section: "Go", keywords: ["lint", "issues", "duplicates"], run: () => goNav("health") },
       { id: "nav-publish", label: "Go to Publishing", icon: "⇧", section: "Go", keywords: ["sync", "export", "profile", "feed", "game"], run: () => goNav("publish") },
       { id: "nav-activity", label: "Go to Activity log", icon: "≡", section: "Go", keywords: ["history", "changes"], run: () => goNav("activity") },
+      { id: "nav-devnotes", label: "Go to Developer notes", icon: "⌘", section: "Go", keywords: ["docs", "architecture", "claude", "prompt", "readme"], run: () => goNav("devnotes") },
       { id: "act-newpack", label: "Create new pack", icon: "＋", section: "Action", keywords: ["add pack"], run: () => setEditPack({}) },
       { id: "act-import", label: "Import packs from JSON", icon: "⭳", section: "Action", keywords: ["upload"], run: onImportFile },
       { id: "act-export", label: "Export everything to JSON", icon: "⭱", section: "Action", keywords: ["download", "backup"], run: exportJSON },
@@ -2743,6 +3201,7 @@ function App() {
                   <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", background: C.panel, borderRadius: R.md, border: "1px solid " + C.line, boxShadow: SH.lg, zIndex: 61, minWidth: 210, overflow: "hidden" }}>
                     <button onClick={() => { goNav("health"); }} style={menuItem}>◉ Content health</button>
                     <button onClick={() => { goNav("activity"); }} style={{ ...menuItem, borderTop: "1px solid " + C.line }}>≡ Activity log</button>
+                    <button onClick={() => { goNav("devnotes"); }} style={{ ...menuItem, borderTop: "1px solid " + C.line }}>⌘ Developer notes</button>
                     <div style={{ padding: "10px 12px", borderTop: "1px solid " + C.line }}><ThemeToggle theme={theme} /></div>
                     <button onClick={() => { setMenuOpen(false); setChangePw(true); }} style={{ ...menuItem, borderTop: "1px solid " + C.line }}>⚙ Change password</button>
                     <button onClick={() => { setMenuOpen(false); auth.logout(); setAuthed(false); setActive(null); }} style={{ ...menuItem, borderTop: "1px solid " + C.line, color: C.danger }}>⏻ Sign out</button>
@@ -2768,6 +3227,8 @@ function App() {
             <HealthView onOpenPack={openPackById} />
           ) : nav === "publish" ? (
             <PublishHub packs={packs} onSynced={reloadPacks} />
+          ) : nav === "devnotes" ? (
+            <DeveloperNotes />
           ) : (
             <ActivityView />
           )}
