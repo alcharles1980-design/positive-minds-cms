@@ -6,9 +6,6 @@
 <title>Positive Minds — Pack Content Manager</title>
 <meta name="description" content="Content management for the Positive Minds CBMT word-game pack library." />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧠%3C/text%3E%3C/svg%3E" />
-<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <style>
   html,body{margin:0;padding:0}
   #root{min-height:100vh}
@@ -17,8 +14,26 @@
 </head>
 <body>
 <div id="root"><div class="boot">Loading Positive Minds…</div></div>
-<script type="text/babel" data-presets="react">
-const { useState, useEffect, useMemo, useCallback } = React;
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script>
+// Fallback: if React failed to load from CDN, show a clear message instead of hanging
+window.addEventListener('load', function(){
+  setTimeout(function(){
+    if (typeof React === 'undefined' || typeof ReactDOM === 'undefined') {
+      document.getElementById('root').innerHTML =
+        '<div class="boot"><div style="text-align:center;max-width:340px"><div style="font-size:15px;font-weight:700;color:#1C1A2E">Couldn\'t load the app</div><div style="font-size:13px;margin-top:8px;color:#6B6880">A required script was blocked. Try a hard refresh (Ctrl+Shift+R), disable any ad/script blocker for this site, or check your connection.</div></div></div>';
+    }
+  }, 4000);
+});
+</script>
+<script>
+const {
+  useState,
+  useEffect,
+  useMemo,
+  useCallback
+} = React;
 
 // ============================================================
 // Positive Minds — Pack CMS
@@ -28,22 +43,110 @@ const { useState, useEffect, useMemo, useCallback } = React;
 
 const SUPABASE_URL = "https://tytrmjjucqijzcrbwjfm.supabase.co";
 const SUPABASE_KEY = "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev";
+const ADMIN_EMAIL = "admin@positiveminds.app"; // fixed internal id; the shared password is the secret
+const SESSION_STORE = "pm_admin_session";
+
+// --- session (in-memory + sessionStorage so a refresh keeps you logged in) ---
+const session = {
+  token: null,
+  refresh: null,
+  load() {
+    try {
+      const raw = sessionStorage.getItem(SESSION_STORE);
+      if (raw) {
+        const s = JSON.parse(raw);
+        this.token = s.access_token;
+        this.refresh = s.refresh_token;
+      }
+    } catch {}
+    return this.token;
+  },
+  save(access_token, refresh_token) {
+    this.token = access_token;
+    this.refresh = refresh_token;
+    try {
+      sessionStorage.setItem(SESSION_STORE, JSON.stringify({
+        access_token,
+        refresh_token
+      }));
+    } catch {}
+  },
+  clear() {
+    this.token = null;
+    this.refresh = null;
+    try {
+      sessionStorage.removeItem(SESSION_STORE);
+    } catch {}
+  }
+};
+
+// --- auth against Supabase Auth (/auth/v1) -----------------
+const auth = {
+  async login(password) {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_KEY,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        email: ADMIN_EMAIL,
+        password
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error_description || data.msg || "Incorrect password");
+    session.save(data.access_token, data.refresh_token);
+    return true;
+  },
+  async changePassword(newPassword) {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+      method: "PUT",
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${session.token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        password: newPassword
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error_description || data.msg || "Could not change password");
+    return true;
+  },
+  logout() {
+    session.clear();
+  },
+  isAuthed() {
+    return !!session.token;
+  }
+};
 
 // --- tiny supabase REST helper -----------------------------
-const api = async (path, { method = "GET", body, headers = {} } = {}) => {
+// Uses the auth session token when present (authorizes writes),
+// otherwise falls back to the anon key (read-only).
+const api = async (path, {
+  method = "GET",
+  body,
+  headers = {}
+} = {}) => {
+  const bearer = session.token || SUPABASE_KEY;
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     method,
     headers: {
       apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
+      Authorization: `Bearer ${bearer}`,
       "Content-Type": "application/json",
-      Prefer: method === "POST" ? "return=representation" : "return=representation",
-      ...headers,
+      Prefer: "return=representation",
+      ...headers
     },
-    body: body ? JSON.stringify(body) : undefined,
+    body: body ? JSON.stringify(body) : undefined
   });
   if (!res.ok) {
     const txt = await res.text();
+    // Session expired mid-use → clear it so the app can prompt re-login
+    if (res.status === 401 && session.token) session.clear();
     throw new Error(`${res.status}: ${txt}`);
   }
   if (res.status === 204) return null;
@@ -68,19 +171,36 @@ const T = {
   danger: "#E5484D",
   dangerSoft: "#FBE9E9",
   draft: "#8B8AA0",
-  draftSoft: "#EFEEF4",
+  draftSoft: "#EFEEF4"
 };
-
 const STATUS_STYLES = {
-  published: { bg: T.goodSoft, fg: "#0A7A6C", label: "Published" },
-  draft: { bg: T.draftSoft, fg: T.draft, label: "Draft" },
-  archived: { bg: T.warnSoft, fg: "#B5641F", label: "Archived" },
-  active: { bg: T.goodSoft, fg: "#0A7A6C", label: "Active" },
-  inactive: { bg: T.draftSoft, fg: T.draft, label: "Inactive" },
+  published: {
+    bg: T.goodSoft,
+    fg: "#0A7A6C",
+    label: "Published"
+  },
+  draft: {
+    bg: T.draftSoft,
+    fg: T.draft,
+    label: "Draft"
+  },
+  archived: {
+    bg: T.warnSoft,
+    fg: "#B5641F",
+    label: "Archived"
+  },
+  active: {
+    bg: T.goodSoft,
+    fg: "#0A7A6C",
+    label: "Active"
+  },
+  inactive: {
+    bg: T.draftSoft,
+    fg: T.draft,
+    label: "Inactive"
+  }
 };
-
-const slugify = (s) =>
-  s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+const slugify = s => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
 // preview a template with the answer blanked
 const renderPreview = (template, answer, altAnswer, letters, difficulty) => {
@@ -95,679 +215,1928 @@ const renderPreview = (template, answer, altAnswer, letters, difficulty) => {
   }
   const sentence = (template || "").replace(/\{blank\}/g, blanked);
   const opts = [answer, altAnswer].filter(Boolean).join(" / ");
-  return { sentence, opts };
+  return {
+    sentence,
+    opts
+  };
 };
 
 // ============================================================
 // Small UI atoms
 // ============================================================
-const Badge = ({ kind }) => {
+const Badge = ({
+  kind
+}) => {
   const s = STATUS_STYLES[kind] || STATUS_STYLES.draft;
-  return (
-    <span style={{
-      fontSize: 11, fontWeight: 600, padding: "3px 9px", borderRadius: 20,
-      background: s.bg, color: s.fg, letterSpacing: 0.2, whiteSpace: "nowrap",
-    }}>{s.label}</span>
-  );
+  return /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      fontWeight: 600,
+      padding: "3px 9px",
+      borderRadius: 20,
+      background: s.bg,
+      color: s.fg,
+      letterSpacing: 0.2,
+      whiteSpace: "nowrap"
+    }
+  }, s.label);
 };
-
-const Pill = ({ children, tone = "neutral" }) => {
+const Pill = ({
+  children,
+  tone = "neutral"
+}) => {
   const tones = {
-    neutral: { bg: T.spineSoft, fg: T.spine },
-    muted: { bg: "#F0EFF5", fg: T.sub },
+    neutral: {
+      bg: T.spineSoft,
+      fg: T.spine
+    },
+    muted: {
+      bg: "#F0EFF5",
+      fg: T.sub
+    }
   };
   const c = tones[tone] || tones.neutral;
-  return (
-    <span style={{
-      fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 6,
-      background: c.bg, color: c.fg, textTransform: "capitalize",
-    }}>{children}</span>
-  );
+  return /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      fontWeight: 600,
+      padding: "2px 8px",
+      borderRadius: 6,
+      background: c.bg,
+      color: c.fg,
+      textTransform: "capitalize"
+    }
+  }, children);
 };
-
-const Btn = ({ children, onClick, variant = "primary", size = "md", disabled, title, style }) => {
+const Btn = ({
+  children,
+  onClick,
+  variant = "primary",
+  size = "md",
+  disabled,
+  title,
+  style
+}) => {
   const sizes = {
-    sm: { padding: "6px 12px", fontSize: 13 },
-    md: { padding: "9px 16px", fontSize: 14 },
+    sm: {
+      padding: "6px 12px",
+      fontSize: 13
+    },
+    md: {
+      padding: "9px 16px",
+      fontSize: 14
+    }
   };
   const variants = {
-    primary: { background: T.spine, color: "#fff", border: "1px solid " + T.spine },
-    soft: { background: T.spineSoft, color: T.spine, border: "1px solid " + T.spineSoft },
-    ghost: { background: "transparent", color: T.sub, border: "1px solid " + T.line },
-    danger: { background: "#fff", color: T.danger, border: "1px solid " + T.dangerSoft },
+    primary: {
+      background: T.spine,
+      color: "#fff",
+      border: "1px solid " + T.spine
+    },
+    soft: {
+      background: T.spineSoft,
+      color: T.spine,
+      border: "1px solid " + T.spineSoft
+    },
+    ghost: {
+      background: "transparent",
+      color: T.sub,
+      border: "1px solid " + T.line
+    },
+    danger: {
+      background: "#fff",
+      color: T.danger,
+      border: "1px solid " + T.dangerSoft
+    }
   };
-  return (
-    <button onClick={onClick} disabled={disabled} title={title} style={{
-      ...sizes[size], ...variants[variant], ...style,
-      borderRadius: 9, fontWeight: 600, cursor: disabled ? "not-allowed" : "pointer",
-      opacity: disabled ? 0.5 : 1, transition: "all .15s", fontFamily: "inherit",
-      display: "inline-flex", alignItems: "center", gap: 7, lineHeight: 1,
-    }}>{children}</button>
-  );
+  return /*#__PURE__*/React.createElement("button", {
+    onClick: onClick,
+    disabled: disabled,
+    title: title,
+    style: {
+      ...sizes[size],
+      ...variants[variant],
+      ...style,
+      borderRadius: 9,
+      fontWeight: 600,
+      cursor: disabled ? "not-allowed" : "pointer",
+      opacity: disabled ? 0.5 : 1,
+      transition: "all .15s",
+      fontFamily: "inherit",
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 7,
+      lineHeight: 1
+    }
+  }, children);
 };
-
-const Field = ({ label, children, hint, style }) => (
-  <label style={{ display: "block", ...style }}>
-    <div style={{ fontSize: 12, fontWeight: 600, color: T.sub, marginBottom: 6, letterSpacing: 0.2 }}>{label}</div>
-    {children}
-    {hint && <div style={{ fontSize: 11.5, color: T.faint, marginTop: 5 }}>{hint}</div>}
-  </label>
-);
-
+const Field = ({
+  label,
+  children,
+  hint,
+  style
+}) => /*#__PURE__*/React.createElement("label", {
+  style: {
+    display: "block",
+    ...style
+  }
+}, /*#__PURE__*/React.createElement("div", {
+  style: {
+    fontSize: 12,
+    fontWeight: 600,
+    color: T.sub,
+    marginBottom: 6,
+    letterSpacing: 0.2
+  }
+}, label), children, hint && /*#__PURE__*/React.createElement("div", {
+  style: {
+    fontSize: 11.5,
+    color: T.faint,
+    marginTop: 5
+  }
+}, hint));
 const inputStyle = {
-  width: "100%", padding: "10px 12px", borderRadius: 9, border: "1px solid " + T.line,
-  fontSize: 14, fontFamily: "inherit", color: T.ink, background: "#fff",
-  boxSizing: "border-box", outline: "none",
+  width: "100%",
+  padding: "10px 12px",
+  borderRadius: 9,
+  border: "1px solid " + T.line,
+  fontSize: 14,
+  fontFamily: "inherit",
+  color: T.ink,
+  background: "#fff",
+  boxSizing: "border-box",
+  outline: "none"
 };
-
-const Input = (p) => <input {...p} style={{ ...inputStyle, ...p.style }} onFocus={(e) => e.target.style.borderColor = T.spine} onBlur={(e) => e.target.style.borderColor = T.line} />;
-const Textarea = (p) => <textarea {...p} style={{ ...inputStyle, resize: "vertical", ...p.style }} onFocus={(e) => e.target.style.borderColor = T.spine} onBlur={(e) => e.target.style.borderColor = T.line} />;
-const Select = (p) => <select {...p} style={{ ...inputStyle, ...p.style, appearance: "none", backgroundImage: "url(\"data:image/svg+xml,%3Csvg width='10' height='6' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236B6880' fill='none' stroke-width='1.5'/%3E%3C/svg%3E\")", backgroundRepeat: "no-repeat", backgroundPosition: "right 12px center", paddingRight: 32 }}>{p.children}</select>;
-
-const Modal = ({ open, onClose, children, width = 560 }) => {
+const Input = p => /*#__PURE__*/React.createElement("input", {
+  ...p,
+  style: {
+    ...inputStyle,
+    ...p.style
+  },
+  onFocus: e => e.target.style.borderColor = T.spine,
+  onBlur: e => e.target.style.borderColor = T.line
+});
+const Textarea = p => /*#__PURE__*/React.createElement("textarea", {
+  ...p,
+  style: {
+    ...inputStyle,
+    resize: "vertical",
+    ...p.style
+  },
+  onFocus: e => e.target.style.borderColor = T.spine,
+  onBlur: e => e.target.style.borderColor = T.line
+});
+const Select = p => /*#__PURE__*/React.createElement("select", {
+  ...p,
+  style: {
+    ...inputStyle,
+    ...p.style,
+    appearance: "none",
+    backgroundImage: "url(\"data:image/svg+xml,%3Csvg width='10' height='6' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236B6880' fill='none' stroke-width='1.5'/%3E%3C/svg%3E\")",
+    backgroundRepeat: "no-repeat",
+    backgroundPosition: "right 12px center",
+    paddingRight: 32
+  }
+}, p.children);
+const Modal = ({
+  open,
+  onClose,
+  children,
+  width = 560
+}) => {
   if (!open) return null;
-  return (
-    <div onClick={onClose} style={{
-      position: "fixed", inset: 0, background: "rgba(28,26,46,0.45)", zIndex: 100,
-      display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "6vh 20px 20px",
-      backdropFilter: "blur(2px)", overflowY: "auto",
-    }}>
-      <div onClick={(e) => e.stopPropagation()} style={{
-        background: T.panel, borderRadius: 18, width: "100%", maxWidth: width,
-        boxShadow: "0 24px 70px rgba(28,26,46,0.28)", overflow: "hidden",
-      }}>{children}</div>
-    </div>
-  );
+  return /*#__PURE__*/React.createElement("div", {
+    onClick: onClose,
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(28,26,46,0.45)",
+      zIndex: 100,
+      display: "flex",
+      alignItems: "flex-start",
+      justifyContent: "center",
+      padding: "6vh 20px 20px",
+      backdropFilter: "blur(2px)",
+      overflowY: "auto"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      background: T.panel,
+      borderRadius: 18,
+      width: "100%",
+      maxWidth: width,
+      boxShadow: "0 24px 70px rgba(28,26,46,0.28)",
+      overflow: "hidden"
+    }
+  }, children));
 };
 
 // ============================================================
 // Pack editor modal
 // ============================================================
-const EMOJI_CHOICES = ["💪","😊","🧘","🎯","🎓","💡","🛡️","🤝","🫶","🌟","🗣️","👨‍👩‍👧","🌈","🕊️","❤️","🌱","✨","🧠","🔆","🦋"];
-const COLOR_CHOICES = ["#F39C12","#E84393","#00B894","#0984E3","#6C5CE7","#FDCB6E","#D63031","#00CEC9","#E17055","#FAB1A0","#74B9FF","#A29BFE","#55EFC4","#81ECEC"];
-
-function PackEditor({ pack, onSave, onClose }) {
+const EMOJI_CHOICES = ["💪", "😊", "🧘", "🎯", "🎓", "💡", "🛡️", "🤝", "🫶", "🌟", "🗣️", "👨‍👩‍👧", "🌈", "🕊️", "❤️", "🌱", "✨", "🧠", "🔆", "🦋"];
+const COLOR_CHOICES = ["#F39C12", "#E84393", "#00B894", "#0984E3", "#6C5CE7", "#FDCB6E", "#D63031", "#00CEC9", "#E17055", "#FAB1A0", "#74B9FF", "#A29BFE", "#55EFC4", "#81ECEC"];
+function PackEditor({
+  pack,
+  onSave,
+  onClose
+}) {
   const isNew = !pack?.id;
   const [f, setF] = useState({
-    name: pack?.name || "", slug: pack?.slug || "", emoji: pack?.emoji || "💪",
-    description: pack?.description || "", color: pack?.color || "#6C5CE7",
-    difficulty: pack?.difficulty || "basic", status: pack?.status || "draft",
-    is_custom: pack?.is_custom || false,
+    name: pack?.name || "",
+    slug: pack?.slug || "",
+    emoji: pack?.emoji || "💪",
+    description: pack?.description || "",
+    color: pack?.color || "#6C5CE7",
+    difficulty: pack?.difficulty || "basic",
+    status: pack?.status || "draft",
+    is_custom: pack?.is_custom || false
   });
   const [slugEdited, setSlugEdited] = useState(!isNew);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
-
-  const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
-  const onName = (v) => { set("name", v); if (!slugEdited) set("slug", slugify(v)); };
-
-  const submit = async () => {
-    if (!f.name.trim()) { setErr("Give the pack a name."); return; }
-    if (!f.slug.trim()) { setErr("Slug can't be empty."); return; }
-    setSaving(true); setErr("");
-    try { await onSave(f, pack?.id); onClose(); }
-    catch (e) { setErr(e.message.includes("duplicate") ? "That slug is already taken." : e.message); }
-    finally { setSaving(false); }
+  const set = (k, v) => setF(p => ({
+    ...p,
+    [k]: v
+  }));
+  const onName = v => {
+    set("name", v);
+    if (!slugEdited) set("slug", slugify(v));
   };
-
-  return (
-    <>
-      <div style={{ padding: "22px 26px", borderBottom: "1px solid " + T.line, display: "flex", alignItems: "center", gap: 12 }}>
-        <div style={{ fontSize: 28 }}>{f.emoji}</div>
-        <div>
-          <div style={{ fontSize: 18, fontWeight: 700, color: T.ink }}>{isNew ? "New pack" : "Edit pack"}</div>
-          <div style={{ fontSize: 13, color: T.sub }}>{isNew ? "Add a themed category to the library" : f.name}</div>
-        </div>
-      </div>
-      <div style={{ padding: 26, display: "grid", gap: 18 }}>
-        <Field label="Pack name">
-          <Input value={f.name} onChange={(e) => onName(e.target.value)} placeholder="e.g. Confidence Pack" autoFocus />
-        </Field>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-          <Field label="Slug" hint="URL-safe id used by the game">
-            <Input value={f.slug} onChange={(e) => { setSlugEdited(true); set("slug", slugify(e.target.value)); }} placeholder="confidence" />
-          </Field>
-          <Field label="Difficulty">
-            <Select value={f.difficulty} onChange={(e) => set("difficulty", e.target.value)}>
-              <option value="basic">Basic</option>
-              <option value="advanced">Advanced</option>
-              <option value="mixed">Mixed</option>
-            </Select>
-          </Field>
-        </div>
-        <Field label="Description" hint="Short blurb shown on the pack card">
-          <Textarea value={f.description} onChange={(e) => set("description", e.target.value)} rows={2} placeholder="Believe in yourself and take pride in what you do." />
-        </Field>
-        <Field label="Icon">
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {EMOJI_CHOICES.map((e) => (
-              <button key={e} onClick={() => set("emoji", e)} style={{
-                fontSize: 20, width: 40, height: 40, borderRadius: 10, cursor: "pointer",
-                border: "2px solid " + (f.emoji === e ? T.spine : T.line),
-                background: f.emoji === e ? T.spineSoft : "#fff",
-              }}>{e}</button>
-            ))}
-          </div>
-        </Field>
-        <Field label="Accent color">
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {COLOR_CHOICES.map((c) => (
-              <button key={c} onClick={() => set("color", c)} title={c} style={{
-                width: 30, height: 30, borderRadius: 9, cursor: "pointer", background: c,
-                border: "3px solid " + (f.color === c ? T.ink : "transparent"),
-                boxShadow: f.color === c ? "0 0 0 2px #fff inset" : "none",
-              }} />
-            ))}
-          </div>
-        </Field>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, alignItems: "end" }}>
-          <Field label="Status">
-            <Select value={f.status} onChange={(e) => set("status", e.target.value)}>
-              <option value="draft">Draft (hidden from game)</option>
-              <option value="published">Published (live)</option>
-              <option value="archived">Archived</option>
-            </Select>
-          </Field>
-          <label style={{ display: "flex", alignItems: "center", gap: 9, padding: "10px 0", cursor: "pointer" }}>
-            <input type="checkbox" checked={f.is_custom} onChange={(e) => set("is_custom", e.target.checked)} style={{ width: 17, height: 17, accentColor: T.spine }} />
-            <span style={{ fontSize: 13.5, color: T.ink, fontWeight: 500 }}>Custom / AI-generated pack</span>
-          </label>
-        </div>
-        {err && <div style={{ background: T.dangerSoft, color: T.danger, padding: "10px 14px", borderRadius: 9, fontSize: 13 }}>{err}</div>}
-      </div>
-      <div style={{ padding: "16px 26px", borderTop: "1px solid " + T.line, display: "flex", justifyContent: "flex-end", gap: 10, background: T.bg }}>
-        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
-        <Btn onClick={submit} disabled={saving}>{saving ? "Saving…" : isNew ? "Create pack" : "Save changes"}</Btn>
-      </div>
-    </>
-  );
+  const submit = async () => {
+    if (!f.name.trim()) {
+      setErr("Give the pack a name.");
+      return;
+    }
+    if (!f.slug.trim()) {
+      setErr("Slug can't be empty.");
+      return;
+    }
+    setSaving(true);
+    setErr("");
+    try {
+      await onSave(f, pack?.id);
+      onClose();
+    } catch (e) {
+      setErr(e.message.includes("duplicate") ? "That slug is already taken." : e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "22px 26px",
+      borderBottom: "1px solid " + T.line,
+      display: "flex",
+      alignItems: "center",
+      gap: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 28
+    }
+  }, f.emoji), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 18,
+      fontWeight: 700,
+      color: T.ink
+    }
+  }, isNew ? "New pack" : "Edit pack"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: T.sub
+    }
+  }, isNew ? "Add a themed category to the library" : f.name))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 26,
+      display: "grid",
+      gap: 18
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Pack name"
+  }, /*#__PURE__*/React.createElement(Input, {
+    value: f.name,
+    onChange: e => onName(e.target.value),
+    placeholder: "e.g. Confidence Pack",
+    autoFocus: true
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Slug",
+    hint: "URL-safe id used by the game"
+  }, /*#__PURE__*/React.createElement(Input, {
+    value: f.slug,
+    onChange: e => {
+      setSlugEdited(true);
+      set("slug", slugify(e.target.value));
+    },
+    placeholder: "confidence"
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Difficulty"
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: f.difficulty,
+    onChange: e => set("difficulty", e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "basic"
+  }, "Basic"), /*#__PURE__*/React.createElement("option", {
+    value: "advanced"
+  }, "Advanced"), /*#__PURE__*/React.createElement("option", {
+    value: "mixed"
+  }, "Mixed")))), /*#__PURE__*/React.createElement(Field, {
+    label: "Description",
+    hint: "Short blurb shown on the pack card"
+  }, /*#__PURE__*/React.createElement(Textarea, {
+    value: f.description,
+    onChange: e => set("description", e.target.value),
+    rows: 2,
+    placeholder: "Believe in yourself and take pride in what you do."
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Icon"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 6
+    }
+  }, EMOJI_CHOICES.map(e => /*#__PURE__*/React.createElement("button", {
+    key: e,
+    onClick: () => set("emoji", e),
+    style: {
+      fontSize: 20,
+      width: 40,
+      height: 40,
+      borderRadius: 10,
+      cursor: "pointer",
+      border: "2px solid " + (f.emoji === e ? T.spine : T.line),
+      background: f.emoji === e ? T.spineSoft : "#fff"
+    }
+  }, e)))), /*#__PURE__*/React.createElement(Field, {
+    label: "Accent color"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 8
+    }
+  }, COLOR_CHOICES.map(c => /*#__PURE__*/React.createElement("button", {
+    key: c,
+    onClick: () => set("color", c),
+    title: c,
+    style: {
+      width: 30,
+      height: 30,
+      borderRadius: 9,
+      cursor: "pointer",
+      background: c,
+      border: "3px solid " + (f.color === c ? T.ink : "transparent"),
+      boxShadow: f.color === c ? "0 0 0 2px #fff inset" : "none"
+    }
+  })))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 16,
+      alignItems: "end"
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Status"
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: f.status,
+    onChange: e => set("status", e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "draft"
+  }, "Draft (hidden from game)"), /*#__PURE__*/React.createElement("option", {
+    value: "published"
+  }, "Published (live)"), /*#__PURE__*/React.createElement("option", {
+    value: "archived"
+  }, "Archived"))), /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 9,
+      padding: "10px 0",
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: f.is_custom,
+    onChange: e => set("is_custom", e.target.checked),
+    style: {
+      width: 17,
+      height: 17,
+      accentColor: T.spine
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13.5,
+      color: T.ink,
+      fontWeight: 500
+    }
+  }, "Custom / AI-generated pack"))), err && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.dangerSoft,
+      color: T.danger,
+      padding: "10px 14px",
+      borderRadius: 9,
+      fontSize: 13
+    }
+  }, err)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "16px 26px",
+      borderTop: "1px solid " + T.line,
+      display: "flex",
+      justifyContent: "flex-end",
+      gap: 10,
+      background: T.bg
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: onClose
+  }, "Cancel"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: submit,
+    disabled: saving
+  }, saving ? "Saving…" : isNew ? "Create pack" : "Save changes")));
 }
 
 // ============================================================
 // Question editor modal
 // ============================================================
-function QuestionEditor({ question, packId, packDifficulty, onSave, onClose }) {
+function QuestionEditor({
+  question,
+  packId,
+  packDifficulty,
+  onSave,
+  onClose
+}) {
   const isNew = !question?.id;
   const [f, setF] = useState({
     template: question?.template || "I am {blank} when …",
-    answer: question?.answer || "", alt_answer: question?.alt_answer || "",
+    answer: question?.answer || "",
+    alt_answer: question?.alt_answer || "",
     letters_hidden: question?.letters_hidden ?? 2,
     difficulty: question?.difficulty || (packDifficulty === "advanced" ? "advanced" : "basic"),
-    status: question?.status || "active", notes: question?.notes || "",
+    status: question?.status || "active",
+    notes: question?.notes || ""
   });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
-  const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
-
+  const set = (k, v) => setF(p => ({
+    ...p,
+    [k]: v
+  }));
   const hasBlank = f.template.includes("{blank}");
   const preview = renderPreview(f.template, f.answer, f.alt_answer, f.letters_hidden, f.difficulty);
-
   const submit = async () => {
-    if (!hasBlank) { setErr("Template must contain a {blank} token."); return; }
-    if (!f.answer.trim()) { setErr("Enter the answer word."); return; }
-    setSaving(true); setErr("");
-    try { await onSave({ ...f, pack_id: packId, answer: f.answer.toUpperCase().trim(), alt_answer: f.alt_answer.toUpperCase().trim() }, question?.id); onClose(); }
-    catch (e) { setErr(e.message); } finally { setSaving(false); }
+    if (!hasBlank) {
+      setErr("Template must contain a {blank} token.");
+      return;
+    }
+    if (!f.answer.trim()) {
+      setErr("Enter the answer word.");
+      return;
+    }
+    setSaving(true);
+    setErr("");
+    try {
+      await onSave({
+        ...f,
+        pack_id: packId,
+        answer: f.answer.toUpperCase().trim(),
+        alt_answer: f.alt_answer.toUpperCase().trim()
+      }, question?.id);
+      onClose();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setSaving(false);
+    }
   };
-
-  return (
-    <>
-      <div style={{ padding: "22px 26px", borderBottom: "1px solid " + T.line }}>
-        <div style={{ fontSize: 18, fontWeight: 700, color: T.ink }}>{isNew ? "New question" : "Edit question"}</div>
-        <div style={{ fontSize: 13, color: T.sub, marginTop: 2 }}>A fill-in-the-blank affirming sentence</div>
-      </div>
-      <div style={{ padding: 26, display: "grid", gap: 18 }}>
-        <Field label="Sentence template" hint="Use {blank} where the missing word goes">
-          <Textarea value={f.template} onChange={(e) => set("template", e.target.value)} rows={2} placeholder="I am {blank} when I try something new." autoFocus
-            style={{ borderColor: hasBlank ? T.line : T.danger }} />
-        </Field>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-          <Field label="Answer (primary)" hint="Auto-uppercased">
-            <Input value={f.answer} onChange={(e) => set("answer", e.target.value)} placeholder="BRAVE" />
-          </Field>
-          <Field label="Second option" hint="The alternative positive word">
-            <Input value={f.alt_answer} onChange={(e) => set("alt_answer", e.target.value)} placeholder="BOLD" />
-          </Field>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-          <Field label="Difficulty">
-            <Select value={f.difficulty} onChange={(e) => set("difficulty", e.target.value)}>
-              <option value="basic">Basic (hide letters)</option>
-              <option value="advanced">Advanced (hide whole word)</option>
-            </Select>
-          </Field>
-          <Field label="Letters hidden" hint={f.difficulty === "advanced" ? "Whole word hidden" : "For basic mode"}>
-            <Input type="number" min={0} value={f.letters_hidden} disabled={f.difficulty === "advanced"} onChange={(e) => set("letters_hidden", parseInt(e.target.value) || 0)} />
-          </Field>
-        </div>
-
-        {/* live preview */}
-        <div style={{ background: T.spineSoft, borderRadius: 12, padding: "16px 18px" }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: T.spine, letterSpacing: 0.5, marginBottom: 8 }}>HOW THE CHILD SEES IT</div>
-          <div style={{ fontSize: 17, color: T.ink, fontWeight: 500, lineHeight: 1.4 }}>{preview.sentence}</div>
-          {preview.opts && <div style={{ fontSize: 14, color: T.spine, fontWeight: 700, marginTop: 8 }}>→ {preview.opts}</div>}
-        </div>
-
-        <Field label="Internal notes" hint="Optional — editorial notes, not shown to players">
-          <Input value={f.notes} onChange={(e) => set("notes", e.target.value)} placeholder="" />
-        </Field>
-        <label style={{ display: "flex", alignItems: "center", gap: 9, cursor: "pointer" }}>
-          <input type="checkbox" checked={f.status === "active"} onChange={(e) => set("status", e.target.checked ? "active" : "inactive")} style={{ width: 17, height: 17, accentColor: T.spine }} />
-          <span style={{ fontSize: 13.5, color: T.ink, fontWeight: 500 }}>Active (included in the game)</span>
-        </label>
-        {err && <div style={{ background: T.dangerSoft, color: T.danger, padding: "10px 14px", borderRadius: 9, fontSize: 13 }}>{err}</div>}
-      </div>
-      <div style={{ padding: "16px 26px", borderTop: "1px solid " + T.line, display: "flex", justifyContent: "flex-end", gap: 10, background: T.bg }}>
-        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
-        <Btn onClick={submit} disabled={saving}>{saving ? "Saving…" : isNew ? "Add question" : "Save changes"}</Btn>
-      </div>
-    </>
-  );
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "22px 26px",
+      borderBottom: "1px solid " + T.line
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 18,
+      fontWeight: 700,
+      color: T.ink
+    }
+  }, isNew ? "New question" : "Edit question"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: T.sub,
+      marginTop: 2
+    }
+  }, "A fill-in-the-blank affirming sentence")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 26,
+      display: "grid",
+      gap: 18
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Sentence template",
+    hint: "Use {blank} where the missing word goes"
+  }, /*#__PURE__*/React.createElement(Textarea, {
+    value: f.template,
+    onChange: e => set("template", e.target.value),
+    rows: 2,
+    placeholder: "I am {blank} when I try something new.",
+    autoFocus: true,
+    style: {
+      borderColor: hasBlank ? T.line : T.danger
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Answer (primary)",
+    hint: "Auto-uppercased"
+  }, /*#__PURE__*/React.createElement(Input, {
+    value: f.answer,
+    onChange: e => set("answer", e.target.value),
+    placeholder: "BRAVE"
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Second option",
+    hint: "The alternative positive word"
+  }, /*#__PURE__*/React.createElement(Input, {
+    value: f.alt_answer,
+    onChange: e => set("alt_answer", e.target.value),
+    placeholder: "BOLD"
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr",
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Difficulty"
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: f.difficulty,
+    onChange: e => set("difficulty", e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "basic"
+  }, "Basic (hide letters)"), /*#__PURE__*/React.createElement("option", {
+    value: "advanced"
+  }, "Advanced (hide whole word)"))), /*#__PURE__*/React.createElement(Field, {
+    label: "Letters hidden",
+    hint: f.difficulty === "advanced" ? "Whole word hidden" : "For basic mode"
+  }, /*#__PURE__*/React.createElement(Input, {
+    type: "number",
+    min: 0,
+    value: f.letters_hidden,
+    disabled: f.difficulty === "advanced",
+    onChange: e => set("letters_hidden", parseInt(e.target.value) || 0)
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.spineSoft,
+      borderRadius: 12,
+      padding: "16px 18px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      fontWeight: 700,
+      color: T.spine,
+      letterSpacing: 0.5,
+      marginBottom: 8
+    }
+  }, "HOW THE CHILD SEES IT"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 17,
+      color: T.ink,
+      fontWeight: 500,
+      lineHeight: 1.4
+    }
+  }, preview.sentence), preview.opts && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 14,
+      color: T.spine,
+      fontWeight: 700,
+      marginTop: 8
+    }
+  }, "→ ", preview.opts)), /*#__PURE__*/React.createElement(Field, {
+    label: "Internal notes",
+    hint: "Optional — editorial notes, not shown to players"
+  }, /*#__PURE__*/React.createElement(Input, {
+    value: f.notes,
+    onChange: e => set("notes", e.target.value),
+    placeholder: ""
+  })), /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 9,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: f.status === "active",
+    onChange: e => set("status", e.target.checked ? "active" : "inactive"),
+    style: {
+      width: 17,
+      height: 17,
+      accentColor: T.spine
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13.5,
+      color: T.ink,
+      fontWeight: 500
+    }
+  }, "Active (included in the game)")), err && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.dangerSoft,
+      color: T.danger,
+      padding: "10px 14px",
+      borderRadius: 9,
+      fontSize: 13
+    }
+  }, err)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "16px 26px",
+      borderTop: "1px solid " + T.line,
+      display: "flex",
+      justifyContent: "flex-end",
+      gap: 10,
+      background: T.bg
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: onClose
+  }, "Cancel"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: submit,
+    disabled: saving
+  }, saving ? "Saving…" : isNew ? "Add question" : "Save changes")));
 }
 
 // ============================================================
 // Bulk import modal
 // ============================================================
-function BulkImport({ packId, onDone, onClose }) {
+function BulkImport({
+  packId,
+  onDone,
+  onClose
+}) {
   const [raw, setRaw] = useState("");
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
-
   const parsed = useMemo(() => {
-    return raw.split("\n").map((l) => l.trim()).filter(Boolean).map((line) => {
+    return raw.split("\n").map(l => l.trim()).filter(Boolean).map(line => {
       // format:  Sentence with {blank} | ANSWER | ALT
-      const parts = line.split("|").map((s) => s.trim());
+      const parts = line.split("|").map(s => s.trim());
       const template = parts[0] || "";
       const answer = (parts[1] || "").toUpperCase();
       const alt = (parts[2] || "").toUpperCase();
       const ok = template.includes("{blank}") && answer.length > 0;
-      return { template, answer, alt_answer: alt, ok };
+      return {
+        template,
+        answer,
+        alt_answer: alt,
+        ok
+      };
     });
   }, [raw]);
-  const valid = parsed.filter((p) => p.ok);
-
+  const valid = parsed.filter(p => p.ok);
   const submit = async () => {
-    if (!valid.length) { setErr("Nothing valid to import yet."); return; }
-    setSaving(true); setErr("");
+    if (!valid.length) {
+      setErr("Nothing valid to import yet.");
+      return;
+    }
+    setSaving(true);
+    setErr("");
     try {
       await onDone(valid.map((v, i) => ({
-        pack_id: packId, template: v.template, answer: v.answer, alt_answer: v.alt_answer,
-        difficulty: "basic", letters_hidden: 2, status: "active", sort_order: 100 + i,
+        pack_id: packId,
+        template: v.template,
+        answer: v.answer,
+        alt_answer: v.alt_answer,
+        difficulty: "basic",
+        letters_hidden: 2,
+        status: "active",
+        sort_order: 100 + i
       })));
       onClose();
-    } catch (e) { setErr(e.message); } finally { setSaving(false); }
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setSaving(false);
+    }
   };
-
-  return (
-    <>
-      <div style={{ padding: "22px 26px", borderBottom: "1px solid " + T.line }}>
-        <div style={{ fontSize: 18, fontWeight: 700, color: T.ink }}>Bulk import questions</div>
-        <div style={{ fontSize: 13, color: T.sub, marginTop: 2 }}>One per line: <code style={{ background: T.spineSoft, padding: "1px 6px", borderRadius: 5, color: T.spine }}>Sentence with {"{blank}"} | ANSWER | ALT</code></div>
-      </div>
-      <div style={{ padding: 26, display: "grid", gap: 16 }}>
-        <Textarea value={raw} onChange={(e) => setRaw(e.target.value)} rows={8} autoFocus
-          placeholder={"I am {blank} when I try something new. | BRAVE | BOLD\nBeing {blank} helps me make friends. | KIND | CARING"}
-          style={{ fontFamily: "ui-monospace, monospace", fontSize: 13 }} />
-        {raw.trim() && (
-          <div style={{ background: T.bg, borderRadius: 10, padding: 14, maxHeight: 200, overflowY: "auto" }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: T.sub, marginBottom: 8 }}>
-              {valid.length} valid · {parsed.length - valid.length} skipped
-            </div>
-            {parsed.map((p, i) => (
-              <div key={i} style={{ fontSize: 13, padding: "5px 0", color: p.ok ? T.ink : T.faint, display: "flex", gap: 8, alignItems: "center", borderBottom: "1px solid " + T.line }}>
-                <span style={{ color: p.ok ? T.good : T.danger, fontWeight: 700 }}>{p.ok ? "✓" : "✕"}</span>
-                <span style={{ flex: 1 }}>{p.template.replace(/\{blank\}/g, "___") || <em>empty</em>}</span>
-                {p.ok && <span style={{ color: T.spine, fontWeight: 600, fontSize: 12 }}>{[p.answer, p.alt_answer].filter(Boolean).join(" / ")}</span>}
-              </div>
-            ))}
-          </div>
-        )}
-        {err && <div style={{ background: T.dangerSoft, color: T.danger, padding: "10px 14px", borderRadius: 9, fontSize: 13 }}>{err}</div>}
-      </div>
-      <div style={{ padding: "16px 26px", borderTop: "1px solid " + T.line, display: "flex", justifyContent: "flex-end", gap: 10, background: T.bg }}>
-        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
-        <Btn onClick={submit} disabled={saving || !valid.length}>{saving ? "Importing…" : `Import ${valid.length} question${valid.length === 1 ? "" : "s"}`}</Btn>
-      </div>
-    </>
-  );
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "22px 26px",
+      borderBottom: "1px solid " + T.line
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 18,
+      fontWeight: 700,
+      color: T.ink
+    }
+  }, "Bulk import questions"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: T.sub,
+      marginTop: 2
+    }
+  }, "One per line: ", /*#__PURE__*/React.createElement("code", {
+    style: {
+      background: T.spineSoft,
+      padding: "1px 6px",
+      borderRadius: 5,
+      color: T.spine
+    }
+  }, "Sentence with ", "{blank}", " | ANSWER | ALT"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 26,
+      display: "grid",
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement(Textarea, {
+    value: raw,
+    onChange: e => setRaw(e.target.value),
+    rows: 8,
+    autoFocus: true,
+    placeholder: "I am {blank} when I try something new. | BRAVE | BOLD\nBeing {blank} helps me make friends. | KIND | CARING",
+    style: {
+      fontFamily: "ui-monospace, monospace",
+      fontSize: 13
+    }
+  }), raw.trim() && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.bg,
+      borderRadius: 10,
+      padding: 14,
+      maxHeight: 200,
+      overflowY: "auto"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: T.sub,
+      marginBottom: 8
+    }
+  }, valid.length, " valid · ", parsed.length - valid.length, " skipped"), parsed.map((p, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      fontSize: 13,
+      padding: "5px 0",
+      color: p.ok ? T.ink : T.faint,
+      display: "flex",
+      gap: 8,
+      alignItems: "center",
+      borderBottom: "1px solid " + T.line
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: p.ok ? T.good : T.danger,
+      fontWeight: 700
+    }
+  }, p.ok ? "✓" : "✕"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1
+    }
+  }, p.template.replace(/\{blank\}/g, "___") || /*#__PURE__*/React.createElement("em", null, "empty")), p.ok && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: T.spine,
+      fontWeight: 600,
+      fontSize: 12
+    }
+  }, [p.answer, p.alt_answer].filter(Boolean).join(" / "))))), err && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.dangerSoft,
+      color: T.danger,
+      padding: "10px 14px",
+      borderRadius: 9,
+      fontSize: 13
+    }
+  }, err)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "16px 26px",
+      borderTop: "1px solid " + T.line,
+      display: "flex",
+      justifyContent: "flex-end",
+      gap: 10,
+      background: T.bg
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: onClose
+  }, "Cancel"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: submit,
+    disabled: saving || !valid.length
+  }, saving ? "Importing…" : `Import ${valid.length} question${valid.length === 1 ? "" : "s"}`)));
 }
 
 // ============================================================
 // Pack detail view
 // ============================================================
-function PackDetail({ pack, onBack, refreshPacks }) {
+function PackDetail({
+  pack,
+  onBack,
+  refreshPacks
+}) {
   const [questions, setQuestions] = useState(null);
   const [qEdit, setQEdit] = useState(null); // {} for new, {..} for edit
   const [bulk, setBulk] = useState(false);
   const [qFilter, setQFilter] = useState("all");
   const [search, setSearch] = useState("");
-
   const load = useCallback(async () => {
     const data = await api(`pm_questions?pack_id=eq.${pack.id}&order=sort_order.asc,created_at.asc&limit=10000`);
     setQuestions(data || []);
   }, [pack.id]);
-  useEffect(() => { load(); }, [load]);
-
+  useEffect(() => {
+    load();
+  }, [load]);
   const saveQ = async (payload, id) => {
-    if (id) await api(`pm_questions?id=eq.${id}`, { method: "PATCH", body: payload });
-    else await api("pm_questions", { method: "POST", body: payload });
-    await load(); refreshPacks();
+    if (id) await api(`pm_questions?id=eq.${id}`, {
+      method: "PATCH",
+      body: payload
+    });else await api("pm_questions", {
+      method: "POST",
+      body: payload
+    });
+    await load();
+    refreshPacks();
   };
-  const importQ = async (rows) => { await api("pm_questions", { method: "POST", body: rows }); await load(); refreshPacks(); };
-  const delQ = async (id) => {
+  const importQ = async rows => {
+    await api("pm_questions", {
+      method: "POST",
+      body: rows
+    });
+    await load();
+    refreshPacks();
+  };
+  const delQ = async id => {
     if (!confirm("Delete this question? This can't be undone.")) return;
-    await api(`pm_questions?id=eq.${id}`, { method: "DELETE" }); await load(); refreshPacks();
+    await api(`pm_questions?id=eq.${id}`, {
+      method: "DELETE"
+    });
+    await load();
+    refreshPacks();
   };
-  const toggleQ = async (q) => {
-    await api(`pm_questions?id=eq.${q.id}`, { method: "PATCH", body: { status: q.status === "active" ? "inactive" : "active" } });
-    await load(); refreshPacks();
+  const toggleQ = async q => {
+    await api(`pm_questions?id=eq.${q.id}`, {
+      method: "PATCH",
+      body: {
+        status: q.status === "active" ? "inactive" : "active"
+      }
+    });
+    await load();
+    refreshPacks();
   };
-
-  const shown = (questions || []).filter((q) => {
+  const shown = (questions || []).filter(q => {
     if (qFilter !== "all" && q.difficulty !== qFilter) return false;
-    if (search && !(`${q.template} ${q.answer} ${q.alt_answer}`.toLowerCase().includes(search.toLowerCase()))) return false;
+    if (search && !`${q.template} ${q.answer} ${q.alt_answer}`.toLowerCase().includes(search.toLowerCase())) return false;
     return true;
   });
-  const activeCount = (questions || []).filter((q) => q.status === "active").length;
-
-  return (
-    <div>
-      <button onClick={onBack} style={{ background: "none", border: "none", color: T.sub, cursor: "pointer", fontSize: 13.5, fontWeight: 600, padding: 0, marginBottom: 18, display: "flex", alignItems: "center", gap: 6, fontFamily: "inherit" }}>← All packs</button>
-
-      {/* pack header */}
-      <div style={{ background: T.panel, borderRadius: 16, padding: 24, marginBottom: 20, border: "1px solid " + T.line, display: "flex", alignItems: "flex-start", gap: 18, borderLeft: `5px solid ${pack.color}` }}>
-        <div style={{ fontSize: 42, lineHeight: 1 }}>{pack.emoji}</div>
-        <div style={{ flex: 1 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <h2 style={{ margin: 0, fontSize: 24, fontWeight: 800, color: T.ink }}>{pack.name}</h2>
-            <Badge kind={pack.status} />
-            <Pill>{pack.difficulty}</Pill>
-            {pack.is_custom && <Pill tone="muted">custom</Pill>}
-          </div>
-          {pack.description && <p style={{ margin: "8px 0 0", color: T.sub, fontSize: 14.5, lineHeight: 1.5 }}>{pack.description}</p>}
-          <div style={{ marginTop: 12, fontSize: 13, color: T.faint }}>
-            <b style={{ color: T.ink }}>{activeCount}</b> active · <b style={{ color: T.ink }}>{questions?.length ?? "…"}</b> total questions · slug <code style={{ background: T.bg, padding: "1px 6px", borderRadius: 5 }}>{pack.slug}</code>
-          </div>
-        </div>
-      </div>
-
-      {/* question toolbar */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
-        <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: T.ink }}>Question bank</h3>
-        <div style={{ flex: 1 }} />
-        <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search questions…" style={{ width: 200, padding: "8px 12px" }} />
-        <Select value={qFilter} onChange={(e) => setQFilter(e.target.value)} style={{ width: 140, padding: "8px 12px" }}>
-          <option value="all">All levels</option>
-          <option value="basic">Basic</option>
-          <option value="advanced">Advanced</option>
-        </Select>
-        <Btn variant="soft" size="sm" onClick={() => setBulk(true)}>⬗ Bulk import</Btn>
-        <Btn size="sm" onClick={() => setQEdit({})}>+ Add question</Btn>
-      </div>
-
-      {/* question list */}
-      {questions === null ? (
-        <div style={{ padding: 40, textAlign: "center", color: T.faint }}>Loading…</div>
-      ) : shown.length === 0 ? (
-        <div style={{ background: T.panel, borderRadius: 14, padding: "48px 24px", textAlign: "center", border: "1px dashed " + T.line }}>
-          <div style={{ fontSize: 32, marginBottom: 10 }}>✍️</div>
-          <div style={{ fontSize: 15, fontWeight: 600, color: T.ink }}>{questions.length === 0 ? "No questions yet" : "Nothing matches"}</div>
-          <div style={{ fontSize: 13.5, color: T.sub, margin: "6px 0 18px" }}>{questions.length === 0 ? "Add your first affirming sentence to this pack." : "Try a different search or filter."}</div>
-          {questions.length === 0 && <Btn onClick={() => setQEdit({})}>+ Add first question</Btn>}
-        </div>
-      ) : (
-        <div style={{ display: "grid", gap: 10 }}>
-          {shown.map((q) => {
-            const pv = renderPreview(q.template, q.answer, q.alt_answer, q.letters_hidden, q.difficulty);
-            return (
-              <div key={q.id} style={{ background: T.panel, borderRadius: 12, padding: "14px 18px", border: "1px solid " + T.line, display: "flex", alignItems: "center", gap: 16, opacity: q.status === "active" ? 1 : 0.55 }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 15, color: T.ink, fontWeight: 500 }}>{pv.sentence}</div>
-                  <div style={{ fontSize: 13, color: T.spine, fontWeight: 700, marginTop: 3 }}>→ {pv.opts}</div>
-                </div>
-                <Pill tone="muted">{q.difficulty}</Pill>
-                <button onClick={() => toggleQ(q)} title="Toggle active" style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}><Badge kind={q.status} /></button>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <Btn variant="ghost" size="sm" onClick={() => setQEdit(q)}>Edit</Btn>
-                  <Btn variant="danger" size="sm" onClick={() => delQ(q.id)}>Delete</Btn>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      <Modal open={qEdit !== null} onClose={() => setQEdit(null)}>
-        {qEdit !== null && <QuestionEditor question={qEdit.id ? qEdit : null} packId={pack.id} packDifficulty={pack.difficulty} onSave={saveQ} onClose={() => setQEdit(null)} />}
-      </Modal>
-      <Modal open={bulk} onClose={() => setBulk(false)}>
-        {bulk && <BulkImport packId={pack.id} onDone={importQ} onClose={() => setBulk(false)} />}
-      </Modal>
-    </div>
-  );
+  const activeCount = (questions || []).filter(q => q.status === "active").length;
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("button", {
+    onClick: onBack,
+    style: {
+      background: "none",
+      border: "none",
+      color: T.sub,
+      cursor: "pointer",
+      fontSize: 13.5,
+      fontWeight: 600,
+      padding: 0,
+      marginBottom: 18,
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      fontFamily: "inherit"
+    }
+  }, "← All packs"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.panel,
+      borderRadius: 16,
+      padding: 24,
+      marginBottom: 20,
+      border: "1px solid " + T.line,
+      display: "flex",
+      alignItems: "flex-start",
+      gap: 18,
+      borderLeft: `5px solid ${pack.color}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 42,
+      lineHeight: 1
+    }
+  }, pack.emoji), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      fontSize: 24,
+      fontWeight: 800,
+      color: T.ink
+    }
+  }, pack.name), /*#__PURE__*/React.createElement(Badge, {
+    kind: pack.status
+  }), /*#__PURE__*/React.createElement(Pill, null, pack.difficulty), pack.is_custom && /*#__PURE__*/React.createElement(Pill, {
+    tone: "muted"
+  }, "custom")), pack.description && /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "8px 0 0",
+      color: T.sub,
+      fontSize: 14.5,
+      lineHeight: 1.5
+    }
+  }, pack.description), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 12,
+      fontSize: 13,
+      color: T.faint
+    }
+  }, /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: T.ink
+    }
+  }, activeCount), " active · ", /*#__PURE__*/React.createElement("b", {
+    style: {
+      color: T.ink
+    }
+  }, questions?.length ?? "…"), " total questions · slug ", /*#__PURE__*/React.createElement("code", {
+    style: {
+      background: T.bg,
+      padding: "1px 6px",
+      borderRadius: 5
+    }
+  }, pack.slug)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 12,
+      marginBottom: 16,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("h3", {
+    style: {
+      margin: 0,
+      fontSize: 16,
+      fontWeight: 700,
+      color: T.ink
+    }
+  }, "Question bank"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }), /*#__PURE__*/React.createElement(Input, {
+    value: search,
+    onChange: e => setSearch(e.target.value),
+    placeholder: "Search questions…",
+    style: {
+      width: 200,
+      padding: "8px 12px"
+    }
+  }), /*#__PURE__*/React.createElement(Select, {
+    value: qFilter,
+    onChange: e => setQFilter(e.target.value),
+    style: {
+      width: 140,
+      padding: "8px 12px"
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "all"
+  }, "All levels"), /*#__PURE__*/React.createElement("option", {
+    value: "basic"
+  }, "Basic"), /*#__PURE__*/React.createElement("option", {
+    value: "advanced"
+  }, "Advanced")), /*#__PURE__*/React.createElement(Btn, {
+    variant: "soft",
+    size: "sm",
+    onClick: () => setBulk(true)
+  }, "⬗ Bulk import"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: () => setQEdit({})
+  }, "+ Add question")), questions === null ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 40,
+      textAlign: "center",
+      color: T.faint
+    }
+  }, "Loading…") : shown.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.panel,
+      borderRadius: 14,
+      padding: "48px 24px",
+      textAlign: "center",
+      border: "1px dashed " + T.line
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 32,
+      marginBottom: 10
+    }
+  }, "✍️"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 600,
+      color: T.ink
+    }
+  }, questions.length === 0 ? "No questions yet" : "Nothing matches"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13.5,
+      color: T.sub,
+      margin: "6px 0 18px"
+    }
+  }, questions.length === 0 ? "Add your first affirming sentence to this pack." : "Try a different search or filter."), questions.length === 0 && /*#__PURE__*/React.createElement(Btn, {
+    onClick: () => setQEdit({})
+  }, "+ Add first question")) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gap: 10
+    }
+  }, shown.map(q => {
+    const pv = renderPreview(q.template, q.answer, q.alt_answer, q.letters_hidden, q.difficulty);
+    return /*#__PURE__*/React.createElement("div", {
+      key: q.id,
+      style: {
+        background: T.panel,
+        borderRadius: 12,
+        padding: "14px 18px",
+        border: "1px solid " + T.line,
+        display: "flex",
+        alignItems: "center",
+        gap: 16,
+        opacity: q.status === "active" ? 1 : 0.55
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 15,
+        color: T.ink,
+        fontWeight: 500
+      }
+    }, pv.sentence), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 13,
+        color: T.spine,
+        fontWeight: 700,
+        marginTop: 3
+      }
+    }, "→ ", pv.opts)), /*#__PURE__*/React.createElement(Pill, {
+      tone: "muted"
+    }, q.difficulty), /*#__PURE__*/React.createElement("button", {
+      onClick: () => toggleQ(q),
+      title: "Toggle active",
+      style: {
+        background: "none",
+        border: "none",
+        cursor: "pointer",
+        padding: 0
+      }
+    }, /*#__PURE__*/React.createElement(Badge, {
+      kind: q.status
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement(Btn, {
+      variant: "ghost",
+      size: "sm",
+      onClick: () => setQEdit(q)
+    }, "Edit"), /*#__PURE__*/React.createElement(Btn, {
+      variant: "danger",
+      size: "sm",
+      onClick: () => delQ(q.id)
+    }, "Delete")));
+  })), /*#__PURE__*/React.createElement(Modal, {
+    open: qEdit !== null,
+    onClose: () => setQEdit(null)
+  }, qEdit !== null && /*#__PURE__*/React.createElement(QuestionEditor, {
+    question: qEdit.id ? qEdit : null,
+    packId: pack.id,
+    packDifficulty: pack.difficulty,
+    onSave: saveQ,
+    onClose: () => setQEdit(null)
+  })), /*#__PURE__*/React.createElement(Modal, {
+    open: bulk,
+    onClose: () => setBulk(false)
+  }, bulk && /*#__PURE__*/React.createElement(BulkImport, {
+    packId: pack.id,
+    onDone: importQ,
+    onClose: () => setBulk(false)
+  })));
 }
 
 // ============================================================
 // Library (dashboard) view
 // ============================================================
-function Library({ packs, loading, onOpen, onNew, onEdit, onExport, onDelete }) {
+function Library({
+  packs,
+  loading,
+  onOpen,
+  onNew,
+  onEdit,
+  onExport,
+  onDelete
+}) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [diffFilter, setDiffFilter] = useState("all");
-
-  const shown = (packs || []).filter((p) => {
+  const shown = (packs || []).filter(p => {
     if (statusFilter !== "all" && p.status !== statusFilter) return false;
     if (diffFilter !== "all" && p.difficulty !== diffFilter) return false;
-    if (search && !(`${p.name} ${p.slug} ${p.description}`.toLowerCase().includes(search.toLowerCase()))) return false;
+    if (search && !`${p.name} ${p.slug} ${p.description}`.toLowerCase().includes(search.toLowerCase())) return false;
     return true;
   });
-
   const totals = useMemo(() => {
     const p = packs || [];
     return {
       packs: p.length,
-      published: p.filter((x) => x.status === "published").length,
+      published: p.filter(x => x.status === "published").length,
       questions: p.reduce((s, x) => s + (x.total_questions || 0), 0),
-      active: p.reduce((s, x) => s + (x.active_questions || 0), 0),
+      active: p.reduce((s, x) => s + (x.active_questions || 0), 0)
     };
   }, [packs]);
-
-  return (
-    <div>
-      {/* stat strip */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14, marginBottom: 24 }}>
-        {[
-          { n: totals.packs, l: "Packs", c: T.spine },
-          { n: totals.published, l: "Published", c: T.good },
-          { n: totals.questions, l: "Questions", c: T.ink },
-          { n: totals.active, l: "Active questions", c: T.warn },
-        ].map((s, i) => (
-          <div key={i} style={{ background: T.panel, borderRadius: 14, padding: "18px 20px", border: "1px solid " + T.line }}>
-            <div style={{ fontSize: 30, fontWeight: 800, color: s.c, lineHeight: 1 }}>{loading ? "—" : s.n}</div>
-            <div style={{ fontSize: 12.5, color: T.sub, marginTop: 6, fontWeight: 500 }}>{s.l}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* toolbar */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18, flexWrap: "wrap" }}>
-        <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: T.ink }}>Pack library</h2>
-        <div style={{ flex: 1 }} />
-        <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search packs…" style={{ width: 200, padding: "8px 12px" }} />
-        <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ width: 150, padding: "8px 12px" }}>
-          <option value="all">All statuses</option>
-          <option value="published">Published</option>
-          <option value="draft">Draft</option>
-          <option value="archived">Archived</option>
-        </Select>
-        <Select value={diffFilter} onChange={(e) => setDiffFilter(e.target.value)} style={{ width: 140, padding: "8px 12px" }}>
-          <option value="all">All levels</option>
-          <option value="basic">Basic</option>
-          <option value="advanced">Advanced</option>
-          <option value="mixed">Mixed</option>
-        </Select>
-        <Btn variant="soft" size="sm" onClick={onExport}>⬇ Export JSON</Btn>
-        <Btn size="sm" onClick={onNew}>+ New pack</Btn>
-      </div>
-
-      {/* grid */}
-      {loading ? (
-        <div style={{ padding: 60, textAlign: "center", color: T.faint }}>Loading library…</div>
-      ) : shown.length === 0 ? (
-        <div style={{ background: T.panel, borderRadius: 14, padding: "56px 24px", textAlign: "center", border: "1px dashed " + T.line }}>
-          <div style={{ fontSize: 34, marginBottom: 10 }}>📦</div>
-          <div style={{ fontSize: 15, fontWeight: 600, color: T.ink }}>No packs found</div>
-          <div style={{ fontSize: 13.5, color: T.sub, margin: "6px 0 18px" }}>{(packs || []).length === 0 ? "Create your first pack to get started." : "Try adjusting your filters."}</div>
-          {(packs || []).length === 0 && <Btn onClick={onNew}>+ Create first pack</Btn>}
-        </div>
-      ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 16 }}>
-          {shown.map((p) => (
-            <div key={p.id} onClick={() => onOpen(p)} style={{
-              background: T.panel, borderRadius: 16, border: "1px solid " + T.line, cursor: "pointer",
-              overflow: "hidden", transition: "all .18s", position: "relative",
-            }}
-              onMouseEnter={(e) => { e.currentTarget.style.transform = "translateY(-3px)"; e.currentTarget.style.boxShadow = "0 12px 32px rgba(28,26,46,0.12)"; e.currentTarget.style.borderColor = p.color; }}
-              onMouseLeave={(e) => { e.currentTarget.style.transform = ""; e.currentTarget.style.boxShadow = "none"; e.currentTarget.style.borderColor = T.line; }}>
-              <div style={{ height: 6, background: p.color }} />
-              <div style={{ padding: 20 }}>
-                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 12 }}>
-                  <div style={{ width: 52, height: 52, borderRadius: 13, background: p.color + "22", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 27 }}>{p.emoji}</div>
-                  <Badge kind={p.status} />
-                </div>
-                <div style={{ fontSize: 17, fontWeight: 700, color: T.ink }}>{p.name}</div>
-                <div style={{ fontSize: 13, color: T.sub, marginTop: 5, lineHeight: 1.45, minHeight: 36, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{p.description || "No description"}</div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 14, paddingTop: 14, borderTop: "1px solid " + T.line }}>
-                  <Pill>{p.difficulty}</Pill>
-                  {p.is_custom && <Pill tone="muted">custom</Pill>}
-                  <div style={{ flex: 1 }} />
-                  <span style={{ fontSize: 13, color: T.ink, fontWeight: 700 }}>{p.active_questions || 0}</span>
-                  <span style={{ fontSize: 12, color: T.faint }}>/ {p.total_questions || 0} Qs</span>
-                </div>
-              </div>
-              <div style={{ display: "flex", borderTop: "1px solid " + T.line }} onClick={(e) => e.stopPropagation()}>
-                <button onClick={() => onOpen(p)} style={rowBtn(T.spine)}>Open</button>
-                <button onClick={() => onEdit(p)} style={{ ...rowBtn(T.sub), borderLeft: "1px solid " + T.line }}>Edit</button>
-                <button onClick={() => onDelete(p)} style={{ ...rowBtn(T.danger), borderLeft: "1px solid " + T.line }}>Delete</button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(4,1fr)",
+      gap: 14,
+      marginBottom: 24
+    }
+  }, [{
+    n: totals.packs,
+    l: "Packs",
+    c: T.spine
+  }, {
+    n: totals.published,
+    l: "Published",
+    c: T.good
+  }, {
+    n: totals.questions,
+    l: "Questions",
+    c: T.ink
+  }, {
+    n: totals.active,
+    l: "Active questions",
+    c: T.warn
+  }].map((s, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      background: T.panel,
+      borderRadius: 14,
+      padding: "18px 20px",
+      border: "1px solid " + T.line
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 30,
+      fontWeight: 800,
+      color: s.c,
+      lineHeight: 1
+    }
+  }, loading ? "—" : s.n), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: T.sub,
+      marginTop: 6,
+      fontWeight: 500
+    }
+  }, s.l)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 12,
+      marginBottom: 18,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("h2", {
+    style: {
+      margin: 0,
+      fontSize: 18,
+      fontWeight: 700,
+      color: T.ink
+    }
+  }, "Pack library"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }), /*#__PURE__*/React.createElement(Input, {
+    value: search,
+    onChange: e => setSearch(e.target.value),
+    placeholder: "Search packs…",
+    style: {
+      width: 200,
+      padding: "8px 12px"
+    }
+  }), /*#__PURE__*/React.createElement(Select, {
+    value: statusFilter,
+    onChange: e => setStatusFilter(e.target.value),
+    style: {
+      width: 150,
+      padding: "8px 12px"
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "all"
+  }, "All statuses"), /*#__PURE__*/React.createElement("option", {
+    value: "published"
+  }, "Published"), /*#__PURE__*/React.createElement("option", {
+    value: "draft"
+  }, "Draft"), /*#__PURE__*/React.createElement("option", {
+    value: "archived"
+  }, "Archived")), /*#__PURE__*/React.createElement(Select, {
+    value: diffFilter,
+    onChange: e => setDiffFilter(e.target.value),
+    style: {
+      width: 140,
+      padding: "8px 12px"
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "all"
+  }, "All levels"), /*#__PURE__*/React.createElement("option", {
+    value: "basic"
+  }, "Basic"), /*#__PURE__*/React.createElement("option", {
+    value: "advanced"
+  }, "Advanced"), /*#__PURE__*/React.createElement("option", {
+    value: "mixed"
+  }, "Mixed")), /*#__PURE__*/React.createElement(Btn, {
+    variant: "soft",
+    size: "sm",
+    onClick: onExport
+  }, "⬇ Export JSON"), /*#__PURE__*/React.createElement(Btn, {
+    size: "sm",
+    onClick: onNew
+  }, "+ New pack")), loading ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 60,
+      textAlign: "center",
+      color: T.faint
+    }
+  }, "Loading library…") : shown.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.panel,
+      borderRadius: 14,
+      padding: "56px 24px",
+      textAlign: "center",
+      border: "1px dashed " + T.line
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 34,
+      marginBottom: 10
+    }
+  }, "📦"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 600,
+      color: T.ink
+    }
+  }, "No packs found"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13.5,
+      color: T.sub,
+      margin: "6px 0 18px"
+    }
+  }, (packs || []).length === 0 ? "Create your first pack to get started." : "Try adjusting your filters."), (packs || []).length === 0 && /*#__PURE__*/React.createElement(Btn, {
+    onClick: onNew
+  }, "+ Create first pack")) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))",
+      gap: 16
+    }
+  }, shown.map(p => /*#__PURE__*/React.createElement("div", {
+    key: p.id,
+    onClick: () => onOpen(p),
+    style: {
+      background: T.panel,
+      borderRadius: 16,
+      border: "1px solid " + T.line,
+      cursor: "pointer",
+      overflow: "hidden",
+      transition: "all .18s",
+      position: "relative"
+    },
+    onMouseEnter: e => {
+      e.currentTarget.style.transform = "translateY(-3px)";
+      e.currentTarget.style.boxShadow = "0 12px 32px rgba(28,26,46,0.12)";
+      e.currentTarget.style.borderColor = p.color;
+    },
+    onMouseLeave: e => {
+      e.currentTarget.style.transform = "";
+      e.currentTarget.style.boxShadow = "none";
+      e.currentTarget.style.borderColor = T.line;
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 6,
+      background: p.color
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "flex-start",
+      justifyContent: "space-between",
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 52,
+      height: 52,
+      borderRadius: 13,
+      background: p.color + "22",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: 27
+    }
+  }, p.emoji), /*#__PURE__*/React.createElement(Badge, {
+    kind: p.status
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 17,
+      fontWeight: 700,
+      color: T.ink
+    }
+  }, p.name), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: T.sub,
+      marginTop: 5,
+      lineHeight: 1.45,
+      minHeight: 36,
+      display: "-webkit-box",
+      WebkitLineClamp: 2,
+      WebkitBoxOrient: "vertical",
+      overflow: "hidden"
+    }
+  }, p.description || "No description"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      marginTop: 14,
+      paddingTop: 14,
+      borderTop: "1px solid " + T.line
+    }
+  }, /*#__PURE__*/React.createElement(Pill, null, p.difficulty), p.is_custom && /*#__PURE__*/React.createElement(Pill, {
+    tone: "muted"
+  }, "custom"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      color: T.ink,
+      fontWeight: 700
+    }
+  }, p.active_questions || 0), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: T.faint
+    }
+  }, "/ ", p.total_questions || 0, " Qs"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      borderTop: "1px solid " + T.line
+    },
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => onOpen(p),
+    style: rowBtn(T.spine)
+  }, "Open"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onEdit(p),
+    style: {
+      ...rowBtn(T.sub),
+      borderLeft: "1px solid " + T.line
+    }
+  }, "Edit"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onDelete(p),
+    style: {
+      ...rowBtn(T.danger),
+      borderLeft: "1px solid " + T.line
+    }
+  }, "Delete"))))));
 }
-const rowBtn = (color) => ({ flex: 1, padding: "11px 0", background: "none", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600, color, fontFamily: "inherit" });
+const rowBtn = color => ({
+  flex: 1,
+  padding: "11px 0",
+  background: "none",
+  border: "none",
+  cursor: "pointer",
+  fontSize: 13,
+  fontWeight: 600,
+  color,
+  fontFamily: "inherit"
+});
+
+// ============================================================
+// Login screen
+// ============================================================
+function Login({
+  onSuccess
+}) {
+  const [pw, setPw] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const submit = async () => {
+    if (!pw) return;
+    setBusy(true);
+    setErr("");
+    try {
+      await auth.login(pw);
+      onSuccess();
+    } catch (e) {
+      setErr(e.message.includes("Invalid login") ? "Incorrect password." : e.message);
+      setBusy(false);
+    }
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      minHeight: "100vh",
+      background: `linear-gradient(160deg, ${T.spineSoft}, ${T.bg})`,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 20,
+      fontFamily: "'Nunito', -apple-system, sans-serif"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.panel,
+      borderRadius: 20,
+      padding: "40px 36px",
+      width: "100%",
+      maxWidth: 400,
+      boxShadow: "0 20px 60px rgba(28,26,46,0.15)",
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 60,
+      height: 60,
+      borderRadius: 16,
+      background: `linear-gradient(135deg, ${T.spine}, #9B7BF0)`,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: 30,
+      margin: "0 auto 18px",
+      boxShadow: "0 8px 20px rgba(108,76,224,0.35)"
+    }
+  }, "🧠"), /*#__PURE__*/React.createElement("h1", {
+    style: {
+      margin: 0,
+      fontSize: 22,
+      fontWeight: 800,
+      color: T.ink
+    }
+  }, "Positive Minds"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: T.faint,
+      fontWeight: 600,
+      letterSpacing: 0.3,
+      marginTop: 3,
+      marginBottom: 28
+    }
+  }, "PACK CONTENT MANAGER"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "left"
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Admin password"
+  }, /*#__PURE__*/React.createElement(Input, {
+    type: "password",
+    value: pw,
+    autoFocus: true,
+    onChange: e => setPw(e.target.value),
+    onKeyDown: e => e.key === "Enter" && submit(),
+    placeholder: "Enter password"
+  }))), err && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.dangerSoft,
+      color: T.danger,
+      padding: "10px 14px",
+      borderRadius: 9,
+      fontSize: 13,
+      marginTop: 14,
+      textAlign: "left"
+    }
+  }, err), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 20
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    onClick: submit,
+    disabled: busy || !pw,
+    style: {
+      width: "100%",
+      justifyContent: "center",
+      padding: "12px 16px"
+    }
+  }, busy ? "Signing in…" : "Sign in")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: T.faint,
+      marginTop: 18,
+      lineHeight: 1.5
+    }
+  }, "Admin access only. Content edits require this password.")));
+}
+
+// ============================================================
+// Change password modal
+// ============================================================
+function ChangePassword({
+  onClose,
+  onDone
+}) {
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const submit = async () => {
+    if (pw.length < 8) {
+      setErr("Use at least 8 characters.");
+      return;
+    }
+    if (pw !== pw2) {
+      setErr("Passwords don't match.");
+      return;
+    }
+    setBusy(true);
+    setErr("");
+    try {
+      await auth.changePassword(pw);
+      onDone();
+      onClose();
+    } catch (e) {
+      setErr(e.message);
+      setBusy(false);
+    }
+  };
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "22px 26px",
+      borderBottom: "1px solid " + T.line
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 18,
+      fontWeight: 700,
+      color: T.ink
+    }
+  }, "Change admin password"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: T.sub,
+      marginTop: 2
+    }
+  }, "This is the shared password for editing content")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 26,
+      display: "grid",
+      gap: 16
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "New password",
+    hint: "At least 8 characters"
+  }, /*#__PURE__*/React.createElement(Input, {
+    type: "password",
+    value: pw,
+    onChange: e => setPw(e.target.value),
+    autoFocus: true,
+    placeholder: "New password"
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Confirm new password"
+  }, /*#__PURE__*/React.createElement(Input, {
+    type: "password",
+    value: pw2,
+    onChange: e => setPw2(e.target.value),
+    onKeyDown: e => e.key === "Enter" && submit(),
+    placeholder: "Repeat new password"
+  })), err && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.dangerSoft,
+      color: T.danger,
+      padding: "10px 14px",
+      borderRadius: 9,
+      fontSize: 13
+    }
+  }, err)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "16px 26px",
+      borderTop: "1px solid " + T.line,
+      display: "flex",
+      justifyContent: "flex-end",
+      gap: 10,
+      background: T.bg
+    }
+  }, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: onClose
+  }, "Cancel"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: submit,
+    disabled: busy
+  }, busy ? "Updating…" : "Update password")));
+}
+const hdrBtn = {
+  background: "none",
+  border: "1px solid " + T.line,
+  borderRadius: 9,
+  padding: "8px 14px",
+  fontSize: 13,
+  fontWeight: 600,
+  color: T.sub,
+  cursor: "pointer",
+  fontFamily: "inherit"
+};
 
 // ============================================================
 // Root app
 // ============================================================
 function App() {
+  const [authed, setAuthed] = useState(() => !!session.load());
   const [packs, setPacks] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [active, setActive] = useState(null);   // pack being viewed
+  const [active, setActive] = useState(null); // pack being viewed
   const [editPack, setEditPack] = useState(null); // {} new, {..} edit
+  const [changePw, setChangePw] = useState(false);
   const [toast, setToast] = useState("");
   const [connErr, setConnErr] = useState("");
-
   const loadPacks = useCallback(async () => {
     try {
       const data = await api("pm_pack_overview?order=sort_order.asc&limit=10000");
-      setPacks(data || []); setConnErr("");
-    } catch (e) { setConnErr(e.message); }
-    finally { setLoading(false); }
+      setPacks(data || []);
+      setConnErr("");
+    } catch (e) {
+      setConnErr(e.message);
+    } finally {
+      setLoading(false);
+    }
   }, []);
-  useEffect(() => { loadPacks(); }, [loadPacks]);
-
-  const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 2600); };
-
+  useEffect(() => {
+    loadPacks();
+  }, [loadPacks]);
+  const flash = m => {
+    setToast(m);
+    setTimeout(() => setToast(""), 2600);
+  };
   const savePack = async (payload, id) => {
-    if (id) await api(`pm_packs?id=eq.${id}`, { method: "PATCH", body: payload });
-    else await api("pm_packs", { method: "POST", body: { ...payload, sort_order: (packs?.length || 0) + 1 } });
+    if (id) await api(`pm_packs?id=eq.${id}`, {
+      method: "PATCH",
+      body: payload
+    });else await api("pm_packs", {
+      method: "POST",
+      body: {
+        ...payload,
+        sort_order: (packs?.length || 0) + 1
+      }
+    });
     await loadPacks();
     flash(id ? "Pack updated" : "Pack created");
-    if (active && id === active.id) setActive((a) => ({ ...a, ...payload }));
+    if (active && id === active.id) setActive(a => ({
+      ...a,
+      ...payload
+    }));
   };
-
-  const deletePack = async (p) => {
+  const deletePack = async p => {
     if (!confirm(`Delete "${p.name}" and all ${p.total_questions || 0} of its questions? This can't be undone.`)) return;
-    await api(`pm_packs?id=eq.${p.id}`, { method: "DELETE" });
-    await loadPacks(); flash("Pack deleted");
+    await api(`pm_packs?id=eq.${p.id}`, {
+      method: "DELETE"
+    });
+    await loadPacks();
+    flash("Pack deleted");
   };
-
   const exportJSON = async () => {
     const p = await api("pm_packs?status=eq.published&order=sort_order.asc&limit=10000");
     const q = await api("pm_questions?status=eq.active&order=sort_order.asc&limit=10000");
     const byPack = {};
-    (q || []).forEach((x) => { (byPack[x.pack_id] = byPack[x.pack_id] || []).push(x); });
+    (q || []).forEach(x => {
+      (byPack[x.pack_id] = byPack[x.pack_id] || []).push(x);
+    });
     const out = {
       exported_at: new Date().toISOString(),
-      packs: (p || []).map((pk) => ({
-        slug: pk.slug, name: pk.name, emoji: pk.emoji, description: pk.description,
-        color: pk.color, difficulty: pk.difficulty,
-        questions: (byPack[pk.id] || []).map((x) => ({
-          template: x.template, answer: x.answer, alt_answer: x.alt_answer,
-          letters_hidden: x.letters_hidden, difficulty: x.difficulty,
-        })),
-      })),
+      packs: (p || []).map(pk => ({
+        slug: pk.slug,
+        name: pk.name,
+        emoji: pk.emoji,
+        description: pk.description,
+        color: pk.color,
+        difficulty: pk.difficulty,
+        questions: (byPack[pk.id] || []).map(x => ({
+          template: x.template,
+          answer: x.answer,
+          alt_answer: x.alt_answer,
+          letters_hidden: x.letters_hidden,
+          difficulty: x.difficulty
+        }))
+      }))
     };
-    const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
+    const blob = new Blob([JSON.stringify(out, null, 2)], {
+      type: "application/json"
+    });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = `positive-minds-packs-${Date.now()}.json`; a.click();
+    a.href = url;
+    a.download = `positive-minds-packs-${Date.now()}.json`;
+    a.click();
     URL.revokeObjectURL(url);
     flash(`Exported ${out.packs.length} published packs`);
   };
 
-  return (
-    <div style={{ minHeight: "100vh", background: T.bg, fontFamily: "'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", color: T.ink }}>
-      <style>{`@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800;900&display=swap');
+  // Gate everything behind admin login
+  if (!authed) {
+    return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("style", null, `@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800;900&display=swap');*{box-sizing:border-box}`), /*#__PURE__*/React.createElement(Login, {
+      onSuccess: () => {
+        setAuthed(true);
+        loadPacks();
+      }
+    }));
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      minHeight: "100vh",
+      background: T.bg,
+      fontFamily: "'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+      color: T.ink
+    }
+  }, /*#__PURE__*/React.createElement("style", null, `@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800;900&display=swap');
         *{box-sizing:border-box} button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid ${T.spine};outline-offset:1px}
-        @media (max-width:720px){.pm-stats{grid-template-columns:repeat(2,1fr)!important}}`}</style>
-
-      {/* top bar */}
-      <header style={{ background: T.panel, borderBottom: "1px solid " + T.line, position: "sticky", top: 0, zIndex: 50 }}>
-        <div style={{ maxWidth: 1120, margin: "0 auto", padding: "14px 24px", display: "flex", alignItems: "center", gap: 14 }}>
-          <div style={{ width: 38, height: 38, borderRadius: 11, background: `linear-gradient(135deg, ${T.spine}, #9B7BF0)`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, boxShadow: "0 4px 12px rgba(108,76,224,0.35)" }}>🧠</div>
-          <div>
-            <div style={{ fontSize: 16.5, fontWeight: 800, letterSpacing: -0.2 }}>Positive Minds</div>
-            <div style={{ fontSize: 11.5, color: T.faint, fontWeight: 600, letterSpacing: 0.3, marginTop: -1 }}>PACK CONTENT MANAGER</div>
-          </div>
-          <div style={{ flex: 1 }} />
-          <button onClick={() => { setActive(null); loadPacks(); }} style={{ background: "none", border: "1px solid " + T.line, borderRadius: 9, padding: "8px 14px", fontSize: 13, fontWeight: 600, color: T.sub, cursor: "pointer", fontFamily: "inherit" }}>↻ Refresh</button>
-        </div>
-      </header>
-
-      <main className="pm-main" style={{ maxWidth: 1120, margin: "0 auto", padding: "28px 24px 80px" }}>
-        {connErr ? (
-          <div style={{ background: T.dangerSoft, border: "1px solid " + T.danger, borderRadius: 14, padding: 24, color: T.danger }}>
-            <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>Couldn't reach the database</div>
-            <div style={{ fontSize: 13.5, fontFamily: "monospace", color: "#8B2C2F" }}>{connErr}</div>
-          </div>
-        ) : active ? (
-          <PackDetail pack={active} onBack={() => { setActive(null); loadPacks(); }} refreshPacks={loadPacks} />
-        ) : (
-          <Library packs={packs} loading={loading} onOpen={setActive} onNew={() => setEditPack({})} onEdit={setEditPack} onDelete={deletePack} onExport={exportJSON} />
-        )}
-      </main>
-
-      <Modal open={editPack !== null} onClose={() => setEditPack(null)}>
-        {editPack !== null && <PackEditor pack={editPack.id ? editPack : null} onSave={savePack} onClose={() => setEditPack(null)} />}
-      </Modal>
-
-      {toast && (
-        <div style={{ position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", background: T.ink, color: "#fff", padding: "12px 22px", borderRadius: 11, fontSize: 14, fontWeight: 600, boxShadow: "0 12px 32px rgba(0,0,0,0.3)", zIndex: 200, display: "flex", alignItems: "center", gap: 9 }}>
-          <span style={{ color: "#7CE7D4" }}>✓</span> {toast}
-        </div>
-      )}
-    </div>
-  );
+        @media (max-width:720px){.pm-stats{grid-template-columns:repeat(2,1fr)!important}}`), /*#__PURE__*/React.createElement("header", {
+    style: {
+      background: T.panel,
+      borderBottom: "1px solid " + T.line,
+      position: "sticky",
+      top: 0,
+      zIndex: 50
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      maxWidth: 1120,
+      margin: "0 auto",
+      padding: "14px 24px",
+      display: "flex",
+      alignItems: "center",
+      gap: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 38,
+      height: 38,
+      borderRadius: 11,
+      background: `linear-gradient(135deg, ${T.spine}, #9B7BF0)`,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: 20,
+      boxShadow: "0 4px 12px rgba(108,76,224,0.35)"
+    }
+  }, "🧠"), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16.5,
+      fontWeight: 800,
+      letterSpacing: -0.2
+    }
+  }, "Positive Minds"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: T.faint,
+      fontWeight: 600,
+      letterSpacing: 0.3,
+      marginTop: -1
+    }
+  }, "PACK CONTENT MANAGER")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setActive(null);
+      loadPacks();
+    },
+    style: hdrBtn
+  }, "↻ Refresh"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setChangePw(true),
+    style: hdrBtn
+  }, "Password"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      auth.logout();
+      setAuthed(false);
+      setActive(null);
+    },
+    style: {
+      ...hdrBtn,
+      color: T.danger,
+      borderColor: T.dangerSoft
+    }
+  }, "Sign out"))), /*#__PURE__*/React.createElement("main", {
+    className: "pm-main",
+    style: {
+      maxWidth: 1120,
+      margin: "0 auto",
+      padding: "28px 24px 80px"
+    }
+  }, connErr ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.dangerSoft,
+      border: "1px solid " + T.danger,
+      borderRadius: 14,
+      padding: 24,
+      color: T.danger
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 700,
+      fontSize: 15,
+      marginBottom: 6
+    }
+  }, "Couldn't reach the database"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13.5,
+      fontFamily: "monospace",
+      color: "#8B2C2F"
+    }
+  }, connErr)) : active ? /*#__PURE__*/React.createElement(PackDetail, {
+    pack: active,
+    onBack: () => {
+      setActive(null);
+      loadPacks();
+    },
+    refreshPacks: loadPacks
+  }) : /*#__PURE__*/React.createElement(Library, {
+    packs: packs,
+    loading: loading,
+    onOpen: setActive,
+    onNew: () => setEditPack({}),
+    onEdit: setEditPack,
+    onDelete: deletePack,
+    onExport: exportJSON
+  })), /*#__PURE__*/React.createElement(Modal, {
+    open: editPack !== null,
+    onClose: () => setEditPack(null)
+  }, editPack !== null && /*#__PURE__*/React.createElement(PackEditor, {
+    pack: editPack.id ? editPack : null,
+    onSave: savePack,
+    onClose: () => setEditPack(null)
+  })), /*#__PURE__*/React.createElement(Modal, {
+    open: changePw,
+    onClose: () => setChangePw(false),
+    width: 460
+  }, changePw && /*#__PURE__*/React.createElement(ChangePassword, {
+    onClose: () => setChangePw(false),
+    onDone: () => flash("Password updated")
+  })), toast && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "fixed",
+      bottom: 24,
+      left: "50%",
+      transform: "translateX(-50%)",
+      background: T.ink,
+      color: "#fff",
+      padding: "12px 22px",
+      borderRadius: 11,
+      fontSize: 14,
+      fontWeight: 600,
+      boxShadow: "0 12px 32px rgba(0,0,0,0.3)",
+      zIndex: 200,
+      display: "flex",
+      alignItems: "center",
+      gap: 9
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "#7CE7D4"
+    }
+  }, "✓"), " ", toast));
 }
-
-
 const root = ReactDOM.createRoot(document.getElementById("root"));
-root.render(<App />);
-
+root.render(React.createElement(App));
 </script>
 </body>
 </html>
