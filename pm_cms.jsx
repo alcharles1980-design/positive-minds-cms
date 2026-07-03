@@ -193,18 +193,18 @@ const C = {
 const THEMES = {
   light: {
     bg: "#F6F5FB", bgDeep: "#EEEBF7", panel: "#FFFFFF",
-    ink: "#191728", ink2: "#4A4763", sub: "#6E6B85", faint: "#A29FB6",
-    line: "#EAE7F3", lineSoft: "#F2F0F8",
+    ink: "#191728", ink2: "#4A4763", sub: "#6E6B85", faint: "#726E88",
+    line: "#E4E0F0", lineSoft: "#EFECF7",
     brand: "#6C4CE0", brand2: "#8A6EF0", brandSoft: "#EEE9FD", brandInk: "#4A32B0",
-    good: "#12A594", goodSoft: "#DEF5F1", goodInk: "#0A6B60",
-    warn: "#E08A2B", warnSoft: "#FBEEDD", warnInk: "#9C5B14",
-    danger: "#E5484D", dangerSoft: "#FCE9E9", dangerInk: "#B02A2E",
+    good: "#0E8C7E", goodSoft: "#DEF5F1", goodInk: "#0A6B60",
+    warn: "#C06D18", warnSoft: "#FBEEDD", warnInk: "#9C5B14",
+    danger: "#D83A3F", dangerSoft: "#FCE9E9", dangerInk: "#B02A2E",
     info: "#4C82E0", infoSoft: "#E5EDFB",
   },
   dark: {
     bg: "#131120", bgDeep: "#0D0B16", panel: "#1C1930",
-    ink: "#F3F1FB", ink2: "#C9C5DC", sub: "#9995B0", faint: "#6B6885",
-    line: "#2C2942", lineSoft: "#242138",
+    ink: "#F3F1FB", ink2: "#C9C5DC", sub: "#9995B0", faint: "#8A87A3",
+    line: "#332F4C", lineSoft: "#28243E",
     brand: "#9B7BF0", brand2: "#B49CF6", brandSoft: "#2A2350", brandInk: "#C7B5FA",
     good: "#2CC7B4", goodSoft: "#123B37", goodInk: "#7EE8DA",
     warn: "#F0A54C", warnSoft: "#3A2A12", warnInk: "#F5C58A",
@@ -405,7 +405,7 @@ const Field = ({ label, children, hint, error, style }) => (
   </label>
 );
 
-const inputBase = { width: "100%", padding: "10px 13px", borderRadius: R.md, border: "1px solid " + C.line, fontSize: 14, fontFamily: "inherit", color: C.ink, background: "#fff", boxSizing: "border-box", outline: "none", transition: "border-color .15s, box-shadow .15s" };
+const inputBase = { width: "100%", padding: "10px 13px", borderRadius: R.md, border: "1.5px solid " + C.line, fontSize: 14, fontFamily: "inherit", color: C.ink, background: C.panel, boxSizing: "border-box", outline: "none", transition: "border-color .15s, box-shadow .15s" };
 const focusOn = (e) => { e.target.style.borderColor = C.brand; e.target.style.boxShadow = "0 0 0 3px " + C.brandSoft; };
 const focusOff = (e) => { e.target.style.borderColor = C.line; e.target.style.boxShadow = "none"; };
 const Input = (p) => <input {...p} className={cx("pm-input", p.className)} style={{ ...inputBase, ...p.style }} onFocus={(e) => { focusOn(e); p.onFocus?.(e); }} onBlur={(e) => { focusOff(e); p.onBlur?.(e); }} />;
@@ -3276,6 +3276,12 @@ function GlobalStyle() {
     html,body{margin:0;padding:0}
     html{ -webkit-text-size-adjust:100%; transition:background .2s; }
     body{ background:${C.bg}; transition:background .2s, color .2s; }
+    /* Inputs: typed text is full-strength; placeholders readable but distinct. */
+    input, textarea, select { color: ${C.ink}; }
+    input::placeholder, textarea::placeholder { color: ${C.sub}; opacity: 1; }
+    input::-webkit-input-placeholder, textarea::-webkit-input-placeholder { color: ${C.sub}; opacity: 1; }
+    select:invalid, select option[value=""] { color: ${C.sub}; }
+    ::selection { background: ${C.brandSoft}; color: ${C.brandInk}; }
     button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,[tabindex]:focus-visible{ outline:2px solid ${C.brand}; outline-offset:2px; }
 
     @keyframes pm-spin{ to{ transform:rotate(360deg);} }
