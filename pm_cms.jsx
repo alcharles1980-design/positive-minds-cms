@@ -575,6 +575,133 @@ const fetchAllContent = async (filters = {}) => {
   return { packs: packList, byPack, questionCount: questions.length };
 };
 
+// ===== firebase.jsx =====
+// ============================================================
+// Firebase Transport — writes transformed content into Firebase.
+// Supports: Realtime DB (REST), Firestore (REST), Cloud Function (POST).
+// Layout is fully configurable via path templates.
+// ============================================================
+
+// Resolve a path template like "packs/{slug}" or "content/all"
+const resolvePath = (tpl, ctx) => (tpl || "").replace(/\{(\w+)\}/g, (_, k) => ctx[k] ?? "");
+
+// Convert a plain JS value into Firestore's typed REST format.
+const toFirestoreValue = (v) => {
+  if (v === null || v === undefined) return { nullValue: null };
+  if (typeof v === "boolean") return { booleanValue: v };
+  if (typeof v === "number") return Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v };
+  if (typeof v === "string") return { stringValue: v };
+  if (Array.isArray(v)) return { arrayValue: { values: v.map(toFirestoreValue) } };
+  if (typeof v === "object") return { mapValue: { fields: Object.fromEntries(Object.entries(v).map(([k, x]) => [k, toFirestoreValue(x)])) } };
+  return { stringValue: String(v) };
+};
+const toFirestoreDoc = (obj) => ({ fields: Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, toFirestoreValue(v)])) });
+
+// Given the built output and a target config, produce a list of write ops.
+// Each op: { path, data }  (data is a JS object/array)
+const planWrites = (cfg, packs, byPack, buildFn, spec) => {
+  const layout = cfg.layout || "per-pack";
+  const ops = [];
+  if (layout === "single-doc") {
+    const body = buildFn(spec, packs, byPack, "id");
+    ops.push({ path: cfg.singlePath || "content/all", data: body });
+  } else if (layout === "per-question") {
+    // one entry per question at questionPath/{id}
+    for (const p of packs) {
+      for (const q of byPack[p.id] || []) {
+        const one = buildFn({ ...spec, structure: "flat", root_key: null }, [p], { [p.id]: [q] }, "id");
+        const row = Array.isArray(one) ? one[0] : one;
+        ops.push({ path: resolvePath(cfg.questionPath || "questions/{id}", { id: q.id, slug: p.slug }), data: row });
+      }
+    }
+  } else {
+    // per-pack (default): one doc per pack at packPath/{slug}
+    for (const p of packs) {
+      const one = buildFn({ ...spec, structure: "nested", root_key: null }, [p], byPack, "id");
+      const row = Array.isArray(one) ? one[0] : one;
+      ops.push({ path: resolvePath(cfg.packPath || "packs/{slug}", { slug: p.slug, id: p.id }), data: row });
+    }
+  }
+  return ops;
+};
+
+// --- writers ---
+const fbWriters = {
+  // Realtime Database via REST. cfg: { rtdbUrl, secret }
+  async rtdb(cfg, ops) {
+    const base = (cfg.rtdbUrl || "").replace(/\/$/, "");
+    if (!base) throw new Error("Realtime DB URL is required");
+    let ok = 0;
+    for (const op of ops) {
+      const auth = cfg.secret ? `?auth=${encodeURIComponent(cfg.secret)}` : "";
+      const res = await fetch(`${base}/${op.path}.json${auth}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(op.data) });
+      if (!res.ok) throw new Error(`RTDB write failed at ${op.path}: HTTP ${res.status}`);
+      ok++;
+    }
+    return { written: ok };
+  },
+
+  // Firestore via REST. cfg: { projectId, apiKey?, bearer? }
+  async firestore(cfg, ops) {
+    if (!cfg.projectId) throw new Error("Firestore projectId is required");
+    const base = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents`;
+    let ok = 0;
+    for (const op of ops) {
+      // path like "packs/confidence" -> collection/doc
+      const parts = op.path.split("/").filter(Boolean);
+      const docId = parts.pop();
+      const collection = parts.join("/");
+      const key = cfg.apiKey ? `?key=${cfg.apiKey}` : "";
+      const url = `${base}/${collection}?documentId=${encodeURIComponent(docId)}${key}`;
+      const headers = { "Content-Type": "application/json" };
+      if (cfg.bearer) headers.Authorization = `Bearer ${cfg.bearer}`;
+      // Firestore create; if exists, PATCH instead
+      let res = await fetch(url, { method: "POST", headers, body: JSON.stringify(toFirestoreDoc(op.data)) });
+      if (res.status === 409) {
+        const patchUrl = `${base}/${collection}/${encodeURIComponent(docId)}${key}`;
+        res = await fetch(patchUrl, { method: "PATCH", headers, body: JSON.stringify(toFirestoreDoc(op.data)) });
+      }
+      if (!res.ok) throw new Error(`Firestore write failed at ${op.path}: HTTP ${res.status}`);
+      ok++;
+    }
+    return { written: ok };
+  },
+
+  // Cloud Function (or any endpoint): POST the whole payload once. cfg: { fnUrl, secret, header }
+  async cloudFn(cfg, ops, fullPayload) {
+    if (!cfg.fnUrl) throw new Error("Cloud Function URL is required");
+    const headers = { "Content-Type": "application/json" };
+    if (cfg.secret) headers[cfg.header || "Authorization"] = cfg.secret;
+    const res = await fetch(cfg.fnUrl, { method: "POST", headers, body: JSON.stringify({ writes: ops, payload: fullPayload }) });
+    if (!res.ok) throw new Error(`Cloud Function returned HTTP ${res.status}`);
+    return { written: ops.length };
+  },
+};
+
+// Orchestrate a Firebase sync for a target.
+const runFirebaseSync = async (target, profile) => {
+  const cfg = target.config || {};
+  const content = await fetchAllContent(profile.spec.filters || {});
+  const spec = { ...profile.spec, __name: profile.name };
+  const ops = planWrites(cfg, content.packs, content.byPack, buildOutput, spec);
+  const fullBody = buildOutput(spec, content.packs, content.byPack, "id");
+  const fullPayload = withMeta(spec, fullBody, { packs: content.packs.length, questions: content.questionCount });
+
+  let result;
+  if (cfg.mode === "firestore") result = await fbWriters.firestore(cfg, ops);
+  else if (cfg.mode === "cloudfn") result = await fbWriters.cloudFn(cfg, ops, fullPayload);
+  else result = await fbWriters.rtdb(cfg, ops);
+
+  return { ...result, packCount: content.packs.length, questionCount: content.questionCount, opCount: ops.length };
+};
+
+const db_targets = {
+  list: () => rest("pm_sync_targets?order=created_at.asc&limit=1000").then(r => r.data || []),
+  create: (t) => rest("pm_sync_targets", { method: "POST", body: t }).then(r => r.data?.[0]),
+  update: (id, t) => rest(`pm_sync_targets?id=eq.${id}`, { method: "PATCH", body: t }).then(r => r.data?.[0]),
+  remove: (id) => rest(`pm_sync_targets?id=eq.${id}`, { method: "DELETE" }),
+};
+
 // ===== editors.jsx =====
 // ============================================================
 // Editors
@@ -1340,6 +1467,199 @@ function ValueMapEditor({ maps, onChange }) {
   );
 }
 
+// ===== firebase2.jsx =====
+// ============================================================
+// Firebase Target Editor
+// ============================================================
+function FirebaseTargetEditor({ target, profiles, sampleContent, onSave, onClose }) {
+  const isNew = !target?.id;
+  const [name, setName] = useState(target?.name || "Firebase");
+  const [profileId, setProfileId] = useState(target?.profile_id || profiles[0]?.id || "");
+  const [cfg, setCfg] = useState(target?.config || { mode: "rtdb", layout: "per-pack", packPath: "packs/{slug}", questionPath: "questions/{id}", singlePath: "content/all" });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [testMsg, setTestMsg] = useState(null);
+  const set = (k, v) => setCfg(c => ({ ...c, [k]: v }));
+
+  const profile = profiles.find(p => p.id === profileId);
+
+  // preview the planned writes (paths only, with sample data)
+  const plan = useMemo(() => {
+    if (!profile || !sampleContent.packs.length) return [];
+    try {
+      const spec = { ...profile.spec, __name: profile.name };
+      const ops = planWrites(cfg, sampleContent.packs.slice(0, 3), sampleContent.byPack, buildOutput, spec);
+      return ops.slice(0, 6);
+    } catch { return []; }
+  }, [cfg, profile, sampleContent]);
+
+  const submit = async () => {
+    if (!profileId) { setErr("Choose an export profile."); return; }
+    setBusy(true); setErr("");
+    try { await onSave({ name, channel: "firebase", profile_id: profileId, config: cfg }, target?.id); onClose(); }
+    catch (e) { setErr(e.message); setBusy(false); }
+  };
+
+  const test = async () => {
+    setTestMsg({ kind: "info", text: "Testing connection…" });
+    try {
+      if (cfg.mode === "rtdb") {
+        if (!cfg.rtdbUrl) throw new Error("Enter the Realtime DB URL first");
+        const base = cfg.rtdbUrl.replace(/\/$/, "");
+        const auth = cfg.secret ? `?auth=${encodeURIComponent(cfg.secret)}` : "";
+        const res = await fetch(`${base}/.settings/rules.json${auth}`).catch(() => null);
+        // a reachable RTDB returns 200 or 401/403; anything is "reachable"
+        setTestMsg(res ? { kind: "success", text: `Reached Realtime DB (HTTP ${res.status}). Ready to write.` } : { kind: "error", text: "Could not reach that URL." });
+      } else if (cfg.mode === "firestore") {
+        if (!cfg.projectId) throw new Error("Enter the Firestore project ID first");
+        setTestMsg({ kind: "success", text: `Firestore target set for project “${cfg.projectId}”. A real write will confirm access.` });
+      } else {
+        if (!cfg.fnUrl) throw new Error("Enter the Cloud Function URL first");
+        setTestMsg({ kind: "success", text: "Cloud Function URL set. Push will POST there." });
+      }
+    } catch (e) { setTestMsg({ kind: "error", text: e.message }); }
+  };
+
+  return (
+    <>
+      <ModalHead emoji="🔥" title={isNew ? "New Firebase target" : "Edit Firebase target"} subtitle="Configure how content writes into Firebase" />
+      <div style={{ padding: S.xl, display: "grid", gap: S.lg, maxHeight: "62vh", overflowY: "auto" }}>
+        <div className="pm-form-2">
+          <Field label="Target name"><Input value={name} onChange={(e) => setName(e.target.value)} autoFocus /></Field>
+          <Field label="Export profile" hint="Which format to send">
+            <Select value={profileId} onChange={(e) => setProfileId(e.target.value)}>
+              {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </Select>
+          </Field>
+        </div>
+
+        <Field label="Firebase database & write method">
+          <div style={{ display: "grid", gap: 8 }}>
+            {[["rtdb", "Realtime Database (REST)", "Direct writes from the CMS. Only needs the database URL + secret. Works today."],
+              ["firestore", "Firestore (REST)", "Direct writes via Firestore REST. Needs project ID + an API key or token."],
+              ["cloudfn", "Cloud Function (POST)", "CMS posts the payload to your Firebase Function, which writes with the Admin SDK. Most secure."]].map(([v, l, d]) => (
+              <label key={v} style={{ display: "flex", gap: 11, alignItems: "flex-start", padding: 11, borderRadius: R.md, border: "1px solid " + (cfg.mode === v ? C.brand : C.line), background: cfg.mode === v ? C.brandSoft : C.panel, cursor: "pointer" }}>
+                <input type="radio" checked={cfg.mode === v} onChange={() => set("mode", v)} style={{ marginTop: 2, accentColor: C.brand }} />
+                <div><div style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>{l}</div><div style={{ fontSize: 12.5, color: C.sub, marginTop: 2 }}>{d}</div></div>
+              </label>
+            ))}
+          </div>
+        </Field>
+
+        {/* mode-specific credentials */}
+        {cfg.mode === "rtdb" && (
+          <div style={{ display: "grid", gap: S.md }}>
+            <Field label="Realtime Database URL" hint="From Firebase console → Realtime Database"><Input value={cfg.rtdbUrl || ""} onChange={(e) => set("rtdbUrl", e.target.value)} placeholder="https://your-app-default-rtdb.firebaseio.com" /></Field>
+            <Field label="Database secret / auth token" hint="Optional if rules allow writes; else a DB secret or ID token"><Input type="password" value={cfg.secret || ""} onChange={(e) => set("secret", e.target.value)} placeholder="secret or token" /></Field>
+          </div>
+        )}
+        {cfg.mode === "firestore" && (
+          <div style={{ display: "grid", gap: S.md }}>
+            <Field label="Firestore project ID"><Input value={cfg.projectId || ""} onChange={(e) => set("projectId", e.target.value)} placeholder="my-game-project" /></Field>
+            <div className="pm-form-2">
+              <Field label="Web API key" hint="Optional"><Input value={cfg.apiKey || ""} onChange={(e) => set("apiKey", e.target.value)} placeholder="AIza…" /></Field>
+              <Field label="Bearer token" hint="Optional OAuth/ID token"><Input type="password" value={cfg.bearer || ""} onChange={(e) => set("bearer", e.target.value)} placeholder="ya29.…" /></Field>
+            </div>
+          </div>
+        )}
+        {cfg.mode === "cloudfn" && (
+          <div style={{ display: "grid", gap: S.md }}>
+            <Field label="Cloud Function URL"><Input value={cfg.fnUrl || ""} onChange={(e) => set("fnUrl", e.target.value)} placeholder="https://us-central1-you.cloudfunctions.net/ingestContent" /></Field>
+            <div className="pm-form-2">
+              <Field label="Auth header name" hint="Optional"><Input value={cfg.header || ""} onChange={(e) => set("header", e.target.value)} placeholder="Authorization" /></Field>
+              <Field label="Auth value / secret" hint="Optional"><Input type="password" value={cfg.secret || ""} onChange={(e) => set("secret", e.target.value)} placeholder="Bearer …" /></Field>
+            </div>
+            <div style={{ fontSize: 12, color: C.infoSoft ? C.sub : C.sub, background: C.infoSoft, padding: "10px 12px", borderRadius: R.sm }}>
+              Your function receives <code>{`{ writes: [{path,data}], payload }`}</code>. A ready-to-deploy sample function is in the docs button below.
+            </div>
+          </div>
+        )}
+
+        {/* layout (skip for cloudfn since the function decides) */}
+        {cfg.mode !== "cloudfn" && (
+          <Field label="Content layout" hint="Where documents/nodes are written. {slug} and {id} are placeholders.">
+            <Select value={cfg.layout || "per-pack"} onChange={(e) => set("layout", e.target.value)} style={{ marginBottom: 8 }}>
+              <option value="per-pack">One document per pack</option>
+              <option value="per-question">One document per question</option>
+              <option value="single-doc">Single document holding everything</option>
+            </Select>
+            {cfg.layout === "per-pack" && <Input value={cfg.packPath || "packs/{slug}"} onChange={(e) => set("packPath", e.target.value)} placeholder="packs/{slug}" style={{ fontFamily: "ui-monospace,monospace", fontSize: 13 }} />}
+            {cfg.layout === "per-question" && <Input value={cfg.questionPath || "questions/{id}"} onChange={(e) => set("questionPath", e.target.value)} placeholder="questions/{id}" style={{ fontFamily: "ui-monospace,monospace", fontSize: 13 }} />}
+            {cfg.layout === "single-doc" && <Input value={cfg.singlePath || "content/all"} onChange={(e) => set("singlePath", e.target.value)} placeholder="content/all" style={{ fontFamily: "ui-monospace,monospace", fontSize: 13 }} />}
+          </Field>
+        )}
+
+        {/* write plan preview */}
+        {cfg.mode !== "cloudfn" && plan.length > 0 && (
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 800, color: C.ink2, letterSpacing: 0.3, marginBottom: 8, textTransform: "uppercase" }}>Write plan (sample)</div>
+            <div style={{ background: C.bg, borderRadius: R.md, padding: 12, display: "grid", gap: 5 }}>
+              {plan.map((op, i) => (
+                <div key={i} style={{ fontSize: 12.5, fontFamily: "ui-monospace,monospace", color: C.ink2, display: "flex", gap: 8 }}>
+                  <span style={{ color: C.brand, fontWeight: 700 }}>PUT</span>
+                  <span style={{ color: C.faint }}>{cfg.mode === "firestore" ? "firestore:" : "rtdb:"}</span>
+                  <span>{op.path}</span>
+                </div>
+              ))}
+              <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4 }}>…one write per {cfg.layout === "single-doc" ? "everything" : cfg.layout === "per-question" ? "question" : "pack"}.</div>
+            </div>
+          </div>
+        )}
+
+        {testMsg && <div style={{ fontSize: 13, fontWeight: 600, padding: "10px 14px", borderRadius: R.md, background: testMsg.kind === "error" ? C.dangerSoft : testMsg.kind === "success" ? C.goodSoft : C.infoSoft, color: testMsg.kind === "error" ? C.dangerInk : testMsg.kind === "success" ? C.goodInk : C.ink2 }}>{testMsg.text}</div>}
+        {err && <ErrorState error={err} />}
+      </div>
+      <ModalFoot>
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn variant="soft" onClick={test}>Test connection</Btn>
+        <Btn onClick={submit} disabled={busy}>{busy ? "Saving…" : isNew ? "Create target" : "Save target"}</Btn>
+      </ModalFoot>
+    </>
+  );
+}
+
+// Sample Cloud Function docs modal
+function CloudFnDocs({ onClose }) {
+  const code = `// Firebase Cloud Function — receives content from the CMS.
+// Deploy with: firebase deploy --only functions:ingestContent
+const functions = require("firebase-functions");
+const admin = require("firebase-admin");
+admin.initializeApp();
+
+exports.ingestContent = functions.https.onRequest(async (req, res) => {
+  res.set("Access-Control-Allow-Origin", "*");
+  if (req.method === "OPTIONS") { res.set("Access-Control-Allow-Methods", "POST"); return res.status(204).send(""); }
+
+  // OPTIONAL: check a shared secret
+  // if (req.get("Authorization") !== "Bearer YOUR_SECRET") return res.status(401).send("no");
+
+  const { writes } = req.body; // [{ path, data }]
+  const db = admin.firestore();          // or admin.database() for RTDB
+  const batch = db.batch();
+  for (const w of writes) {
+    const parts = w.path.split("/").filter(Boolean);
+    const id = parts.pop();
+    const col = parts.join("/") || "content";
+    batch.set(db.collection(col).doc(id), w.data, { merge: true });
+  }
+  await batch.commit();
+  res.json({ ok: true, written: writes.length });
+});`;
+  const copy = () => navigator.clipboard?.writeText(code);
+  return (
+    <>
+      <ModalHead emoji="⚡" title="Sample Firebase Cloud Function" subtitle="Deploy this, then point the target's URL at it" />
+      <div style={{ padding: S.xl }}>
+        <pre style={{ background: C.bgDeep, borderRadius: R.md, padding: 16, fontSize: 12, lineHeight: 1.55, overflowX: "auto", color: C.ink2, margin: 0, maxHeight: 400, fontFamily: "ui-monospace,monospace" }}>{code}</pre>
+      </div>
+      <ModalFoot>
+        <Btn variant="ghost" onClick={onClose}>Close</Btn>
+        <Btn onClick={copy} icon="⧉">Copy code</Btn>
+      </ModalFoot>
+    </>
+  );
+}
+
 // ===== publish2.jsx =====
 // ============================================================
 // Publishing Hub — profiles, channels, controls, history
@@ -1352,9 +1672,13 @@ const setPushCfg = (c) => { try { localStorage.setItem(PUSH_CFG_KEY, JSON.string
 function PublishHub({ packs }) {
   const profilesState = useAsync(() => db_profiles.list(), []);
   const profiles = profilesState.data || [];
+  const targetsState = useAsync(() => db_targets.list(), []);
+  const targets = targetsState.data || [];
   const [editProfile, setEditProfile] = useState(null);
+  const [editTarget, setEditTarget] = useState(null);
+  const [showFnDocs, setShowFnDocs] = useState(false);
   const [sample, setSample] = useState({ packs: [], byPack: {}, questionCount: 0 });
-  const [sub, setSub] = useState("profiles"); // profiles | channels | history
+  const [sub, setSub] = useState("profiles"); // profiles | targets | channels | history
   const [busyId, setBusyId] = useState(null);
 
   useEffect(() => { fetchAllContent({ status: "published", question_status: "active" }).then(setSample).catch(() => {}); }, []);
@@ -1369,6 +1693,30 @@ function PublishHub({ packs }) {
     const ok = await confirmDialog({ title: `Delete "${p.name}"?`, message: "This removes the export profile. Content is unaffected.", confirmLabel: "Delete", danger: true });
     if (!ok) return;
     await db_profiles.remove(p.id); await profilesState.reload(); notify("Profile deleted");
+  };
+
+  const saveTarget = async (payload, id) => {
+    if (id) await db_targets.update(id, payload); else await db_targets.create(payload);
+    await targetsState.reload(); notify(id ? "Target saved" : "Target created");
+  };
+  const deleteTarget = async (t) => {
+    const ok = await confirmDialog({ title: `Delete "${t.name}"?`, message: "Removes this sync target. Content is unaffected.", confirmLabel: "Delete", danger: true });
+    if (!ok) return;
+    await db_targets.remove(t.id); await targetsState.reload(); notify("Target deleted");
+  };
+  const syncTarget = async (t) => {
+    const profile = profiles.find(p => p.id === t.profile_id);
+    if (!profile) { notify("This target's profile is missing", { kind: "error" }); return; }
+    setBusyId(t.id);
+    try {
+      const r = await runFirebaseSync(t, profile);
+      await db_sync.log({ profile_id: profile.id, profile_name: profile.name, target_name: t.name, channel: "push", mode: "manual", status: "success", pack_count: r.packCount, question_count: r.questionCount, detail: `${r.opCount} writes → Firebase` });
+      logActivity("target", t.id, t.name, "import", `synced ${r.packCount} packs to Firebase`);
+      notify(`Synced ${r.opCount} writes to ${t.name}`);
+    } catch (e) {
+      await db_sync.log({ profile_id: t.profile_id, target_name: t.name, channel: "push", mode: "manual", status: "error", detail: e.message });
+      notify("Sync failed: " + e.message, { kind: "error", duration: 6000 });
+    } finally { setBusyId(null); }
   };
 
   // Build + download a file through a profile
@@ -1426,8 +1774,8 @@ function PublishHub({ packs }) {
       )}
 
       {/* sub-tabs */}
-      <div style={{ display: "flex", gap: 4, marginBottom: S.lg, borderBottom: "1px solid " + C.line }}>
-        {[["profiles", "Export profiles"], ["channels", "Channels & sync"], ["history", "Sync history"]].map(([v, l]) => (
+      <div style={{ display: "flex", gap: 4, marginBottom: S.lg, borderBottom: "1px solid " + C.line, flexWrap: "wrap" }}>
+        {[["profiles", "Export profiles"], ["targets", "🔥 Firebase targets"], ["channels", "Channels & sync"], ["history", "Sync history"]].map(([v, l]) => (
           <button key={v} onClick={() => setSub(v)} style={{ padding: "10px 16px", border: "none", borderBottom: "2px solid " + (sub === v ? C.brand : "transparent"), background: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 14, fontWeight: 700, color: sub === v ? C.ink : C.sub, marginBottom: -1 }}>{l}</button>
         ))}
       </div>
@@ -1476,8 +1824,59 @@ function PublishHub({ packs }) {
       {sub === "channels" && <ChannelsPanel profiles={profiles} />}
       {sub === "history" && <SyncHistory />}
 
+      {sub === "targets" && (
+        <div>
+          <div className="pm-toolbar" style={{ marginBottom: S.lg }}>
+            <div style={{ fontSize: 13.5, color: C.sub }}>Saved Firebase destinations — each pairs a profile with a database + layout</div>
+            <div className="pm-grow" />
+            <Btn variant="ghost" size="sm" onClick={() => setShowFnDocs(true)} icon="⚡">Function sample</Btn>
+            <Btn size="sm" onClick={() => setEditTarget({})} icon="＋">New target</Btn>
+          </div>
+          {targetsState.loading ? <div style={{ display: "grid", gap: 10 }}>{[0,1].map(i => <Skeleton key={i} h={80} r={12} />)}</div>
+            : targets.length === 0 ? <EmptyState icon="🔥" title="No Firebase targets yet" body="Add a target to write content into Firestore or Realtime Database — directly or via a Cloud Function." action={<Btn onClick={() => setEditTarget({})} icon="＋">Add Firebase target</Btn>} />
+            : (
+              <div style={{ display: "grid", gap: 12 }}>
+                {targets.map(t => {
+                  const prof = profiles.find(p => p.id === t.profile_id);
+                  const modeLabel = { rtdb: "Realtime DB", firestore: "Firestore", cloudfn: "Cloud Function" }[t.config?.mode] || "Firebase";
+                  return (
+                    <div key={t.id} style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg }}>
+                      <div style={{ display: "flex", alignItems: "flex-start", gap: 14, flexWrap: "wrap" }}>
+                        <div style={{ fontSize: 26 }}>🔥</div>
+                        <div style={{ flex: 1, minWidth: 180 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                            <span style={{ fontSize: 15.5, fontWeight: 800, color: C.ink }}>{t.name}</span>
+                            <Pill tone="info">{modeLabel}</Pill>
+                            {prof ? <Pill tone="muted">{prof.name}</Pill> : <Pill tone="muted">⚠ no profile</Pill>}
+                          </div>
+                          <div style={{ fontSize: 12.5, color: C.sub, marginTop: 5, fontFamily: "ui-monospace,monospace" }}>
+                            {t.config?.mode === "cloudfn" ? (t.config?.fnUrl || "no URL set")
+                              : t.config?.mode === "firestore" ? `project: ${t.config?.projectId || "—"} · ${t.config?.layout || "per-pack"}`
+                              : `${t.config?.rtdbUrl || "no URL set"} · ${t.config?.layout || "per-pack"}`}
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          <Btn variant="ghost" size="sm" onClick={() => setEditTarget(t)}>Edit</Btn>
+                          <Btn size="sm" disabled={busyId === t.id || !prof} onClick={() => syncTarget(t)} icon="🔥">{busyId === t.id ? "Syncing…" : "Sync now"}</Btn>
+                          <Btn variant="danger" size="sm" onClick={() => deleteTarget(t)}>Delete</Btn>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+        </div>
+      )}
+
       <Modal open={editProfile !== null} onClose={() => setEditProfile(null)} width={720}>
         {editProfile !== null && <ProfileBuilder profile={editProfile.id ? editProfile : null} sampleContent={sample} onSave={saveProfile} onClose={() => setEditProfile(null)} />}
+      </Modal>
+      <Modal open={editTarget !== null} onClose={() => setEditTarget(null)} width={640}>
+        {editTarget !== null && <FirebaseTargetEditor target={editTarget.id ? editTarget : null} profiles={profiles} sampleContent={sample} onSave={saveTarget} onClose={() => setEditTarget(null)} />}
+      </Modal>
+      <Modal open={showFnDocs} onClose={() => setShowFnDocs(false)} width={640}>
+        {showFnDocs && <CloudFnDocs onClose={() => setShowFnDocs(false)} />}
       </Modal>
     </div>
   );
