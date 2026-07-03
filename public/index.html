@@ -1907,6 +1907,45 @@ function App() {
     setToast(m);
     setTimeout(() => setToast(""), 2600);
   };
+
+  // --- Browser Back button support ---------------------------
+  // Opening a pack pushes a history entry; the browser Back button
+  // then returns to the library instead of leaving the site.
+  const openPack = useCallback(pack => {
+    setActive(pack);
+    window.history.pushState({
+      view: "pack",
+      id: pack.id
+    }, "");
+  }, []);
+  const closePack = useCallback(() => {
+    // If we're on a pushed pack entry, go back through history so the
+    // URL/history stays in sync; otherwise just clear the view.
+    if (window.history.state && window.history.state.view === "pack") {
+      window.history.back();
+    } else {
+      setActive(null);
+    }
+    loadPacks();
+  }, [loadPacks]);
+  useEffect(() => {
+    // Seed a base entry so there's always something to return to.
+    if (!window.history.state) window.history.replaceState({
+      view: "library"
+    }, "");
+    const onPop = e => {
+      const view = e.state && e.state.view;
+      if (view === "pack") {
+        // shouldn't usually happen, but keep state consistent
+        return;
+      }
+      // Back to library
+      setActive(null);
+      loadPacks();
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [loadPacks]);
   const savePack = async (payload, id) => {
     if (id) await api(`pm_packs?id=eq.${id}`, {
       method: "PATCH",
@@ -2037,8 +2076,7 @@ function App() {
     }
   }), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
-      setActive(null);
-      loadPacks();
+      if (active) closePack();else loadPacks();
     },
     style: hdrBtn
   }, "↻ Refresh"), /*#__PURE__*/React.createElement("button", {
@@ -2084,15 +2122,12 @@ function App() {
     }
   }, connErr)) : active ? /*#__PURE__*/React.createElement(PackDetail, {
     pack: active,
-    onBack: () => {
-      setActive(null);
-      loadPacks();
-    },
+    onBack: closePack,
     refreshPacks: loadPacks
   }) : /*#__PURE__*/React.createElement(Library, {
     packs: packs,
     loading: loading,
-    onOpen: setActive,
+    onOpen: openPack,
     onNew: () => setEditPack({}),
     onEdit: setEditPack,
     onDelete: deletePack,

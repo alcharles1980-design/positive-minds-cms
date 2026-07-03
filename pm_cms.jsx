@@ -803,6 +803,42 @@ export default function App() {
 
   const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 2600); };
 
+  // --- Browser Back button support ---------------------------
+  // Opening a pack pushes a history entry; the browser Back button
+  // then returns to the library instead of leaving the site.
+  const openPack = useCallback((pack) => {
+    setActive(pack);
+    window.history.pushState({ view: "pack", id: pack.id }, "");
+  }, []);
+
+  const closePack = useCallback(() => {
+    // If we're on a pushed pack entry, go back through history so the
+    // URL/history stays in sync; otherwise just clear the view.
+    if (window.history.state && window.history.state.view === "pack") {
+      window.history.back();
+    } else {
+      setActive(null);
+    }
+    loadPacks();
+  }, [loadPacks]);
+
+  useEffect(() => {
+    // Seed a base entry so there's always something to return to.
+    if (!window.history.state) window.history.replaceState({ view: "library" }, "");
+    const onPop = (e) => {
+      const view = e.state && e.state.view;
+      if (view === "pack") {
+        // shouldn't usually happen, but keep state consistent
+        return;
+      }
+      // Back to library
+      setActive(null);
+      loadPacks();
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [loadPacks]);
+
   const savePack = async (payload, id) => {
     if (id) await api(`pm_packs?id=eq.${id}`, { method: "PATCH", body: payload });
     else await api("pm_packs", { method: "POST", body: { ...payload, sort_order: (packs?.length || 0) + 1 } });
@@ -866,7 +902,7 @@ export default function App() {
             <div style={{ fontSize: 11.5, color: T.faint, fontWeight: 600, letterSpacing: 0.3, marginTop: -1 }}>PACK CONTENT MANAGER</div>
           </div>
           <div style={{ flex: 1 }} />
-          <button onClick={() => { setActive(null); loadPacks(); }} style={hdrBtn}>↻ Refresh</button>
+          <button onClick={() => { if (active) closePack(); else loadPacks(); }} style={hdrBtn}>↻ Refresh</button>
           <button onClick={() => setChangePw(true)} style={hdrBtn}>Password</button>
           <button onClick={() => { auth.logout(); setAuthed(false); setActive(null); }} style={{ ...hdrBtn, color: T.danger, borderColor: T.dangerSoft }}>Sign out</button>
         </div>
@@ -879,9 +915,9 @@ export default function App() {
             <div style={{ fontSize: 13.5, fontFamily: "monospace", color: "#8B2C2F" }}>{connErr}</div>
           </div>
         ) : active ? (
-          <PackDetail pack={active} onBack={() => { setActive(null); loadPacks(); }} refreshPacks={loadPacks} />
+          <PackDetail pack={active} onBack={closePack} refreshPacks={loadPacks} />
         ) : (
-          <Library packs={packs} loading={loading} onOpen={setActive} onNew={() => setEditPack({})} onEdit={setEditPack} onDelete={deletePack} onExport={exportJSON} />
+          <Library packs={packs} loading={loading} onOpen={openPack} onNew={() => setEditPack({})} onEdit={setEditPack} onDelete={deletePack} onExport={exportJSON} />
         )}
       </main>
 
