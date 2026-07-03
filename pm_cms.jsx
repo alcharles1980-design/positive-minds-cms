@@ -1,293 +1,486 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
+
+// ===== core.jsx =====
 
 // ============================================================
-// Positive Minds — Pack CMS
+// Positive Minds — Pack CMS  ·  v2 (rebuilt core)
 // Content management for the CBMT word-game pack library.
-// Data: Supabase (pm_packs, pm_questions)
+//
+// Architecture:
+//   - config + data layer (Supabase REST + RPC, paginated)
+//   - design token system (color / space / radius / shadow / type)
+//   - hooks (breakpoint, toast, hotkeys, focus-trap, async)
+//   - primitives (Button, Badge, Field, inputs, Modal, Confirm…)
+//   - feature views (Dashboard, Library, PackDetail, AllQuestions)
+//   - App shell (auth gate, routing via history, command surface)
 // ============================================================
 
-const SUPABASE_URL = "https://tytrmjjucqijzcrbwjfm.supabase.co";
-const SUPABASE_KEY = "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev";
-const ADMIN_EMAIL = "admin@positiveminds.app"; // fixed internal id; the shared password is the secret
-const SESSION_STORE = "pm_admin_session";
-
-// --- session (in-memory + sessionStorage so a refresh keeps you logged in) ---
-const session = {
-  token: null,
-  refresh: null,
-  load() {
-    try {
-      const raw = sessionStorage.getItem(SESSION_STORE);
-      if (raw) { const s = JSON.parse(raw); this.token = s.access_token; this.refresh = s.refresh_token; }
-    } catch {}
-    return this.token;
-  },
-  save(access_token, refresh_token) {
-    this.token = access_token; this.refresh = refresh_token;
-    try { sessionStorage.setItem(SESSION_STORE, JSON.stringify({ access_token, refresh_token })); } catch {}
-  },
-  clear() {
-    this.token = null; this.refresh = null;
-    try { sessionStorage.removeItem(SESSION_STORE); } catch {}
-  },
+// ---------- config ----------
+const CFG = {
+  url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
+  key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
+  adminEmail: "admin@positiveminds.app",
+  sessionStore: "pm_admin_session_v2",
+  pageSize: 40,
 };
 
-// --- auth against Supabase Auth (/auth/v1) -----------------
+// ============================================================
+// Session + Auth
+// ============================================================
+const session = {
+  token: null, refresh: null,
+  load() {
+    try { const r = sessionStorage.getItem(CFG.sessionStore); if (r) { const s = JSON.parse(r); this.token = s.access_token; this.refresh = s.refresh_token; } } catch {}
+    return this.token;
+  },
+  save(a, r) { this.token = a; this.refresh = r; try { sessionStorage.setItem(CFG.sessionStore, JSON.stringify({ access_token: a, refresh_token: r })); } catch {} },
+  clear() { this.token = null; this.refresh = null; try { sessionStorage.removeItem(CFG.sessionStore); } catch {} },
+};
+
 const auth = {
   async login(password) {
-    const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
-      method: "POST",
-      headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json" },
-      body: JSON.stringify({ email: ADMIN_EMAIL, password }),
+    const res = await fetch(`${CFG.url}/auth/v1/token?grant_type=password`, {
+      method: "POST", headers: { apikey: CFG.key, "Content-Type": "application/json" },
+      body: JSON.stringify({ email: CFG.adminEmail, password }),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error_description || data.msg || "Incorrect password");
-    session.save(data.access_token, data.refresh_token);
-    return true;
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error_description || d.msg || "Incorrect password");
+    session.save(d.access_token, d.refresh_token); return true;
   },
-  async changePassword(newPassword) {
-    const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
-      method: "PUT",
-      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${session.token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ password: newPassword }),
+  async changePassword(pw) {
+    const res = await fetch(`${CFG.url}/auth/v1/user`, {
+      method: "PUT", headers: { apikey: CFG.key, Authorization: `Bearer ${session.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ password: pw }),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error_description || data.msg || "Could not change password");
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error_description || d.msg || "Could not change password");
     return true;
   },
   logout() { session.clear(); },
-  isAuthed() { return !!session.token; },
 };
 
-// --- tiny supabase REST helper -----------------------------
-// Uses the auth session token when present (authorizes writes),
-// otherwise falls back to the anon key (read-only).
-const api = async (path, { method = "GET", body, headers = {} } = {}) => {
-  const bearer = session.token || SUPABASE_KEY;
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
-    method,
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${bearer}`,
-      "Content-Type": "application/json",
-      Prefer: "return=representation",
-      ...headers,
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+// ============================================================
+// Data layer — REST + RPC with a paginating helper
+// ============================================================
+const rest = async (path, { method = "GET", body, headers = {}, range } = {}) => {
+  const bearer = session.token || CFG.key;
+  const h = {
+    apikey: CFG.key, Authorization: `Bearer ${bearer}`,
+    "Content-Type": "application/json", Prefer: "return=representation", ...headers,
+  };
+  if (range) { h.Range = `${range[0]}-${range[1]}`; h.Prefer = "count=exact"; }
+  const res = await fetch(`${CFG.url}/rest/v1/${path}`, { method, headers: h, body: body ? JSON.stringify(body) : undefined });
   if (!res.ok) {
-    const txt = await res.text();
-    // Session expired mid-use → clear it so the app can prompt re-login
+    const t = await res.text();
     if (res.status === 401 && session.token) session.clear();
-    throw new Error(`${res.status}: ${txt}`);
+    throw new Error(friendlyError(res.status, t));
   }
-  if (res.status === 204) return null;
-  const txt = await res.text();
-  return txt ? JSON.parse(txt) : null;
+  const total = res.headers.get("content-range");
+  if (res.status === 204) return { data: null, total: null };
+  const t = await res.text();
+  const data = t ? JSON.parse(t) : null;
+  return { data, total: total ? parseInt(total.split("/")[1]) : (Array.isArray(data) ? data.length : null) };
 };
 
-// --- design tokens -----------------------------------------
-const T = {
-  bg: "#F7F6FB",
-  panel: "#FFFFFF",
-  ink: "#1C1A2E",
-  sub: "#6B6880",
-  faint: "#9C99B0",
-  line: "#EAE7F2",
-  spine: "#6C4CE0",
-  spineSoft: "#EEE9FD",
-  good: "#12A594",
-  goodSoft: "#E0F5F1",
-  warn: "#E8873B",
-  warnSoft: "#FBEEE0",
-  danger: "#E5484D",
-  dangerSoft: "#FBE9E9",
-  draft: "#8B8AA0",
-  draftSoft: "#EFEEF4",
+const rpc = async (fn, args = {}) => {
+  const bearer = session.token || CFG.key;
+  const res = await fetch(`${CFG.url}/rest/v1/rpc/${fn}`, {
+    method: "POST",
+    headers: { apikey: CFG.key, Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" },
+    body: JSON.stringify(args),
+  });
+  if (!res.ok) { const t = await res.text(); if (res.status === 401 && session.token) session.clear(); throw new Error(friendlyError(res.status, t)); }
+  const t = await res.text();
+  return t ? JSON.parse(t) : null;
 };
 
-const STATUS_STYLES = {
-  published: { bg: T.goodSoft, fg: "#0A7A6C", label: "Published" },
-  draft: { bg: T.draftSoft, fg: T.draft, label: "Draft" },
-  archived: { bg: T.warnSoft, fg: "#B5641F", label: "Archived" },
-  active: { bg: T.goodSoft, fg: "#0A7A6C", label: "Active" },
-  inactive: { bg: T.draftSoft, fg: T.draft, label: "Inactive" },
+const friendlyError = (status, raw) => {
+  if (status === 401) return "Your session expired — please sign in again.";
+  if (status === 403) return "You don't have permission for that. Sign in as admin to make changes.";
+  if (status === 409 || /duplicate/i.test(raw)) return "That already exists (a pack with this slug is taken).";
+  if (status >= 500) return "The server had a problem. Please try again in a moment.";
+  try { const j = JSON.parse(raw); return j.message || j.hint || raw; } catch { return raw || `Request failed (${status})`; }
 };
 
-const slugify = (s) =>
-  s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+// Domain API — every function here is the ONLY way features touch data.
+const db = {
+  packsOverview: () => rest("pm_pack_overview?order=sort_order.asc&limit=10000").then(r => r.data || []),
+  dashboard: () => rpc("pm_dashboard_stats"),
+  createPack: (p) => rest("pm_packs", { method: "POST", body: p }).then(r => r.data?.[0]),
+  updatePack: (id, p) => rest(`pm_packs?id=eq.${id}`, { method: "PATCH", body: p }).then(r => r.data?.[0]),
+  deletePack: (id) => rest(`pm_packs?id=eq.${id}`, { method: "DELETE" }),
+  clonePack: (src, slug, name) => rpc("pm_clone_pack", { src, new_slug: slug, new_name: name }),
+  reorderPacks: (updates) => Promise.all(updates.map(u => rest(`pm_packs?id=eq.${u.id}`, { method: "PATCH", body: { sort_order: u.sort_order } }))),
 
-// --- responsive breakpoint hook ----------------------------
-// Returns { w, isPhone, isTablet, isDesktop } and re-renders on resize/rotate.
-const useBreakpoint = () => {
-  const [w, setW] = useState(typeof window !== "undefined" ? window.innerWidth : 1200);
-  useEffect(() => {
-    let raf;
-    const onResize = () => {
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(() => setW(window.innerWidth));
-    };
-    window.addEventListener("resize", onResize);
-    window.addEventListener("orientationchange", onResize);
-    return () => {
-      window.removeEventListener("resize", onResize);
-      window.removeEventListener("orientationchange", onResize);
-      cancelAnimationFrame(raf);
-    };
-  }, []);
-  return { w, isPhone: w < 640, isTablet: w >= 640 && w < 1024, isDesktop: w >= 1024 };
+  questions: (packId, { page = 0, size = CFG.pageSize } = {}) =>
+    rest(`pm_questions?pack_id=eq.${packId}&order=sort_order.asc,created_at.asc`, { range: [page * size, page * size + size - 1] }),
+  searchQuestions: (args) => rpc("pm_search_questions", args),
+  createQuestion: (q) => rest("pm_questions", { method: "POST", body: q }).then(r => r.data?.[0]),
+  createQuestions: (rows) => rest("pm_questions", { method: "POST", body: rows }).then(r => r.data),
+  updateQuestion: (id, q) => rest(`pm_questions?id=eq.${id}`, { method: "PATCH", body: q }).then(r => r.data?.[0]),
+  deleteQuestion: (id) => rest(`pm_questions?id=eq.${id}`, { method: "DELETE" }),
+  deleteQuestions: (ids) => rest(`pm_questions?id=in.(${ids.join(",")})`, { method: "DELETE" }),
+  setQuestionsStatus: (ids, status) => rest(`pm_questions?id=in.(${ids.join(",")})`, { method: "PATCH", body: { status } }),
+
+  exportAll: async () => {
+    const packs = (await rest("pm_packs?order=sort_order.asc&limit=10000")).data || [];
+    const qs = (await rest("pm_questions?order=sort_order.asc&limit=10000")).data || [];
+    return { packs, questions: qs };
+  },
 };
 
-// preview a template with the answer blanked
-const renderPreview = (template, answer, altAnswer, letters, difficulty) => {
-  const word = answer || "____";
-  let blanked;
-  if (difficulty === "advanced" || letters >= word.length) {
-    blanked = "_".repeat(Math.max(3, word.length));
-  } else {
-    const keep = word.length - letters;
-    blanked = word.slice(0, Math.ceil(keep / 2)) + "_".repeat(letters) + word.slice(Math.ceil(keep / 2) + letters);
-    if (blanked.length < word.length) blanked = word.slice(0, word.length - letters) + "_".repeat(letters);
+// ============================================================
+// Design tokens
+// ============================================================
+const C = {
+  bg: "#F6F5FB", bgDeep: "#EEEBF7", panel: "#FFFFFF",
+  ink: "#191728", ink2: "#4A4763", sub: "#6E6B85", faint: "#A29FB6",
+  line: "#EAE7F3", lineSoft: "#F2F0F8",
+  brand: "#6C4CE0", brand2: "#8A6EF0", brandSoft: "#EEE9FD", brandInk: "#4A32B0",
+  good: "#12A594", goodSoft: "#DEF5F1", goodInk: "#0A6B60",
+  warn: "#E08A2B", warnSoft: "#FBEEDD", warnInk: "#9C5B14",
+  danger: "#E5484D", dangerSoft: "#FCE9E9", dangerInk: "#B02A2E",
+  info: "#4C82E0", infoSoft: "#E5EDFB",
+};
+const S = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32, xxxl: 48 };
+const R = { sm: 8, md: 11, lg: 14, xl: 18, pill: 999 };
+const SH = {
+  sm: "0 1px 2px rgba(25,23,40,0.06)",
+  md: "0 4px 14px rgba(25,23,40,0.08)",
+  lg: "0 12px 32px rgba(25,23,40,0.12)",
+  xl: "0 24px 60px rgba(25,23,40,0.18)",
+  brand: "0 6px 18px rgba(108,76,224,0.30)",
+};
+const FONT = "'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+
+const STATUS = {
+  published: { bg: C.goodSoft, fg: C.goodInk, label: "Published", dot: C.good },
+  draft: { bg: C.lineSoft, fg: C.sub, label: "Draft", dot: C.faint },
+  archived: { bg: C.warnSoft, fg: C.warnInk, label: "Archived", dot: C.warn },
+  active: { bg: C.goodSoft, fg: C.goodInk, label: "Active", dot: C.good },
+  inactive: { bg: C.lineSoft, fg: C.sub, label: "Inactive", dot: C.faint },
+};
+
+// ============================================================
+// Utilities
+// ============================================================
+const slugify = (s) => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+const cx = (...a) => a.filter(Boolean).join(" ");
+const uid = () => Math.random().toString(36).slice(2, 9);
+
+// Render a question the way a child sees it.
+const previewQuestion = (template, answer, alt, letters, difficulty) => {
+  const word = (answer || "____").toUpperCase();
+  let blank;
+  if (difficulty === "advanced" || letters >= word.length) blank = "_".repeat(Math.max(3, word.length));
+  else {
+    const start = Math.max(0, word.length - letters);
+    blank = word.slice(0, start) + "_".repeat(letters);
   }
-  const sentence = (template || "").replace(/\{blank\}/g, blanked);
-  const opts = [answer, altAnswer].filter(Boolean).join(" / ");
+  const sentence = (template || "").replace(/\{blank\}/g, blank);
+  const opts = [answer, alt].filter(Boolean).map(w => w.toUpperCase()).join(" / ");
   return { sentence, opts };
 };
 
 // ============================================================
-// Small UI atoms
+// Hooks
 // ============================================================
-const Badge = ({ kind }) => {
-  const s = STATUS_STYLES[kind] || STATUS_STYLES.draft;
-  return (
-    <span style={{
-      fontSize: 11, fontWeight: 600, padding: "3px 9px", borderRadius: 20,
-      background: s.bg, color: s.fg, letterSpacing: 0.2, whiteSpace: "nowrap",
-    }}>{s.label}</span>
-  );
+const useBreakpoint = () => {
+  const [w, setW] = useState(typeof window !== "undefined" ? window.innerWidth : 1200);
+  useEffect(() => {
+    let raf; const on = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(() => setW(window.innerWidth)); };
+    window.addEventListener("resize", on); window.addEventListener("orientationchange", on);
+    return () => { window.removeEventListener("resize", on); window.removeEventListener("orientationchange", on); cancelAnimationFrame(raf); };
+  }, []);
+  return { w, isPhone: w < 640, isTablet: w >= 640 && w < 1024, isDesktop: w >= 1024 };
 };
 
-const Pill = ({ children, tone = "neutral" }) => {
-  const tones = {
-    neutral: { bg: T.spineSoft, fg: T.spine },
-    muted: { bg: "#F0EFF5", fg: T.sub },
+// Toast system via a tiny event bus
+const toastBus = (() => {
+  let listeners = [];
+  return {
+    emit: (t) => listeners.forEach(l => l(t)),
+    sub: (fn) => { listeners.push(fn); return () => { listeners = listeners.filter(l => l !== fn); }; },
   };
-  const c = tones[tone] || tones.neutral;
-  return (
-    <span style={{
-      fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 6,
-      background: c.bg, color: c.fg, textTransform: "capitalize",
-    }}>{children}</span>
-  );
+})();
+const notify = (message, opts = {}) => toastBus.emit({ id: uid(), message, kind: opts.kind || "success", action: opts.action, duration: opts.duration ?? 3200 });
+
+const useHotkey = (key, handler, active = true) => {
+  useEffect(() => {
+    if (!active) return;
+    const on = (e) => {
+      const k = e.key.toLowerCase();
+      const combo = (e.metaKey || e.ctrlKey ? "mod+" : "") + k;
+      if (combo === key || k === key) { handler(e); }
+    };
+    window.addEventListener("keydown", on);
+    return () => window.removeEventListener("keydown", on);
+  }, [key, handler, active]);
 };
 
-const Btn = ({ children, onClick, variant = "primary", size = "md", disabled, title, style }) => {
+// Focus trap + Escape for modals/sheets
+const useFocusTrap = (ref, active, onClose) => {
+  useEffect(() => {
+    if (!active || !ref.current) return;
+    const node = ref.current;
+    const sel = 'a[href],button:not([disabled]),textarea,input,select,[tabindex]:not([tabindex="-1"])';
+    const first = node.querySelectorAll(sel)[0];
+    first && first.focus();
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.stopPropagation(); onClose && onClose(); return; }
+      if (e.key !== "Tab") return;
+      const items = [...node.querySelectorAll(sel)].filter(el => el.offsetParent !== null);
+      if (!items.length) return;
+      const f = items[0], l = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === f) { e.preventDefault(); l.focus(); }
+      else if (!e.shiftKey && document.activeElement === l) { e.preventDefault(); f.focus(); }
+    };
+    node.addEventListener("keydown", onKey);
+    return () => node.removeEventListener("keydown", onKey);
+  }, [active, ref, onClose]);
+};
+
+// generic async runner with loading/error
+const useAsync = (fn, deps = []) => {
+  const [state, setState] = useState({ loading: true, error: null, data: null });
+  const run = useCallback(async () => {
+    setState(s => ({ ...s, loading: true, error: null }));
+    try { const data = await fn(); setState({ loading: false, error: null, data }); return data; }
+    catch (e) { setState({ loading: false, error: e.message, data: null }); }
+  }, deps); // eslint-disable-line
+  useEffect(() => { run(); }, [run]);
+  return { ...state, reload: run, setData: (d) => setState(s => ({ ...s, data: typeof d === "function" ? d(s.data) : d })) };
+};
+
+// ===== primitives.jsx =====
+// ============================================================
+// UI Primitives
+// ============================================================
+
+const Btn = ({ children, onClick, variant = "primary", size = "md", disabled, title, icon, full, style, type }) => {
+  const [hover, setHover] = useState(false);
   const sizes = {
-    sm: { padding: "6px 12px", fontSize: 13 },
-    md: { padding: "9px 16px", fontSize: 14 },
+    xs: { padding: "5px 10px", fontSize: 12.5, gap: 5 },
+    sm: { padding: "7px 13px", fontSize: 13, gap: 6 },
+    md: { padding: "10px 17px", fontSize: 14, gap: 7 },
+    lg: { padding: "12px 22px", fontSize: 15, gap: 8 },
   };
-  const variants = {
-    primary: { background: T.spine, color: "#fff", border: "1px solid " + T.spine },
-    soft: { background: T.spineSoft, color: T.spine, border: "1px solid " + T.spineSoft },
-    ghost: { background: "transparent", color: T.sub, border: "1px solid " + T.line },
-    danger: { background: "#fff", color: T.danger, border: "1px solid " + T.dangerSoft },
+  const V = {
+    primary: { background: hover ? C.brandInk : C.brand, color: "#fff", border: "1px solid transparent", boxShadow: hover ? SH.brand : "none" },
+    soft: { background: hover ? "#E4DCFB" : C.brandSoft, color: C.brandInk, border: "1px solid transparent" },
+    ghost: { background: hover ? C.lineSoft : "transparent", color: C.ink2, border: "1px solid " + C.line },
+    danger: { background: hover ? C.dangerSoft : "#fff", color: C.danger, border: "1px solid " + (hover ? C.danger : C.dangerSoft) },
+    dangerFill: { background: hover ? C.dangerInk : C.danger, color: "#fff", border: "1px solid transparent" },
+    dim: { background: "transparent", color: hover ? C.ink : C.sub, border: "1px solid transparent" },
   };
   return (
-    <button onClick={onClick} disabled={disabled} title={title} style={{
-      ...sizes[size], ...variants[variant], ...style,
-      borderRadius: 9, fontWeight: 600, cursor: disabled ? "not-allowed" : "pointer",
-      opacity: disabled ? 0.5 : 1, transition: "all .15s", fontFamily: "inherit",
-      display: "inline-flex", alignItems: "center", gap: 7, lineHeight: 1,
-    }}>{children}</button>
+    <button type={type || "button"} onClick={onClick} disabled={disabled} title={title}
+      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+      style={{ ...sizes[size], ...V[variant], ...style,
+        borderRadius: R.md, fontWeight: 700, cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.5 : 1, transition: "all .15s", fontFamily: "inherit",
+        display: "inline-flex", alignItems: "center", justifyContent: "center",
+        gap: sizes[size].gap, lineHeight: 1, width: full ? "100%" : undefined, whiteSpace: "nowrap" }}>
+      {icon && <span style={{ fontSize: "1.05em" }}>{icon}</span>}{children}
+    </button>
   );
 };
 
-const Field = ({ label, children, hint, style }) => (
+const Badge = ({ kind, dot }) => {
+  const s = STATUS[kind] || STATUS.draft;
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 700,
+      padding: "3px 9px", borderRadius: R.pill, background: s.bg, color: s.fg, whiteSpace: "nowrap" }}>
+      {dot !== false && <span style={{ width: 6, height: 6, borderRadius: 99, background: s.dot }} />}{s.label}
+    </span>
+  );
+};
+
+const Pill = ({ children, tone = "brand" }) => {
+  const t = { brand: { bg: C.brandSoft, fg: C.brandInk }, muted: { bg: C.lineSoft, fg: C.sub }, info: { bg: C.infoSoft, fg: C.info } }[tone];
+  return <span style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: R.sm, background: t.bg, color: t.fg, textTransform: "capitalize", whiteSpace: "nowrap" }}>{children}</span>;
+};
+
+const Field = ({ label, children, hint, error, style }) => (
   <label style={{ display: "block", ...style }}>
-    <div style={{ fontSize: 12, fontWeight: 600, color: T.sub, marginBottom: 6, letterSpacing: 0.2 }}>{label}</div>
+    {label && <div style={{ fontSize: 12, fontWeight: 700, color: C.ink2, marginBottom: 6, letterSpacing: 0.2 }}>{label}</div>}
     {children}
-    {hint && <div style={{ fontSize: 11.5, color: T.faint, marginTop: 5 }}>{hint}</div>}
+    {error ? <div style={{ fontSize: 11.5, color: C.danger, marginTop: 5, fontWeight: 600 }}>{error}</div>
+      : hint ? <div style={{ fontSize: 11.5, color: C.faint, marginTop: 5 }}>{hint}</div> : null}
   </label>
 );
 
-const inputStyle = {
-  width: "100%", padding: "10px 12px", borderRadius: 9, border: "1px solid " + T.line,
-  fontSize: 14, fontFamily: "inherit", color: T.ink, background: "#fff",
-  boxSizing: "border-box", outline: "none",
-};
+const inputBase = { width: "100%", padding: "10px 13px", borderRadius: R.md, border: "1px solid " + C.line, fontSize: 14, fontFamily: "inherit", color: C.ink, background: "#fff", boxSizing: "border-box", outline: "none", transition: "border-color .15s, box-shadow .15s" };
+const focusOn = (e) => { e.target.style.borderColor = C.brand; e.target.style.boxShadow = "0 0 0 3px " + C.brandSoft; };
+const focusOff = (e) => { e.target.style.borderColor = C.line; e.target.style.boxShadow = "none"; };
+const Input = (p) => <input {...p} className={cx("pm-input", p.className)} style={{ ...inputBase, ...p.style }} onFocus={(e) => { focusOn(e); p.onFocus?.(e); }} onBlur={(e) => { focusOff(e); p.onBlur?.(e); }} />;
+const Textarea = (p) => <textarea {...p} className={cx("pm-input", p.className)} style={{ ...inputBase, resize: "vertical", lineHeight: 1.5, ...p.style }} onFocus={focusOn} onBlur={focusOff} />;
+const Select = (p) => <select {...p} className={cx("pm-input", p.className)} style={{ ...inputBase, appearance: "none", cursor: "pointer",
+  backgroundImage: "url(\"data:image/svg+xml,%3Csvg width='10' height='6' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236E6B85' fill='none' stroke-width='1.5'/%3E%3C/svg%3E\")",
+  backgroundRepeat: "no-repeat", backgroundPosition: "right 12px center", paddingRight: 32, ...p.style }} onFocus={focusOn} onBlur={focusOff}>{p.children}</select>;
 
-const Input = (p) => <input {...p} style={{ ...inputStyle, ...p.style }} onFocus={(e) => e.target.style.borderColor = T.spine} onBlur={(e) => e.target.style.borderColor = T.line} />;
-const Textarea = (p) => <textarea {...p} style={{ ...inputStyle, resize: "vertical", ...p.style }} onFocus={(e) => e.target.style.borderColor = T.spine} onBlur={(e) => e.target.style.borderColor = T.line} />;
-const Select = (p) => <select {...p} style={{ ...inputStyle, ...p.style, appearance: "none", backgroundImage: "url(\"data:image/svg+xml,%3Csvg width='10' height='6' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236B6880' fill='none' stroke-width='1.5'/%3E%3C/svg%3E\")", backgroundRepeat: "no-repeat", backgroundPosition: "right 12px center", paddingRight: 32 }}>{p.children}</select>;
+const SearchBox = ({ value, onChange, placeholder, className, autoFocus }) => (
+  <div className={cx("pm-search", className)} style={{ position: "relative" }}>
+    <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: C.faint, pointerEvents: "none" }}>⌕</span>
+    <Input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} autoFocus={autoFocus} style={{ paddingLeft: 32, padding: "8px 12px 8px 32px" }} />
+    {value && <button onClick={() => onChange("")} aria-label="Clear" style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: C.lineSoft, border: "none", borderRadius: 99, width: 20, height: 20, cursor: "pointer", color: C.sub, fontSize: 12, lineHeight: 1 }}>×</button>}
+  </div>
+);
 
-const Modal = ({ open, onClose, children, width = 560 }) => {
+// Modal with focus trap + Escape; bottom-sheet on phones (via CSS)
+const Modal = ({ open, onClose, children, width = 560, labelledBy }) => {
+  const ref = useRef(null);
+  useFocusTrap(ref, open, onClose);
+  useEffect(() => {
+    if (!open) return;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = ""; };
+  }, [open]);
   if (!open) return null;
   return (
-    <div className="pm-modal-backdrop" onClick={onClose} style={{
-      position: "fixed", inset: 0, background: "rgba(28,26,46,0.45)", zIndex: 100,
-      display: "flex", justifyContent: "center",
-      backdropFilter: "blur(2px)", overflowY: "auto",
-    }}>
-      <div className="pm-modal-card" onClick={(e) => e.stopPropagation()} style={{
-        background: T.panel, width: "100%", maxWidth: width,
-        boxShadow: "0 24px 70px rgba(28,26,46,0.28)", overflow: "hidden",
-      }}>{children}</div>
+    <div className="pm-modal-backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby={labelledBy}
+      style={{ position: "fixed", inset: 0, background: "rgba(25,23,40,0.5)", zIndex: 100, display: "flex", justifyContent: "center", backdropFilter: "blur(3px)", overflowY: "auto" }}>
+      <div ref={ref} className="pm-modal-card" onClick={(e) => e.stopPropagation()}
+        style={{ background: C.panel, width: "100%", maxWidth: width, boxShadow: SH.xl, overflow: "hidden" }}>{children}</div>
     </div>
   );
 };
 
+const ModalHead = ({ emoji, title, subtitle, id }) => (
+  <div style={{ padding: `${S.xl}px ${S.xl + 2}px`, borderBottom: "1px solid " + C.line, display: "flex", alignItems: "center", gap: S.md }}>
+    {emoji && <div style={{ fontSize: 28, lineHeight: 1 }}>{emoji}</div>}
+    <div style={{ minWidth: 0 }}>
+      <div id={id} style={{ fontSize: 18, fontWeight: 800, color: C.ink }}>{title}</div>
+      {subtitle && <div style={{ fontSize: 13, color: C.sub, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subtitle}</div>}
+    </div>
+  </div>
+);
+
+const ModalFoot = ({ children }) => (
+  <div style={{ padding: `${S.lg}px ${S.xl + 2}px`, borderTop: "1px solid " + C.line, display: "flex", justifyContent: "flex-end", gap: S.sm + 2, background: C.bg, flexWrap: "wrap" }}>{children}</div>
+);
+
+// Imperative confirm dialog (replaces native confirm())
+const ConfirmHost = () => {
+  const [state, setState] = useState(null);
+  useEffect(() => { confirmBus.register(setState); }, []);
+  if (!state) return null;
+  const { title, message, confirmLabel, danger, resolve } = state;
+  const done = (v) => { resolve(v); setState(null); };
+  return (
+    <Modal open onClose={() => done(false)} width={440} labelledBy="pm-confirm-title">
+      <div style={{ padding: `${S.xl + 2}px ${S.xl + 2}px ${S.lg}px` }}>
+        <div id="pm-confirm-title" style={{ fontSize: 18, fontWeight: 800, color: C.ink, marginBottom: 8 }}>{title}</div>
+        <div style={{ fontSize: 14, color: C.sub, lineHeight: 1.55 }}>{message}</div>
+      </div>
+      <ModalFoot>
+        <Btn variant="ghost" onClick={() => done(false)}>Cancel</Btn>
+        <Btn variant={danger ? "dangerFill" : "primary"} onClick={() => done(true)}>{confirmLabel || "Confirm"}</Btn>
+      </ModalFoot>
+    </Modal>
+  );
+};
+const confirmBus = (() => {
+  let setter = null;
+  return { register: (fn) => { setter = fn; }, ask: (opts) => new Promise((resolve) => setter && setter({ ...opts, resolve })) };
+})();
+const confirmDialog = (opts) => confirmBus.ask(opts);
+
+// Toast host
+const ToastHost = () => {
+  const [items, setItems] = useState([]);
+  useEffect(() => toastBus.sub((t) => {
+    setItems((cur) => [...cur, t]);
+    if (t.duration) setTimeout(() => setItems((cur) => cur.filter(x => x.id !== t.id)), t.duration);
+  }), []);
+  const dismiss = (id) => setItems((cur) => cur.filter(x => x.id !== id));
+  const tone = { success: { fg: "#7CE7D4", i: "✓" }, error: { fg: "#FF9AA0", i: "!" }, info: { fg: "#9DBEFF", i: "i" } };
+  return (
+    <div style={{ position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", zIndex: 300, display: "flex", flexDirection: "column", gap: 8, alignItems: "center", width: "calc(100% - 32px)", maxWidth: 440, pointerEvents: "none" }}>
+      {items.map((t) => (
+        <div key={t.id} style={{ pointerEvents: "auto", background: C.ink, color: "#fff", padding: "12px 16px", borderRadius: R.md, fontSize: 14, fontWeight: 600, boxShadow: SH.lg, display: "flex", alignItems: "center", gap: 10, width: "fit-content", maxWidth: "100%", animation: "pm-toast-in .2s ease-out" }}>
+          <span style={{ color: (tone[t.kind] || tone.success).fg, fontWeight: 800 }}>{(tone[t.kind] || tone.success).i}</span>
+          <span style={{ flex: 1 }}>{t.message}</span>
+          {t.action && <button onClick={() => { t.action.onClick(); dismiss(t.id); }} style={{ background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", fontWeight: 700, fontSize: 13, padding: "4px 10px", borderRadius: 7, cursor: "pointer", fontFamily: "inherit" }}>{t.action.label}</button>}
+        </div>
+      ))}
+    </div>
+  );
+};
+
+// Empty / error / loading states
+const EmptyState = ({ icon, title, body, action }) => (
+  <div style={{ background: C.panel, borderRadius: R.lg, padding: `${S.xxxl}px ${S.xl}px`, textAlign: "center", border: "1px dashed " + C.line }}>
+    <div style={{ fontSize: 34, marginBottom: 12 }}>{icon}</div>
+    <div style={{ fontSize: 16, fontWeight: 700, color: C.ink }}>{title}</div>
+    {body && <div style={{ fontSize: 13.5, color: C.sub, margin: "6px auto 0", maxWidth: 360, lineHeight: 1.5 }}>{body}</div>}
+    {action && <div style={{ marginTop: S.xl }}>{action}</div>}
+  </div>
+);
+
+const ErrorState = ({ error, onRetry }) => (
+  <div style={{ background: C.dangerSoft, border: "1px solid " + C.danger, borderRadius: R.lg, padding: S.xl, color: C.dangerInk }}>
+    <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 6 }}>Something went wrong</div>
+    <div style={{ fontSize: 13.5, lineHeight: 1.5 }}>{error}</div>
+    {onRetry && <div style={{ marginTop: S.md }}><Btn variant="ghost" size="sm" onClick={onRetry}>↻ Try again</Btn></div>}
+  </div>
+);
+
+const Spinner = ({ label = "Loading…" }) => (
+  <div style={{ padding: S.xxxl, textAlign: "center", color: C.faint }}>
+    <div style={{ width: 26, height: 26, margin: "0 auto 12px", border: "3px solid " + C.line, borderTopColor: C.brand, borderRadius: 99, animation: "pm-spin .7s linear infinite" }} />
+    <div style={{ fontSize: 13.5, fontWeight: 600 }}>{label}</div>
+  </div>
+);
+
+const Skeleton = ({ h = 16, w = "100%", r = 8, style }) => (
+  <div style={{ height: h, width: w, borderRadius: r, background: `linear-gradient(90deg, ${C.lineSoft} 25%, ${C.line} 50%, ${C.lineSoft} 75%)`, backgroundSize: "200% 100%", animation: "pm-shimmer 1.3s infinite", ...style }} />
+);
+
+// ===== editors.jsx =====
 // ============================================================
-// Pack editor modal
+// Editors
 // ============================================================
-const EMOJI_CHOICES = ["💪","😊","🧘","🎯","🎓","💡","🛡️","🤝","🫶","🌟","🗣️","👨‍👩‍👧","🌈","🕊️","❤️","🌱","✨","🧠","🔆","🦋"];
-const COLOR_CHOICES = ["#F39C12","#E84393","#00B894","#0984E3","#6C5CE7","#FDCB6E","#D63031","#00CEC9","#E17055","#FAB1A0","#74B9FF","#A29BFE","#55EFC4","#81ECEC"];
+const EMOJIS = ["💪","😊","🧘","🎯","🎓","💡","🛡️","🤝","🫶","🌟","🗣️","👨‍👩‍👧","🌈","🕊️","❤️","🌱","✨","🧠","🔆","🦋","🌞","🏆","🎨","🚀"];
+const COLORS = ["#F39C12","#E84393","#00B894","#0984E3","#6C4CE0","#FDCB6E","#D63031","#00CEC9","#E17055","#FAB1A0","#74B9FF","#A29BFE","#55EFC4","#81ECEC"];
 
 function PackEditor({ pack, onSave, onClose }) {
   const isNew = !pack?.id;
   const [f, setF] = useState({
     name: pack?.name || "", slug: pack?.slug || "", emoji: pack?.emoji || "💪",
-    description: pack?.description || "", color: pack?.color || "#6C5CE7",
-    difficulty: pack?.difficulty || "basic", status: pack?.status || "draft",
-    is_custom: pack?.is_custom || false,
+    description: pack?.description || "", color: pack?.color || C.brand,
+    difficulty: pack?.difficulty || "basic", status: pack?.status || "draft", is_custom: pack?.is_custom || false,
   });
-  const [slugEdited, setSlugEdited] = useState(!isNew);
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState("");
-
-  const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
-  const onName = (v) => { set("name", v); if (!slugEdited) set("slug", slugify(v)); };
+  const [slugTouched, setSlugTouched] = useState(!isNew);
+  const [busy, setBusy] = useState(false);
+  const [errs, setErrs] = useState({});
+  const set = (k, v) => setF(p => ({ ...p, [k]: v }));
 
   const submit = async () => {
-    if (!f.name.trim()) { setErr("Give the pack a name."); return; }
-    if (!f.slug.trim()) { setErr("Slug can't be empty."); return; }
-    setSaving(true); setErr("");
+    const e = {};
+    if (!f.name.trim()) e.name = "Give the pack a name.";
+    if (!f.slug.trim()) e.slug = "Slug can't be empty.";
+    setErrs(e); if (Object.keys(e).length) return;
+    setBusy(true);
     try { await onSave(f, pack?.id); onClose(); }
-    catch (e) { setErr(e.message.includes("duplicate") ? "That slug is already taken." : e.message); }
-    finally { setSaving(false); }
+    catch (err) { setErrs({ form: err.message }); setBusy(false); }
   };
+  useHotkey("mod+enter", submit, true);
 
   return (
     <>
-      <div style={{ padding: "22px 26px", borderBottom: "1px solid " + T.line, display: "flex", alignItems: "center", gap: 12 }}>
-        <div style={{ fontSize: 28 }}>{f.emoji}</div>
-        <div>
-          <div style={{ fontSize: 18, fontWeight: 700, color: T.ink }}>{isNew ? "New pack" : "Edit pack"}</div>
-          <div style={{ fontSize: 13, color: T.sub }}>{isNew ? "Add a themed category to the library" : f.name}</div>
-        </div>
-      </div>
-      <div style={{ padding: 26, display: "grid", gap: 18 }}>
-        <Field label="Pack name">
-          <Input value={f.name} onChange={(e) => onName(e.target.value)} placeholder="e.g. Confidence Pack" autoFocus />
+      <ModalHead emoji={f.emoji} title={isNew ? "New pack" : "Edit pack"} subtitle={isNew ? "Add a themed category to the library" : f.name} id="pm-pack-title" />
+      <div style={{ padding: S.xl + 2, display: "grid", gap: S.lg + 2, maxHeight: "62vh", overflowY: "auto" }}>
+        <Field label="Pack name" error={errs.name}>
+          <Input value={f.name} onChange={(e) => { set("name", e.target.value); if (!slugTouched) set("slug", slugify(e.target.value)); }} placeholder="e.g. Confidence Pack" autoFocus />
         </Field>
         <div className="pm-form-2">
-          <Field label="Slug" hint="URL-safe id used by the game">
-            <Input value={f.slug} onChange={(e) => { setSlugEdited(true); set("slug", slugify(e.target.value)); }} placeholder="confidence" />
+          <Field label="Slug" hint="URL-safe id used by the game" error={errs.slug}>
+            <Input value={f.slug} onChange={(e) => { setSlugTouched(true); set("slug", slugify(e.target.value)); }} placeholder="confidence" />
           </Field>
           <Field label="Difficulty">
             <Select value={f.difficulty} onChange={(e) => set("difficulty", e.target.value)}>
-              <option value="basic">Basic</option>
-              <option value="advanced">Advanced</option>
-              <option value="mixed">Mixed</option>
+              <option value="basic">Basic</option><option value="advanced">Advanced</option><option value="mixed">Mixed</option>
             </Select>
           </Field>
         </div>
@@ -296,23 +489,15 @@ function PackEditor({ pack, onSave, onClose }) {
         </Field>
         <Field label="Icon">
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {EMOJI_CHOICES.map((e) => (
-              <button key={e} onClick={() => set("emoji", e)} style={{
-                fontSize: 20, width: 40, height: 40, borderRadius: 10, cursor: "pointer",
-                border: "2px solid " + (f.emoji === e ? T.spine : T.line),
-                background: f.emoji === e ? T.spineSoft : "#fff",
-              }}>{e}</button>
+            {EMOJIS.map(e => (
+              <button key={e} onClick={() => set("emoji", e)} style={{ fontSize: 20, width: 40, height: 40, borderRadius: R.md, cursor: "pointer", border: "2px solid " + (f.emoji === e ? C.brand : C.line), background: f.emoji === e ? C.brandSoft : "#fff" }}>{e}</button>
             ))}
           </div>
         </Field>
         <Field label="Accent color">
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {COLOR_CHOICES.map((c) => (
-              <button key={c} onClick={() => set("color", c)} title={c} style={{
-                width: 30, height: 30, borderRadius: 9, cursor: "pointer", background: c,
-                border: "3px solid " + (f.color === c ? T.ink : "transparent"),
-                boxShadow: f.color === c ? "0 0 0 2px #fff inset" : "none",
-              }} />
+            {COLORS.map(c => (
+              <button key={c} onClick={() => set("color", c)} title={c} style={{ width: 30, height: 30, borderRadius: R.sm, cursor: "pointer", background: c, border: "3px solid " + (f.color === c ? C.ink : "transparent"), boxShadow: f.color === c ? "0 0 0 2px #fff inset" : "none" }} />
             ))}
           </div>
         </Field>
@@ -325,23 +510,20 @@ function PackEditor({ pack, onSave, onClose }) {
             </Select>
           </Field>
           <label style={{ display: "flex", alignItems: "center", gap: 9, padding: "10px 0", cursor: "pointer" }}>
-            <input type="checkbox" checked={f.is_custom} onChange={(e) => set("is_custom", e.target.checked)} style={{ width: 17, height: 17, accentColor: T.spine }} />
-            <span style={{ fontSize: 13.5, color: T.ink, fontWeight: 500 }}>Custom / AI-generated pack</span>
+            <input type="checkbox" checked={f.is_custom} onChange={(e) => set("is_custom", e.target.checked)} style={{ width: 17, height: 17, accentColor: C.brand }} />
+            <span style={{ fontSize: 13.5, color: C.ink, fontWeight: 600 }}>Custom / AI-generated</span>
           </label>
         </div>
-        {err && <div style={{ background: T.dangerSoft, color: T.danger, padding: "10px 14px", borderRadius: 9, fontSize: 13 }}>{err}</div>}
+        {errs.form && <ErrorState error={errs.form} />}
       </div>
-      <div style={{ padding: "16px 26px", borderTop: "1px solid " + T.line, display: "flex", justifyContent: "flex-end", gap: 10, background: T.bg }}>
+      <ModalFoot>
         <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
-        <Btn onClick={submit} disabled={saving}>{saving ? "Saving…" : isNew ? "Create pack" : "Save changes"}</Btn>
-      </div>
+        <Btn onClick={submit} disabled={busy}>{busy ? "Saving…" : isNew ? "Create pack" : "Save changes"}</Btn>
+      </ModalFoot>
     </>
   );
 }
 
-// ============================================================
-// Question editor modal
-// ============================================================
 function QuestionEditor({ question, packId, packDifficulty, onSave, onClose }) {
   const isNew = !question?.id;
   const [f, setF] = useState({
@@ -351,34 +533,33 @@ function QuestionEditor({ question, packId, packDifficulty, onSave, onClose }) {
     difficulty: question?.difficulty || (packDifficulty === "advanced" ? "advanced" : "basic"),
     status: question?.status || "active", notes: question?.notes || "",
   });
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState("");
-  const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
-
+  const [busy, setBusy] = useState(false);
+  const [errs, setErrs] = useState({});
+  const set = (k, v) => setF(p => ({ ...p, [k]: v }));
   const hasBlank = f.template.includes("{blank}");
-  const preview = renderPreview(f.template, f.answer, f.alt_answer, f.letters_hidden, f.difficulty);
+  const pv = previewQuestion(f.template, f.answer, f.alt_answer, f.letters_hidden, f.difficulty);
 
   const submit = async () => {
-    if (!hasBlank) { setErr("Template must contain a {blank} token."); return; }
-    if (!f.answer.trim()) { setErr("Enter the answer word."); return; }
-    setSaving(true); setErr("");
+    const e = {};
+    if (!hasBlank) e.template = "Template must contain a {blank} token.";
+    if (!f.answer.trim()) e.answer = "Enter the answer word.";
+    setErrs(e); if (Object.keys(e).length) return;
+    setBusy(true);
     try { await onSave({ ...f, pack_id: packId, answer: f.answer.toUpperCase().trim(), alt_answer: f.alt_answer.toUpperCase().trim() }, question?.id); onClose(); }
-    catch (e) { setErr(e.message); } finally { setSaving(false); }
+    catch (err) { setErrs({ form: err.message }); setBusy(false); }
   };
+  useHotkey("mod+enter", submit, true);
 
   return (
     <>
-      <div style={{ padding: "22px 26px", borderBottom: "1px solid " + T.line }}>
-        <div style={{ fontSize: 18, fontWeight: 700, color: T.ink }}>{isNew ? "New question" : "Edit question"}</div>
-        <div style={{ fontSize: 13, color: T.sub, marginTop: 2 }}>A fill-in-the-blank affirming sentence</div>
-      </div>
-      <div style={{ padding: 26, display: "grid", gap: 18 }}>
-        <Field label="Sentence template" hint="Use {blank} where the missing word goes">
+      <ModalHead title={isNew ? "New question" : "Edit question"} subtitle="A fill-in-the-blank affirming sentence" id="pm-q-title" />
+      <div style={{ padding: S.xl + 2, display: "grid", gap: S.lg + 2, maxHeight: "64vh", overflowY: "auto" }}>
+        <Field label="Sentence template" hint="Use {blank} where the missing word goes" error={errs.template}>
           <Textarea value={f.template} onChange={(e) => set("template", e.target.value)} rows={2} placeholder="I am {blank} when I try something new." autoFocus
-            style={{ borderColor: hasBlank ? T.line : T.danger }} />
+            style={{ borderColor: hasBlank ? C.line : C.danger }} />
         </Field>
         <div className="pm-form-2">
-          <Field label="Answer (primary)" hint="Auto-uppercased">
+          <Field label="Answer (primary)" hint="Auto-uppercased" error={errs.answer}>
             <Input value={f.answer} onChange={(e) => set("answer", e.target.value)} placeholder="BRAVE" />
           </Field>
           <Field label="Second option" hint="The alternative positive word">
@@ -396,654 +577,822 @@ function QuestionEditor({ question, packId, packDifficulty, onSave, onClose }) {
             <Input type="number" min={0} value={f.letters_hidden} disabled={f.difficulty === "advanced"} onChange={(e) => set("letters_hidden", parseInt(e.target.value) || 0)} />
           </Field>
         </div>
-
-        {/* live preview */}
-        <div style={{ background: T.spineSoft, borderRadius: 12, padding: "16px 18px" }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: T.spine, letterSpacing: 0.5, marginBottom: 8 }}>HOW THE CHILD SEES IT</div>
-          <div style={{ fontSize: 17, color: T.ink, fontWeight: 500, lineHeight: 1.4 }}>{preview.sentence}</div>
-          {preview.opts && <div style={{ fontSize: 14, color: T.spine, fontWeight: 700, marginTop: 8 }}>→ {preview.opts}</div>}
+        <div style={{ background: C.brandSoft, borderRadius: R.lg, padding: `${S.lg}px ${S.lg + 2}px` }}>
+          <div style={{ fontSize: 11, fontWeight: 800, color: C.brandInk, letterSpacing: 0.5, marginBottom: 8 }}>HOW THE CHILD SEES IT</div>
+          <div style={{ fontSize: 17, color: C.ink, fontWeight: 500, lineHeight: 1.4 }}>{pv.sentence}</div>
+          {pv.opts && <div style={{ fontSize: 14, color: C.brandInk, fontWeight: 800, marginTop: 8 }}>→ {pv.opts}</div>}
         </div>
-
-        <Field label="Internal notes" hint="Optional — editorial notes, not shown to players">
-          <Input value={f.notes} onChange={(e) => set("notes", e.target.value)} placeholder="" />
+        <Field label="Internal notes" hint="Optional — not shown to players">
+          <Input value={f.notes} onChange={(e) => set("notes", e.target.value)} />
         </Field>
         <label style={{ display: "flex", alignItems: "center", gap: 9, cursor: "pointer" }}>
-          <input type="checkbox" checked={f.status === "active"} onChange={(e) => set("status", e.target.checked ? "active" : "inactive")} style={{ width: 17, height: 17, accentColor: T.spine }} />
-          <span style={{ fontSize: 13.5, color: T.ink, fontWeight: 500 }}>Active (included in the game)</span>
+          <input type="checkbox" checked={f.status === "active"} onChange={(e) => set("status", e.target.checked ? "active" : "inactive")} style={{ width: 17, height: 17, accentColor: C.brand }} />
+          <span style={{ fontSize: 13.5, color: C.ink, fontWeight: 600 }}>Active (included in the game)</span>
         </label>
-        {err && <div style={{ background: T.dangerSoft, color: T.danger, padding: "10px 14px", borderRadius: 9, fontSize: 13 }}>{err}</div>}
+        {errs.form && <ErrorState error={errs.form} />}
       </div>
-      <div style={{ padding: "16px 26px", borderTop: "1px solid " + T.line, display: "flex", justifyContent: "flex-end", gap: 10, background: T.bg }}>
+      <ModalFoot>
         <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
-        <Btn onClick={submit} disabled={saving}>{saving ? "Saving…" : isNew ? "Add question" : "Save changes"}</Btn>
-      </div>
+        <Btn onClick={submit} disabled={busy}>{busy ? "Saving…" : isNew ? "Add question" : "Save changes"}</Btn>
+      </ModalFoot>
     </>
   );
 }
 
-// ============================================================
-// Bulk import modal
-// ============================================================
+// Bulk import — supports both the pipe format and pasted JSON
 function BulkImport({ packId, onDone, onClose }) {
   const [raw, setRaw] = useState("");
-  const [saving, setSaving] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
   const parsed = useMemo(() => {
-    return raw.split("\n").map((l) => l.trim()).filter(Boolean).map((line) => {
-      // format:  Sentence with {blank} | ANSWER | ALT
-      const parts = line.split("|").map((s) => s.trim());
-      const template = parts[0] || "";
-      const answer = (parts[1] || "").toUpperCase();
-      const alt = (parts[2] || "").toUpperCase();
-      const ok = template.includes("{blank}") && answer.length > 0;
-      return { template, answer, alt_answer: alt, ok };
+    const txt = raw.trim();
+    if (!txt) return [];
+    // Try JSON array first
+    if (txt.startsWith("[") || txt.startsWith("{")) {
+      try {
+        const j = JSON.parse(txt);
+        const arr = Array.isArray(j) ? j : (j.questions || []);
+        return arr.map(o => ({
+          template: o.template || "", answer: (o.answer || "").toUpperCase(),
+          alt_answer: (o.alt_answer || o.alt || "").toUpperCase(),
+          ok: (o.template || "").includes("{blank}") && !!o.answer,
+        }));
+      } catch { return [{ template: "Invalid JSON", answer: "", alt_answer: "", ok: false }]; }
+    }
+    // Pipe format
+    return txt.split("\n").map(l => l.trim()).filter(Boolean).map(line => {
+      const [t, a, alt] = line.split("|").map(s => (s || "").trim());
+      return { template: t || "", answer: (a || "").toUpperCase(), alt_answer: (alt || "").toUpperCase(), ok: (t || "").includes("{blank}") && !!a };
     });
   }, [raw]);
-  const valid = parsed.filter((p) => p.ok);
+  const valid = parsed.filter(p => p.ok);
 
   const submit = async () => {
     if (!valid.length) { setErr("Nothing valid to import yet."); return; }
-    setSaving(true); setErr("");
+    setBusy(true); setErr("");
     try {
-      await onDone(valid.map((v, i) => ({
-        pack_id: packId, template: v.template, answer: v.answer, alt_answer: v.alt_answer,
-        difficulty: "basic", letters_hidden: 2, status: "active", sort_order: 100 + i,
-      })));
+      await onDone(valid.map((v, i) => ({ pack_id: packId, template: v.template, answer: v.answer, alt_answer: v.alt_answer, difficulty: "basic", letters_hidden: 2, status: "active", sort_order: 100 + i })));
       onClose();
-    } catch (e) { setErr(e.message); } finally { setSaving(false); }
+    } catch (e) { setErr(e.message); setBusy(false); }
   };
 
   return (
     <>
-      <div style={{ padding: "22px 26px", borderBottom: "1px solid " + T.line }}>
-        <div style={{ fontSize: 18, fontWeight: 700, color: T.ink }}>Bulk import questions</div>
-        <div style={{ fontSize: 13, color: T.sub, marginTop: 2 }}>One per line: <code style={{ background: T.spineSoft, padding: "1px 6px", borderRadius: 5, color: T.spine }}>Sentence with {"{blank}"} | ANSWER | ALT</code></div>
-      </div>
-      <div style={{ padding: 26, display: "grid", gap: 16 }}>
-        <Textarea value={raw} onChange={(e) => setRaw(e.target.value)} rows={8} autoFocus
-          placeholder={"I am {blank} when I try something new. | BRAVE | BOLD\nBeing {blank} helps me make friends. | KIND | CARING"}
-          style={{ fontFamily: "ui-monospace, monospace", fontSize: 13 }} />
+      <ModalHead title="Bulk import questions" subtitle="Paste pipe-format lines or a JSON array" id="pm-imp-title" />
+      <div style={{ padding: S.xl + 2, display: "grid", gap: S.md + 2 }}>
+        <div style={{ fontSize: 12.5, color: C.sub, background: C.lineSoft, padding: "8px 12px", borderRadius: R.sm, lineHeight: 1.5 }}>
+          <b>Pipe:</b> <code>Sentence with {"{blank}"} | ANSWER | ALT</code><br />
+          <b>JSON:</b> <code>{'[{"template":"…{blank}…","answer":"BRAVE","alt_answer":"BOLD"}]'}</code>
+        </div>
+        <Textarea value={raw} onChange={(e) => setRaw(e.target.value)} rows={7} autoFocus placeholder={"I am {blank} when I try something new. | BRAVE | BOLD\nBeing {blank} helps me make friends. | KIND | CARING"} style={{ fontFamily: "ui-monospace, monospace", fontSize: 13 }} />
         {raw.trim() && (
-          <div style={{ background: T.bg, borderRadius: 10, padding: 14, maxHeight: 200, overflowY: "auto" }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: T.sub, marginBottom: 8 }}>
-              {valid.length} valid · {parsed.length - valid.length} skipped
-            </div>
+          <div style={{ background: C.bg, borderRadius: R.md, padding: S.md + 2, maxHeight: 200, overflowY: "auto" }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 8 }}>{valid.length} valid · {parsed.length - valid.length} skipped</div>
             {parsed.map((p, i) => (
-              <div key={i} style={{ fontSize: 13, padding: "5px 0", color: p.ok ? T.ink : T.faint, display: "flex", gap: 8, alignItems: "center", borderBottom: "1px solid " + T.line }}>
-                <span style={{ color: p.ok ? T.good : T.danger, fontWeight: 700 }}>{p.ok ? "✓" : "✕"}</span>
-                <span style={{ flex: 1 }}>{p.template.replace(/\{blank\}/g, "___") || <em>empty</em>}</span>
-                {p.ok && <span style={{ color: T.spine, fontWeight: 600, fontSize: 12 }}>{[p.answer, p.alt_answer].filter(Boolean).join(" / ")}</span>}
+              <div key={i} style={{ fontSize: 13, padding: "5px 0", color: p.ok ? C.ink : C.faint, display: "flex", gap: 8, alignItems: "center", borderBottom: "1px solid " + C.line }}>
+                <span style={{ color: p.ok ? C.good : C.danger, fontWeight: 800 }}>{p.ok ? "✓" : "✕"}</span>
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.template.replace(/\{blank\}/g, "___") || <em>empty</em>}</span>
+                {p.ok && <span style={{ color: C.brandInk, fontWeight: 700, fontSize: 12 }}>{[p.answer, p.alt_answer].filter(Boolean).join(" / ")}</span>}
               </div>
             ))}
           </div>
         )}
-        {err && <div style={{ background: T.dangerSoft, color: T.danger, padding: "10px 14px", borderRadius: 9, fontSize: 13 }}>{err}</div>}
+        {err && <ErrorState error={err} />}
       </div>
-      <div style={{ padding: "16px 26px", borderTop: "1px solid " + T.line, display: "flex", justifyContent: "flex-end", gap: 10, background: T.bg }}>
+      <ModalFoot>
         <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
-        <Btn onClick={submit} disabled={saving || !valid.length}>{saving ? "Importing…" : `Import ${valid.length} question${valid.length === 1 ? "" : "s"}`}</Btn>
-      </div>
+        <Btn onClick={submit} disabled={busy || !valid.length}>{busy ? "Importing…" : `Import ${valid.length} question${valid.length === 1 ? "" : "s"}`}</Btn>
+      </ModalFoot>
     </>
   );
 }
 
+// ===== views1.jsx =====
 // ============================================================
-// Pack detail view
+// Dashboard
 // ============================================================
-function PackDetail({ pack, onBack, refreshPacks }) {
-  const [questions, setQuestions] = useState(null);
-  const [qEdit, setQEdit] = useState(null); // {} for new, {..} for edit
-  const [bulk, setBulk] = useState(false);
-  const [qFilter, setQFilter] = useState("all");
-  const [search, setSearch] = useState("");
-
-  const load = useCallback(async () => {
-    const data = await api(`pm_questions?pack_id=eq.${pack.id}&order=sort_order.asc,created_at.asc&limit=10000`);
-    setQuestions(data || []);
-  }, [pack.id]);
-  useEffect(() => { load(); }, [load]);
-
-  const saveQ = async (payload, id) => {
-    if (id) await api(`pm_questions?id=eq.${id}`, { method: "PATCH", body: payload });
-    else await api("pm_questions", { method: "POST", body: payload });
-    await load(); refreshPacks();
-  };
-  const importQ = async (rows) => { await api("pm_questions", { method: "POST", body: rows }); await load(); refreshPacks(); };
-  const delQ = async (id) => {
-    if (!confirm("Delete this question? This can't be undone.")) return;
-    await api(`pm_questions?id=eq.${id}`, { method: "DELETE" }); await load(); refreshPacks();
-  };
-  const toggleQ = async (q) => {
-    await api(`pm_questions?id=eq.${q.id}`, { method: "PATCH", body: { status: q.status === "active" ? "inactive" : "active" } });
-    await load(); refreshPacks();
-  };
-
-  const shown = (questions || []).filter((q) => {
-    if (qFilter !== "all" && q.difficulty !== qFilter) return false;
-    if (search && !(`${q.template} ${q.answer} ${q.alt_answer}`.toLowerCase().includes(search.toLowerCase()))) return false;
-    return true;
-  });
-  const activeCount = (questions || []).filter((q) => q.status === "active").length;
-
+function Dashboard({ onGoLibrary, onGoQuestions, onNewPack }) {
+  const { loading, error, data, reload } = useAsync(() => db.dashboard(), []);
+  if (error) return <ErrorState error={error} onRetry={reload} />;
+  const d = data || {};
+  const stat = (n, label, color, sub) => (
+    <div style={{ background: C.panel, borderRadius: R.lg, padding: `${S.lg + 2}px ${S.xl}px`, border: "1px solid " + C.line }}>
+      <div style={{ fontSize: 30, fontWeight: 800, color, lineHeight: 1 }}>{loading ? <Skeleton h={30} w={44} /> : n}</div>
+      <div style={{ fontSize: 12.5, color: C.sub, marginTop: 7, fontWeight: 600 }}>{label}</div>
+      {sub && !loading && <div style={{ fontSize: 11.5, color: C.faint, marginTop: 3 }}>{sub}</div>}
+    </div>
+  );
   return (
     <div>
-      <button onClick={onBack} style={{ background: "none", border: "none", color: T.sub, cursor: "pointer", fontSize: 13.5, fontWeight: 600, padding: 0, marginBottom: 18, display: "flex", alignItems: "center", gap: 6, fontFamily: "inherit" }}>← All packs</button>
-
-      {/* pack header */}
-      <div style={{ background: T.panel, borderRadius: 16, padding: 24, marginBottom: 20, border: "1px solid " + T.line, display: "flex", alignItems: "flex-start", gap: 18, borderLeft: `5px solid ${pack.color}` }}>
-        <div style={{ fontSize: 42, lineHeight: 1 }}>{pack.emoji}</div>
-        <div style={{ flex: 1 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <h2 style={{ margin: 0, fontSize: 24, fontWeight: 800, color: T.ink }}>{pack.name}</h2>
-            <Badge kind={pack.status} />
-            <Pill>{pack.difficulty}</Pill>
-            {pack.is_custom && <Pill tone="muted">custom</Pill>}
-          </div>
-          {pack.description && <p style={{ margin: "8px 0 0", color: T.sub, fontSize: 14.5, lineHeight: 1.5 }}>{pack.description}</p>}
-          <div style={{ marginTop: 12, fontSize: 13, color: T.faint }}>
-            <b style={{ color: T.ink }}>{activeCount}</b> active · <b style={{ color: T.ink }}>{questions?.length ?? "…"}</b> total questions · slug <code style={{ background: T.bg, padding: "1px 6px", borderRadius: 5 }}>{pack.slug}</code>
+      <div style={{ marginBottom: S.xl }}>
+        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Overview</h1>
+        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>Your content library at a glance.</p>
+      </div>
+      <div className="pm-stats" style={{ marginBottom: S.lg }}>
+        {stat(d.total_packs ?? 0, "Total packs", C.brand, `${d.published_packs ?? 0} published · ${d.draft_packs ?? 0} draft`)}
+        {stat(d.total_questions ?? 0, "Questions", C.ink, `${d.active_questions ?? 0} active`)}
+        {stat(d.basic_questions ?? 0, "Basic level", C.good)}
+        {stat(d.advanced_questions ?? 0, "Advanced level", C.warn)}
+      </div>
+      <div className="pm-dash-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: S.lg }}>
+        <div style={{ background: C.panel, borderRadius: R.lg, padding: S.xl, border: "1px solid " + C.line }}>
+          <div style={{ fontSize: 14, fontWeight: 800, color: C.ink, marginBottom: S.md }}>Library health</div>
+          <Row label="Average questions per pack" value={loading ? "…" : d.avg_questions_per_pack} />
+          <Row label="Empty packs (need content)" value={loading ? "…" : d.empty_packs} warn={d.empty_packs > 0} />
+          <Row label="Draft packs (not live)" value={loading ? "…" : d.draft_packs} />
+          {d.empty_packs > 0 && <div style={{ marginTop: S.md, fontSize: 12.5, color: C.warnInk, background: C.warnSoft, padding: "8px 12px", borderRadius: R.sm }}>{d.empty_packs} pack{d.empty_packs === 1 ? "" : "s"} have no questions yet.</div>}
+        </div>
+        <div style={{ background: C.panel, borderRadius: R.lg, padding: S.xl, border: "1px solid " + C.line }}>
+          <div style={{ fontSize: 14, fontWeight: 800, color: C.ink, marginBottom: S.md }}>Quick actions</div>
+          <div style={{ display: "grid", gap: S.sm + 2 }}>
+            <Btn variant="soft" full onClick={onNewPack} icon="＋">Create a new pack</Btn>
+            <Btn variant="ghost" full onClick={onGoLibrary} icon="▦">Browse pack library</Btn>
+            <Btn variant="ghost" full onClick={onGoQuestions} icon="⌕">Search all questions</Btn>
           </div>
         </div>
       </div>
-
-      {/* question toolbar */}
-      <div className="pm-toolbar" style={{ marginBottom: 16 }}>
-        <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: T.ink }}>Question bank</h3>
-        <div className="pm-grow" />
-        <Input value={search} onChange={(e) => setSearch(e.target.value)} className="pm-search" placeholder="Search questions…" style={{ padding: "8px 12px" }} />
-        <Select value={qFilter} onChange={(e) => setQFilter(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
-          <option value="all">All levels</option>
-          <option value="basic">Basic</option>
-          <option value="advanced">Advanced</option>
-        </Select>
-        <Btn variant="soft" size="sm" onClick={() => setBulk(true)}>⬗ Bulk import</Btn>
-        <Btn size="sm" onClick={() => setQEdit({})}>+ Add question</Btn>
-      </div>
-
-      {/* question list */}
-      {questions === null ? (
-        <div style={{ padding: 40, textAlign: "center", color: T.faint }}>Loading…</div>
-      ) : shown.length === 0 ? (
-        <div style={{ background: T.panel, borderRadius: 14, padding: "48px 24px", textAlign: "center", border: "1px dashed " + T.line }}>
-          <div style={{ fontSize: 32, marginBottom: 10 }}>✍️</div>
-          <div style={{ fontSize: 15, fontWeight: 600, color: T.ink }}>{questions.length === 0 ? "No questions yet" : "Nothing matches"}</div>
-          <div style={{ fontSize: 13.5, color: T.sub, margin: "6px 0 18px" }}>{questions.length === 0 ? "Add your first affirming sentence to this pack." : "Try a different search or filter."}</div>
-          {questions.length === 0 && <Btn onClick={() => setQEdit({})}>+ Add first question</Btn>}
-        </div>
-      ) : (
-        <div style={{ display: "grid", gap: 10 }}>
-          {shown.map((q) => {
-            const pv = renderPreview(q.template, q.answer, q.alt_answer, q.letters_hidden, q.difficulty);
-            return (
-              <div key={q.id} className="pm-qrow" style={{ background: T.panel, borderRadius: 12, padding: "14px 18px", border: "1px solid " + T.line, opacity: q.status === "active" ? 1 : 0.55 }}>
-                <div className="pm-qrow-main" style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 15, color: T.ink, fontWeight: 500 }}>{pv.sentence}</div>
-                  <div style={{ fontSize: 13, color: T.spine, fontWeight: 700, marginTop: 3 }}>→ {pv.opts}</div>
-                </div>
-                <Pill tone="muted">{q.difficulty}</Pill>
-                <button onClick={() => toggleQ(q)} title="Toggle active" style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}><Badge kind={q.status} /></button>
-                <div className="pm-qrow-actions">
-                  <Btn variant="ghost" size="sm" onClick={() => setQEdit(q)}>Edit</Btn>
-                  <Btn variant="danger" size="sm" onClick={() => delQ(q.id)}>Delete</Btn>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      <Modal open={qEdit !== null} onClose={() => setQEdit(null)}>
-        {qEdit !== null && <QuestionEditor question={qEdit.id ? qEdit : null} packId={pack.id} packDifficulty={pack.difficulty} onSave={saveQ} onClose={() => setQEdit(null)} />}
-      </Modal>
-      <Modal open={bulk} onClose={() => setBulk(false)}>
-        {bulk && <BulkImport packId={pack.id} onDone={importQ} onClose={() => setBulk(false)} />}
-      </Modal>
     </div>
   );
 }
+const Row = ({ label, value, warn }) => (
+  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 0", borderBottom: "1px solid " + C.lineSoft }}>
+    <span style={{ fontSize: 13.5, color: C.sub }}>{label}</span>
+    <span style={{ fontSize: 15, fontWeight: 800, color: warn ? C.warnInk : C.ink }}>{value}</span>
+  </div>
+);
 
 // ============================================================
-// Library (dashboard) view
+// Library — cards with drag-reorder, clone, delete
 // ============================================================
-function Library({ packs, loading, onOpen, onNew, onEdit, onExport, onDelete }) {
+function Library({ packs, loading, error, onOpen, onNew, onEdit, onExport, onImportFile, onDelete, onClone, onReorder, reload }) {
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [diffFilter, setDiffFilter] = useState("all");
+  const [statusF, setStatusF] = useState("all");
+  const [diffF, setDiffF] = useState("all");
+  const [dragId, setDragId] = useState(null);
+  const [order, setOrder] = useState(packs || []);
+  useEffect(() => { setOrder(packs || []); }, [packs]);
 
-  const shown = (packs || []).filter((p) => {
-    if (statusFilter !== "all" && p.status !== statusFilter) return false;
-    if (diffFilter !== "all" && p.difficulty !== diffFilter) return false;
-    if (search && !(`${p.name} ${p.slug} ${p.description}`.toLowerCase().includes(search.toLowerCase()))) return false;
+  const shown = order.filter(p => {
+    if (statusF !== "all" && p.status !== statusF) return false;
+    if (diffF !== "all" && p.difficulty !== diffF) return false;
+    if (search && !`${p.name} ${p.slug} ${p.description}`.toLowerCase().includes(search.toLowerCase())) return false;
     return true;
   });
+  const canReorder = !search && statusF === "all" && diffF === "all";
 
-  const totals = useMemo(() => {
-    const p = packs || [];
-    return {
-      packs: p.length,
-      published: p.filter((x) => x.status === "published").length,
-      questions: p.reduce((s, x) => s + (x.total_questions || 0), 0),
-      active: p.reduce((s, x) => s + (x.active_questions || 0), 0),
-    };
-  }, [packs]);
+  const onDrop = (targetId) => {
+    if (!dragId || dragId === targetId) { setDragId(null); return; }
+    const cur = [...order];
+    const from = cur.findIndex(p => p.id === dragId);
+    const to = cur.findIndex(p => p.id === targetId);
+    const [moved] = cur.splice(from, 1);
+    cur.splice(to, 0, moved);
+    setOrder(cur);
+    setDragId(null);
+    onReorder(cur.map((p, i) => ({ id: p.id, sort_order: i + 1 })));
+  };
+
+  if (error) return <ErrorState error={error} onRetry={reload} />;
 
   return (
     <div>
-      {/* stat strip */}
-      <div className="pm-stats" style={{ marginBottom: 24 }}>
-        {[
-          { n: totals.packs, l: "Packs", c: T.spine },
-          { n: totals.published, l: "Published", c: T.good },
-          { n: totals.questions, l: "Questions", c: T.ink },
-          { n: totals.active, l: "Active questions", c: T.warn },
-        ].map((s, i) => (
-          <div key={i} style={{ background: T.panel, borderRadius: 14, padding: "18px 20px", border: "1px solid " + T.line }}>
-            <div style={{ fontSize: 30, fontWeight: 800, color: s.c, lineHeight: 1 }}>{loading ? "—" : s.n}</div>
-            <div style={{ fontSize: 12.5, color: T.sub, marginTop: 6, fontWeight: 500 }}>{s.l}</div>
-          </div>
-        ))}
+      <div style={{ marginBottom: S.lg }}>
+        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Pack library</h1>
+        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>{loading ? "Loading…" : `${order.length} pack${order.length === 1 ? "" : "s"}`}{canReorder && order.length > 1 ? " · drag cards to reorder" : ""}</p>
       </div>
 
-      {/* toolbar */}
-      <div className="pm-toolbar" style={{ marginBottom: 18 }}>
-        <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: T.ink }}>Pack library</h2>
+      <div className="pm-toolbar" style={{ marginBottom: S.lg + 2 }}>
+        <SearchBox value={search} onChange={setSearch} placeholder="Search packs…" />
+        <Select value={statusF} onChange={(e) => setStatusF(e.target.value)} style={{ minWidth: 140, padding: "8px 12px" }}>
+          <option value="all">All statuses</option><option value="published">Published</option><option value="draft">Draft</option><option value="archived">Archived</option>
+        </Select>
+        <Select value={diffF} onChange={(e) => setDiffF(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
+          <option value="all">All levels</option><option value="basic">Basic</option><option value="advanced">Advanced</option><option value="mixed">Mixed</option>
+        </Select>
         <div className="pm-grow" />
-        <Input value={search} onChange={(e) => setSearch(e.target.value)} className="pm-search" placeholder="Search packs…" style={{ padding: "8px 12px" }} />
-        <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ minWidth: 140, padding: "8px 12px" }}>
-          <option value="all">All statuses</option>
-          <option value="published">Published</option>
-          <option value="draft">Draft</option>
-          <option value="archived">Archived</option>
-        </Select>
-        <Select value={diffFilter} onChange={(e) => setDiffFilter(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
-          <option value="all">All levels</option>
-          <option value="basic">Basic</option>
-          <option value="advanced">Advanced</option>
-          <option value="mixed">Mixed</option>
-        </Select>
-        <Btn variant="soft" size="sm" onClick={onExport}>⬇ Export JSON</Btn>
-        <Btn size="sm" onClick={onNew}>+ New pack</Btn>
+        <Btn variant="ghost" size="sm" onClick={onImportFile} icon="⭳">Import</Btn>
+        <Btn variant="ghost" size="sm" onClick={onExport} icon="⭱">Export</Btn>
+        <Btn size="sm" onClick={onNew} icon="＋">New pack</Btn>
       </div>
 
-      {/* grid */}
       {loading ? (
-        <div style={{ padding: 60, textAlign: "center", color: T.faint }}>Loading library…</div>
+        <div className="pm-pack-grid">{[0,1,2,3,4,5].map(i => <div key={i} style={{ background: C.panel, borderRadius: R.xl, border: "1px solid " + C.line, padding: S.xl }}><Skeleton h={52} w={52} r={13} /><Skeleton h={18} w="70%" style={{ marginTop: 14 }} /><Skeleton h={13} w="90%" style={{ marginTop: 10 }} /></div>)}</div>
       ) : shown.length === 0 ? (
-        <div style={{ background: T.panel, borderRadius: 14, padding: "56px 24px", textAlign: "center", border: "1px dashed " + T.line }}>
-          <div style={{ fontSize: 34, marginBottom: 10 }}>📦</div>
-          <div style={{ fontSize: 15, fontWeight: 600, color: T.ink }}>No packs found</div>
-          <div style={{ fontSize: 13.5, color: T.sub, margin: "6px 0 18px" }}>{(packs || []).length === 0 ? "Create your first pack to get started." : "Try adjusting your filters."}</div>
-          {(packs || []).length === 0 && <Btn onClick={onNew}>+ Create first pack</Btn>}
-        </div>
+        <EmptyState icon="📦" title={order.length === 0 ? "No packs yet" : "Nothing matches"} body={order.length === 0 ? "Create your first pack to get started." : "Try adjusting your search or filters."} action={order.length === 0 ? <Btn onClick={onNew} icon="＋">Create first pack</Btn> : null} />
       ) : (
         <div className="pm-pack-grid">
-          {shown.map((p) => (
-            <div key={p.id} onClick={() => onOpen(p)} style={{
-              background: T.panel, borderRadius: 16, border: "1px solid " + T.line, cursor: "pointer",
-              overflow: "hidden", transition: "all .18s", position: "relative",
-            }}
-              onMouseEnter={(e) => { e.currentTarget.style.transform = "translateY(-3px)"; e.currentTarget.style.boxShadow = "0 12px 32px rgba(28,26,46,0.12)"; e.currentTarget.style.borderColor = p.color; }}
-              onMouseLeave={(e) => { e.currentTarget.style.transform = ""; e.currentTarget.style.boxShadow = "none"; e.currentTarget.style.borderColor = T.line; }}>
-              <div style={{ height: 6, background: p.color }} />
-              <div style={{ padding: 20 }}>
-                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 12 }}>
-                  <div style={{ width: 52, height: 52, borderRadius: 13, background: p.color + "22", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 27 }}>{p.emoji}</div>
-                  <Badge kind={p.status} />
-                </div>
-                <div style={{ fontSize: 17, fontWeight: 700, color: T.ink }}>{p.name}</div>
-                <div style={{ fontSize: 13, color: T.sub, marginTop: 5, lineHeight: 1.45, minHeight: 36, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{p.description || "No description"}</div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 14, paddingTop: 14, borderTop: "1px solid " + T.line }}>
-                  <Pill>{p.difficulty}</Pill>
-                  {p.is_custom && <Pill tone="muted">custom</Pill>}
-                  <div className="pm-grow" />
-                  <span style={{ fontSize: 13, color: T.ink, fontWeight: 700 }}>{p.active_questions || 0}</span>
-                  <span style={{ fontSize: 12, color: T.faint }}>/ {p.total_questions || 0} Qs</span>
-                </div>
-              </div>
-              <div style={{ display: "flex", borderTop: "1px solid " + T.line }} onClick={(e) => e.stopPropagation()}>
-                <button onClick={() => onOpen(p)} style={rowBtn(T.spine)}>Open</button>
-                <button onClick={() => onEdit(p)} style={{ ...rowBtn(T.sub), borderLeft: "1px solid " + T.line }}>Edit</button>
-                <button onClick={() => onDelete(p)} style={{ ...rowBtn(T.danger), borderLeft: "1px solid " + T.line }}>Delete</button>
-              </div>
-            </div>
+          {shown.map(p => (
+            <PackCard key={p.id} pack={p} draggable={canReorder} dragging={dragId === p.id}
+              onDragStart={() => setDragId(p.id)} onDragOver={(e) => e.preventDefault()} onDrop={() => onDrop(p.id)}
+              onOpen={() => onOpen(p)} onEdit={() => onEdit(p)} onDelete={() => onDelete(p)} onClone={() => onClone(p)} />
           ))}
         </div>
       )}
     </div>
   );
 }
-const rowBtn = (color) => ({ flex: 1, padding: "11px 0", background: "none", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600, color, fontFamily: "inherit" });
+
+function PackCard({ pack: p, draggable, dragging, onDragStart, onDragOver, onDrop, onOpen, onEdit, onDelete, onClone }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <div draggable={draggable} onDragStart={onDragStart} onDragOver={onDragOver} onDrop={onDrop}
+      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+      style={{ background: C.panel, borderRadius: R.xl, border: "1px solid " + (hover ? p.color : C.line), overflow: "hidden", transition: "border-color .15s, transform .15s, box-shadow .15s",
+        transform: dragging ? "scale(0.98)" : hover ? "translateY(-3px)" : "none", boxShadow: dragging ? SH.lg : hover ? SH.md : "none", opacity: dragging ? 0.6 : 1, cursor: draggable ? "grab" : "default" }}>
+      <div style={{ height: 6, background: p.color }} />
+      <div style={{ padding: S.xl, cursor: "pointer" }} onClick={onOpen}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: S.md }}>
+          <div style={{ width: 52, height: 52, borderRadius: 13, background: p.color + "22", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 27 }}>{p.emoji}</div>
+          <Badge kind={p.status} />
+        </div>
+        <div style={{ fontSize: 17, fontWeight: 800, color: C.ink }}>{p.name}</div>
+        <div style={{ fontSize: 13, color: C.sub, marginTop: 5, lineHeight: 1.45, minHeight: 36, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{p.description || "No description"}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: S.md + 2, paddingTop: S.md + 2, borderTop: "1px solid " + C.line }}>
+          <Pill>{p.difficulty}</Pill>{p.is_custom && <Pill tone="muted">custom</Pill>}
+          <div style={{ flex: 1 }} />
+          <span style={{ fontSize: 13, color: C.ink, fontWeight: 800 }}>{p.active_questions || 0}</span>
+          <span style={{ fontSize: 12, color: C.faint }}>/ {p.total_questions || 0} Qs</span>
+        </div>
+      </div>
+      <div style={{ display: "flex", borderTop: "1px solid " + C.line }} onClick={(e) => e.stopPropagation()}>
+        <CardBtn color={C.brandInk} onClick={onOpen}>Open</CardBtn>
+        <CardBtn color={C.sub} border onClick={onEdit}>Edit</CardBtn>
+        <CardBtn color={C.sub} border onClick={onClone}>Clone</CardBtn>
+        <CardBtn color={C.danger} border onClick={onDelete}>Delete</CardBtn>
+      </div>
+    </div>
+  );
+}
+const CardBtn = ({ color, border, onClick, children }) => (
+  <button onClick={onClick} style={{ flex: 1, padding: "11px 0", background: "none", border: "none", borderLeft: border ? "1px solid " + C.line : "none", cursor: "pointer", fontSize: 12.5, fontWeight: 700, color, fontFamily: "inherit" }}>{children}</button>
+);
+
+// ===== views2.jsx =====
+// ============================================================
+// Pack detail — paginated question bank with multi-select
+// ============================================================
+function PackDetail({ pack, onBack, refreshPacks }) {
+  const [page, setPage] = useState(0);
+  const [total, setTotal] = useState(0);
+  const [rows, setRows] = useState(null);
+  const [err, setErr] = useState("");
+  const [qEdit, setQEdit] = useState(null);
+  const [bulk, setBulk] = useState(false);
+  const [sel, setSel] = useState(new Set());
+  const [search, setSearch] = useState("");
+  const [diffF, setDiffF] = useState("all");
+
+  const load = useCallback(async () => {
+    setErr("");
+    try {
+      const { data, total } = await db.questions(pack.id, { page });
+      setRows(data || []); setTotal(total || 0);
+    } catch (e) { setErr(e.message); }
+  }, [pack.id, page]);
+  useEffect(() => { load(); }, [load]);
+
+  const afterChange = async () => { await load(); refreshPacks(); setSel(new Set()); };
+
+  const saveQ = async (payload, id) => { id ? await db.updateQuestion(id, payload) : await db.createQuestion(payload); await afterChange(); notify(id ? "Question updated" : "Question added"); };
+  const importQ = async (r) => { await db.createQuestions(r); await afterChange(); notify(`${r.length} questions imported`); };
+  const delQ = async (q) => {
+    const ok = await confirmDialog({ title: "Delete question?", message: "This can't be undone.", confirmLabel: "Delete", danger: true });
+    if (!ok) return;
+    await db.deleteQuestion(q.id); await afterChange(); notify("Question deleted");
+  };
+  const toggleQ = async (q) => { await db.updateQuestion(q.id, { status: q.status === "active" ? "inactive" : "active" }); await afterChange(); };
+
+  const bulkDelete = async () => {
+    const ids = [...sel];
+    const ok = await confirmDialog({ title: `Delete ${ids.length} questions?`, message: "This permanently removes the selected questions.", confirmLabel: `Delete ${ids.length}`, danger: true });
+    if (!ok) return;
+    await db.deleteQuestions(ids); await afterChange(); notify(`${ids.length} questions deleted`);
+  };
+  const bulkStatus = async (status) => { const ids = [...sel]; await db.setQuestionsStatus(ids, status); await afterChange(); notify(`${ids.length} set to ${status}`); };
+
+  const shown = (rows || []).filter(q => {
+    if (diffF !== "all" && q.difficulty !== diffF) return false;
+    if (search && !`${q.template} ${q.answer} ${q.alt_answer}`.toLowerCase().includes(search.toLowerCase())) return false;
+    return true;
+  });
+  const allSelected = shown.length > 0 && shown.every(q => sel.has(q.id));
+  const toggleSel = (id) => setSel(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const toggleAll = () => setSel(allSelected ? new Set() : new Set(shown.map(q => q.id)));
+
+  const pages = Math.ceil(total / CFG.pageSize);
+
+  return (
+    <div>
+      <button onClick={onBack} style={{ background: "none", border: "none", color: C.sub, cursor: "pointer", fontSize: 13.5, fontWeight: 700, padding: 0, marginBottom: S.lg, display: "flex", alignItems: "center", gap: 6, fontFamily: "inherit" }}>← All packs</button>
+
+      <div style={{ background: C.panel, borderRadius: R.lg, padding: S.xl, marginBottom: S.lg + 2, border: "1px solid " + C.line, borderLeft: `5px solid ${pack.color}`, display: "flex", alignItems: "flex-start", gap: S.lg }}>
+        <div style={{ fontSize: 42, lineHeight: 1 }}>{pack.emoji}</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <h2 style={{ margin: 0, fontSize: 23, fontWeight: 800, color: C.ink }}>{pack.name}</h2>
+            <Badge kind={pack.status} /><Pill>{pack.difficulty}</Pill>{pack.is_custom && <Pill tone="muted">custom</Pill>}
+          </div>
+          {pack.description && <p style={{ margin: "8px 0 0", color: C.sub, fontSize: 14.5, lineHeight: 1.5 }}>{pack.description}</p>}
+          <div style={{ marginTop: S.md, fontSize: 13, color: C.faint }}><b style={{ color: C.ink }}>{total}</b> question{total === 1 ? "" : "s"} · slug <code style={{ background: C.bg, padding: "1px 6px", borderRadius: 5 }}>{pack.slug}</code></div>
+        </div>
+      </div>
+
+      {sel.size > 0 ? (
+        <div style={{ display: "flex", alignItems: "center", gap: S.md, marginBottom: S.md + 2, background: C.brandSoft, borderRadius: R.md, padding: `${S.sm + 2}px ${S.md + 2}px`, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 13.5, fontWeight: 700, color: C.brandInk }}>{sel.size} selected</span>
+          <div className="pm-grow" />
+          <Btn variant="soft" size="sm" onClick={() => bulkStatus("active")}>Activate</Btn>
+          <Btn variant="soft" size="sm" onClick={() => bulkStatus("inactive")}>Deactivate</Btn>
+          <Btn variant="danger" size="sm" onClick={bulkDelete}>Delete</Btn>
+          <Btn variant="dim" size="sm" onClick={() => setSel(new Set())}>Clear</Btn>
+        </div>
+      ) : (
+        <div className="pm-toolbar" style={{ marginBottom: S.md + 2 }}>
+          <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: C.ink }}>Question bank</h3>
+          <div className="pm-grow" />
+          <SearchBox value={search} onChange={setSearch} placeholder="Search…" />
+          <Select value={diffF} onChange={(e) => setDiffF(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
+            <option value="all">All levels</option><option value="basic">Basic</option><option value="advanced">Advanced</option>
+          </Select>
+          <Btn variant="soft" size="sm" onClick={() => setBulk(true)} icon="⭳">Import</Btn>
+          <Btn size="sm" onClick={() => setQEdit({})} icon="＋">Add</Btn>
+        </div>
+      )}
+
+      {err ? <ErrorState error={err} onRetry={load} />
+        : rows === null ? <div style={{ display: "grid", gap: 10 }}>{[0,1,2,3].map(i => <Skeleton key={i} h={62} r={12} />)}</div>
+        : shown.length === 0 ? (
+          <EmptyState icon="✍️" title={total === 0 ? "No questions yet" : "Nothing matches"} body={total === 0 ? "Add your first affirming sentence to this pack." : "Try a different search or filter."} action={total === 0 ? <Btn onClick={() => setQEdit({})} icon="＋">Add first question</Btn> : null} />
+        ) : (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "0 4px 10px" }}>
+              <input type="checkbox" checked={allSelected} onChange={toggleAll} style={{ width: 16, height: 16, accentColor: C.brand }} />
+              <span style={{ fontSize: 12.5, color: C.faint, fontWeight: 600 }}>Select all on this page</span>
+            </div>
+            <div style={{ display: "grid", gap: 10 }}>
+              {shown.map(q => {
+                const pv = previewQuestion(q.template, q.answer, q.alt_answer, q.letters_hidden, q.difficulty);
+                const selected = sel.has(q.id);
+                return (
+                  <div key={q.id} className="pm-qrow" style={{ background: selected ? C.brandSoft : C.panel, borderRadius: R.md, padding: "12px 16px", border: "1px solid " + (selected ? C.brand : C.line), opacity: q.status === "active" ? 1 : 0.55 }}>
+                    <input type="checkbox" checked={selected} onChange={() => toggleSel(q.id)} style={{ width: 16, height: 16, accentColor: C.brand, flexShrink: 0 }} />
+                    <div className="pm-qrow-main" style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 15, color: C.ink, fontWeight: 500 }}>{pv.sentence}</div>
+                      <div style={{ fontSize: 13, color: C.brandInk, fontWeight: 800, marginTop: 3 }}>→ {pv.opts}</div>
+                    </div>
+                    <Pill tone="muted">{q.difficulty}</Pill>
+                    <button onClick={() => toggleQ(q)} title="Toggle active" style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}><Badge kind={q.status} /></button>
+                    <div className="pm-qrow-actions">
+                      <Btn variant="ghost" size="sm" onClick={() => setQEdit(q)}>Edit</Btn>
+                      <Btn variant="danger" size="sm" onClick={() => delQ(q)}>Delete</Btn>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {pages > 1 && <Pager page={page} pages={pages} onPage={(p) => { setPage(p); setSel(new Set()); }} />}
+          </>
+        )}
+
+      <Modal open={qEdit !== null} onClose={() => setQEdit(null)} labelledBy="pm-q-title">
+        {qEdit !== null && <QuestionEditor question={qEdit.id ? qEdit : null} packId={pack.id} packDifficulty={pack.difficulty} onSave={saveQ} onClose={() => setQEdit(null)} />}
+      </Modal>
+      <Modal open={bulk} onClose={() => setBulk(false)} labelledBy="pm-imp-title">
+        {bulk && <BulkImport packId={pack.id} onDone={importQ} onClose={() => setBulk(false)} />}
+      </Modal>
+    </div>
+  );
+}
+
+const Pager = ({ page, pages, onPage }) => (
+  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: S.sm, marginTop: S.xl }}>
+    <Btn variant="ghost" size="sm" disabled={page === 0} onClick={() => onPage(page - 1)}>← Prev</Btn>
+    <span style={{ fontSize: 13, color: C.sub, fontWeight: 600, padding: "0 8px" }}>Page {page + 1} of {pages}</span>
+    <Btn variant="ghost" size="sm" disabled={page >= pages - 1} onClick={() => onPage(page + 1)}>Next →</Btn>
+  </div>
+);
 
 // ============================================================
-// Login screen
+// All questions — global search across every pack (server-side)
+// ============================================================
+function AllQuestions({ onOpenPack }) {
+  const [q, setQ] = useState("");
+  const [diff, setDiff] = useState("all");
+  const [stat, setStat] = useState("all");
+  const [page, setPage] = useState(0);
+  const [rows, setRows] = useState(null);
+  const [total, setTotal] = useState(0);
+  const [err, setErr] = useState("");
+  const debounced = useDebounced(q, 250);
+
+  const load = useCallback(async () => {
+    setErr("");
+    try {
+      const r = await db.searchQuestions({ q: debounced, pack: null, diff: diff === "all" ? null : diff, stat: stat === "all" ? null : stat, lim: CFG.pageSize, off: page * CFG.pageSize });
+      setRows(r || []); setTotal(r?.[0]?.total_count ? Number(r[0].total_count) : 0);
+    } catch (e) { setErr(e.message); }
+  }, [debounced, diff, stat, page]);
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => { setPage(0); }, [debounced, diff, stat]);
+
+  const pages = Math.ceil(total / CFG.pageSize);
+
+  return (
+    <div>
+      <div style={{ marginBottom: S.lg }}>
+        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>All questions</h1>
+        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>Search across every pack{total ? ` · ${total} match${total === 1 ? "" : "es"}` : ""}</p>
+      </div>
+      <div className="pm-toolbar" style={{ marginBottom: S.lg }}>
+        <SearchBox value={q} onChange={setQ} placeholder="Search all questions…" autoFocus />
+        <Select value={diff} onChange={(e) => setDiff(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
+          <option value="all">All levels</option><option value="basic">Basic</option><option value="advanced">Advanced</option>
+        </Select>
+        <Select value={stat} onChange={(e) => setStat(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
+          <option value="all">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option>
+        </Select>
+      </div>
+      {err ? <ErrorState error={err} onRetry={load} />
+        : rows === null ? <div style={{ display: "grid", gap: 10 }}>{[0,1,2,3,4].map(i => <Skeleton key={i} h={58} r={12} />)}</div>
+        : rows.length === 0 ? <EmptyState icon="🔍" title="No matches" body={debounced ? `Nothing found for "${debounced}".` : "Start typing to search across all your questions."} />
+        : (
+          <>
+            <div style={{ display: "grid", gap: 10 }}>
+              {rows.map(r => {
+                const pv = previewQuestion(r.template, r.answer, r.alt_answer, r.letters_hidden, r.difficulty);
+                return (
+                  <div key={r.id} className="pm-qrow" style={{ background: C.panel, borderRadius: R.md, padding: "12px 16px", border: "1px solid " + C.line, opacity: r.status === "active" ? 1 : 0.6 }}>
+                    <button onClick={() => onOpenPack(r.pack_id)} title={`Open ${r.pack_name}`} style={{ display: "flex", alignItems: "center", gap: 7, background: r.pack_color + "18", border: "none", borderRadius: R.sm, padding: "5px 10px", cursor: "pointer", flexShrink: 0 }}>
+                      <span style={{ fontSize: 15 }}>{r.pack_emoji}</span>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: C.ink2, maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.pack_name}</span>
+                    </button>
+                    <div className="pm-qrow-main" style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 15, color: C.ink, fontWeight: 500 }}>{pv.sentence}</div>
+                      <div style={{ fontSize: 13, color: C.brandInk, fontWeight: 800, marginTop: 3 }}>→ {pv.opts}</div>
+                    </div>
+                    <Pill tone="muted">{r.difficulty}</Pill>
+                    <Badge kind={r.status} />
+                  </div>
+                );
+              })}
+            </div>
+            {pages > 1 && <Pager page={page} pages={pages} onPage={setPage} />}
+          </>
+        )}
+    </div>
+  );
+}
+
+const useDebounced = (value, ms) => {
+  const [v, setV] = useState(value);
+  useEffect(() => { const t = setTimeout(() => setV(value), ms); return () => clearTimeout(t); }, [value, ms]);
+  return v;
+};
+
+// ===== shell.jsx =====
+// ============================================================
+// Login
 // ============================================================
 function Login({ onSuccess }) {
   const [pw, setPw] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-
   const submit = async () => {
     if (!pw) return;
     setBusy(true); setErr("");
-    try { await auth.login(pw); onSuccess(); }
-    catch (e) { setErr(e.message.includes("Invalid login") ? "Incorrect password." : e.message); setBusy(false); }
+    try { await auth.login(pw); onSuccess(); } catch (e) { setErr(e.message); setBusy(false); }
   };
-
   return (
-    <div style={{ minHeight: "100vh", background: `linear-gradient(160deg, ${T.spineSoft}, ${T.bg})`, display: "flex", alignItems: "center", justifyContent: "center", padding: 20, fontFamily: "'Nunito', -apple-system, sans-serif" }}>
-      <div style={{ background: T.panel, borderRadius: 20, padding: "40px 36px", width: "100%", maxWidth: 400, boxShadow: "0 20px 60px rgba(28,26,46,0.15)", textAlign: "center" }}>
-        <div style={{ width: 60, height: 60, borderRadius: 16, background: `linear-gradient(135deg, ${T.spine}, #9B7BF0)`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 30, margin: "0 auto 18px", boxShadow: "0 8px 20px rgba(108,76,224,0.35)" }}>🧠</div>
-        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: T.ink }}>Positive Minds</h1>
-        <div style={{ fontSize: 13, color: T.faint, fontWeight: 600, letterSpacing: 0.3, marginTop: 3, marginBottom: 28 }}>PACK CONTENT MANAGER</div>
+    <div style={{ minHeight: "100vh", background: `linear-gradient(155deg, ${C.brandSoft}, ${C.bg} 60%)`, display: "flex", alignItems: "center", justifyContent: "center", padding: 20, fontFamily: FONT }}>
+      <div style={{ background: C.panel, borderRadius: R.xl + 2, padding: "42px 38px", width: "100%", maxWidth: 400, boxShadow: SH.xl, textAlign: "center" }}>
+        <div style={{ width: 62, height: 62, borderRadius: R.lg + 2, background: `linear-gradient(135deg, ${C.brand}, ${C.brand2})`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 30, margin: "0 auto 18px", boxShadow: SH.brand }}>🧠</div>
+        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: C.ink }}>Positive Minds</h1>
+        <div style={{ fontSize: 12.5, color: C.faint, fontWeight: 700, letterSpacing: 0.4, marginTop: 4, marginBottom: 28 }}>PACK CONTENT MANAGER</div>
         <div style={{ textAlign: "left" }}>
           <Field label="Admin password">
-            <Input type="password" value={pw} autoFocus
-              onChange={(e) => setPw(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && submit()}
-              placeholder="Enter password" />
+            <Input type="password" value={pw} autoFocus onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="Enter password" />
           </Field>
         </div>
-        {err && <div style={{ background: T.dangerSoft, color: T.danger, padding: "10px 14px", borderRadius: 9, fontSize: 13, marginTop: 14, textAlign: "left" }}>{err}</div>}
-        <div style={{ marginTop: 20 }}>
-          <Btn onClick={submit} disabled={busy || !pw} style={{ width: "100%", justifyContent: "center", padding: "12px 16px" }}>
-            {busy ? "Signing in…" : "Sign in"}
-          </Btn>
-        </div>
-        <div style={{ fontSize: 11.5, color: T.faint, marginTop: 18, lineHeight: 1.5 }}>
-          Admin access only. Content edits require this password.
-        </div>
+        {err && <div style={{ background: C.dangerSoft, color: C.dangerInk, padding: "10px 14px", borderRadius: R.md, fontSize: 13, marginTop: 14, textAlign: "left", fontWeight: 600 }}>{err}</div>}
+        <div style={{ marginTop: 20 }}><Btn onClick={submit} disabled={busy || !pw} full size="lg">{busy ? "Signing in…" : "Sign in"}</Btn></div>
+        <div style={{ fontSize: 11.5, color: C.faint, marginTop: 18, lineHeight: 1.5 }}>Admin access only. Content edits require this password.</div>
       </div>
     </div>
   );
 }
 
-// ============================================================
-// Change password modal
-// ============================================================
 function ChangePassword({ onClose, onDone }) {
-  const [pw, setPw] = useState("");
-  const [pw2, setPw2] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-
+  const [pw, setPw] = useState(""); const [pw2, setPw2] = useState("");
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState("");
   const submit = async () => {
     if (pw.length < 8) { setErr("Use at least 8 characters."); return; }
     if (pw !== pw2) { setErr("Passwords don't match."); return; }
     setBusy(true); setErr("");
-    try { await auth.changePassword(pw); onDone(); onClose(); }
-    catch (e) { setErr(e.message); setBusy(false); }
+    try { await auth.changePassword(pw); onDone(); onClose(); } catch (e) { setErr(e.message); setBusy(false); }
   };
-
   return (
     <>
-      <div style={{ padding: "22px 26px", borderBottom: "1px solid " + T.line }}>
-        <div style={{ fontSize: 18, fontWeight: 700, color: T.ink }}>Change admin password</div>
-        <div style={{ fontSize: 13, color: T.sub, marginTop: 2 }}>This is the shared password for editing content</div>
+      <ModalHead title="Change admin password" subtitle="The shared password for editing content" />
+      <div style={{ padding: S.xl + 2, display: "grid", gap: S.md + 2 }}>
+        <Field label="New password" hint="At least 8 characters"><Input type="password" value={pw} onChange={(e) => setPw(e.target.value)} autoFocus /></Field>
+        <Field label="Confirm new password"><Input type="password" value={pw2} onChange={(e) => setPw2(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} /></Field>
+        {err && <div style={{ background: C.dangerSoft, color: C.dangerInk, padding: "10px 14px", borderRadius: R.md, fontSize: 13, fontWeight: 600 }}>{err}</div>}
       </div>
-      <div style={{ padding: 26, display: "grid", gap: 16 }}>
-        <Field label="New password" hint="At least 8 characters">
-          <Input type="password" value={pw} onChange={(e) => setPw(e.target.value)} autoFocus placeholder="New password" />
-        </Field>
-        <Field label="Confirm new password">
-          <Input type="password" value={pw2} onChange={(e) => setPw2(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="Repeat new password" />
-        </Field>
-        {err && <div style={{ background: T.dangerSoft, color: T.danger, padding: "10px 14px", borderRadius: 9, fontSize: 13 }}>{err}</div>}
-      </div>
-      <div style={{ padding: "16px 26px", borderTop: "1px solid " + T.line, display: "flex", justifyContent: "flex-end", gap: 10, background: T.bg }}>
-        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
-        <Btn onClick={submit} disabled={busy}>{busy ? "Updating…" : "Update password"}</Btn>
-      </div>
+      <ModalFoot><Btn variant="ghost" onClick={onClose}>Cancel</Btn><Btn onClick={submit} disabled={busy}>{busy ? "Updating…" : "Update password"}</Btn></ModalFoot>
     </>
   );
 }
 
-const hdrBtn = { background: "none", border: "1px solid " + T.line, borderRadius: 9, padding: "8px 14px", fontSize: 13, fontWeight: 600, color: T.sub, cursor: "pointer", fontFamily: "inherit" };
-const menuItem = { display: "block", width: "100%", textAlign: "left", background: "none", border: "none", padding: "12px 16px", fontSize: 14, fontWeight: 600, color: T.ink, cursor: "pointer", fontFamily: "inherit" };
+// Clone dialog
+function CloneDialog({ pack, onClone, onClose }) {
+  const [name, setName] = useState(pack.name + " (copy)");
+  const [slug, setSlug] = useState(pack.slug + "-copy");
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState("");
+  const submit = async () => {
+    setBusy(true); setErr("");
+    try { await onClone(pack.id, slug, name); onClose(); } catch (e) { setErr(e.message); setBusy(false); }
+  };
+  return (
+    <>
+      <ModalHead emoji={pack.emoji} title="Duplicate pack" subtitle={`Copies all ${pack.total_questions || 0} questions into a new draft`} />
+      <div style={{ padding: S.xl + 2, display: "grid", gap: S.md + 2 }}>
+        <Field label="New pack name"><Input value={name} onChange={(e) => setName(e.target.value)} autoFocus /></Field>
+        <Field label="New slug"><Input value={slug} onChange={(e) => setSlug(slugify(e.target.value))} /></Field>
+        {err && <ErrorState error={err} />}
+      </div>
+      <ModalFoot><Btn variant="ghost" onClick={onClose}>Cancel</Btn><Btn onClick={submit} disabled={busy}>{busy ? "Duplicating…" : "Duplicate pack"}</Btn></ModalFoot>
+    </>
+  );
+}
+
+const NAV = [
+  { id: "dashboard", label: "Overview", icon: "◈" },
+  { id: "library", label: "Packs", icon: "▦" },
+  { id: "questions", label: "All questions", icon: "⌕" },
+];
 
 // ============================================================
-// Root app
+// Root App
 // ============================================================
-export default function App() {
+function App() {
   const bp = useBreakpoint();
   const [authed, setAuthed] = useState(() => !!session.load());
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [packs, setPacks] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [active, setActive] = useState(null);   // pack being viewed
-  const [editPack, setEditPack] = useState(null); // {} new, {..} edit
+  const [nav, setNav] = useState("dashboard");
+  const [active, setActive] = useState(null);     // open pack
+  const [editPack, setEditPack] = useState(null); // {} new | {...} edit
+  const [clonePack, setClonePack] = useState(null);
   const [changePw, setChangePw] = useState(false);
-  const [toast, setToast] = useState("");
-  const [connErr, setConnErr] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const fileRef = useRef(null);
 
-  const loadPacks = useCallback(async () => {
-    try {
-      const data = await api("pm_pack_overview?order=sort_order.asc&limit=10000");
-      setPacks(data || []); setConnErr("");
-    } catch (e) { setConnErr(e.message); }
-    finally { setLoading(false); }
-  }, []);
-  useEffect(() => { loadPacks(); }, [loadPacks]);
+  const packsState = useAsync(() => db.packsOverview(), [authed]);
+  const packs = packsState.data;
+  const reloadPacks = packsState.reload;
 
-  const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 2600); };
-
-  // --- Browser Back button support ---------------------------
-  // Opening a pack pushes a history entry; the browser Back button
-  // then returns to the library instead of leaving the site.
-  const openPack = useCallback((pack) => {
-    setActive(pack);
-    window.history.pushState({ view: "pack", id: pack.id }, "");
-  }, []);
-
+  // history-based back button
+  const goPack = useCallback((p) => { setActive(p); window.history.pushState({ v: "pack", id: p.id }, ""); }, []);
   const closePack = useCallback(() => {
-    // If we're on a pushed pack entry, go back through history so the
-    // URL/history stays in sync; otherwise just clear the view.
-    if (window.history.state && window.history.state.view === "pack") {
-      window.history.back();
-    } else {
-      setActive(null);
-    }
-    loadPacks();
-  }, [loadPacks]);
-
+    if (window.history.state?.v === "pack") window.history.back(); else setActive(null);
+    reloadPacks();
+  }, [reloadPacks]);
   useEffect(() => {
-    // Seed a base entry so there's always something to return to.
-    if (!window.history.state) window.history.replaceState({ view: "library" }, "");
-    const onPop = (e) => {
-      const view = e.state && e.state.view;
-      if (view === "pack") {
-        // shouldn't usually happen, but keep state consistent
-        return;
-      }
-      // Back to library
-      setActive(null);
-      loadPacks();
-    };
+    if (!window.history.state) window.history.replaceState({ v: "root" }, "");
+    const onPop = () => { setActive(null); reloadPacks(); };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, [loadPacks]);
+  }, [reloadPacks]);
 
+  // open a pack by id (from global search)
+  const openPackById = useCallback((id) => {
+    const p = (packs || []).find(x => x.id === id);
+    if (p) { setNav("library"); goPack(p); }
+  }, [packs, goPack]);
+
+  // pack CRUD
   const savePack = async (payload, id) => {
-    if (id) await api(`pm_packs?id=eq.${id}`, { method: "PATCH", body: payload });
-    else await api("pm_packs", { method: "POST", body: { ...payload, sort_order: (packs?.length || 0) + 1 } });
-    await loadPacks();
-    flash(id ? "Pack updated" : "Pack created");
-    if (active && id === active.id) setActive((a) => ({ ...a, ...payload }));
+    if (id) { await db.updatePack(id, payload); notify("Pack updated"); }
+    else { await db.createPack({ ...payload, sort_order: (packs?.length || 0) + 1 }); notify("Pack created"); }
+    await reloadPacks();
+    if (active && id === active.id) setActive(a => ({ ...a, ...payload }));
   };
-
+  const doClonePack = async (src, slug, name) => { await db.clonePack(src, slug, name); await reloadPacks(); notify("Pack duplicated"); };
   const deletePack = async (p) => {
-    if (!confirm(`Delete "${p.name}" and all ${p.total_questions || 0} of its questions? This can't be undone.`)) return;
-    await api(`pm_packs?id=eq.${p.id}`, { method: "DELETE" });
-    await loadPacks(); flash("Pack deleted");
+    const ok = await confirmDialog({ title: `Delete "${p.name}"?`, message: `This permanently removes the pack and all ${p.total_questions || 0} of its questions.`, confirmLabel: "Delete pack", danger: true });
+    if (!ok) return;
+    // optimistic remove + undo
+    const snapshot = packs;
+    packsState.setData(cur => (cur || []).filter(x => x.id !== p.id));
+    try {
+      await db.deletePack(p.id);
+      notify("Pack deleted", { action: { label: "Undo", onClick: async () => {
+        await db.createPack({ slug: p.slug, name: p.name, emoji: p.emoji, description: p.description, color: p.color, difficulty: p.difficulty, status: p.status, is_custom: p.is_custom, sort_order: p.sort_order });
+        await reloadPacks(); notify("Pack restored");
+      } } });
+    } catch (e) { packsState.setData(snapshot); notify("Couldn't delete: " + e.message, { kind: "error" }); }
   };
+  const reorderPacks = async (updates) => { try { await db.reorderPacks(updates); } catch (e) { notify("Reorder failed", { kind: "error" }); reloadPacks(); } };
 
+  // export / import
   const exportJSON = async () => {
-    const p = await api("pm_packs?status=eq.published&order=sort_order.asc&limit=10000");
-    const q = await api("pm_questions?status=eq.active&order=sort_order.asc&limit=10000");
+    const { packs: pk, questions } = await db.exportAll();
     const byPack = {};
-    (q || []).forEach((x) => { (byPack[x.pack_id] = byPack[x.pack_id] || []).push(x); });
-    const out = {
-      exported_at: new Date().toISOString(),
-      packs: (p || []).map((pk) => ({
-        slug: pk.slug, name: pk.name, emoji: pk.emoji, description: pk.description,
-        color: pk.color, difficulty: pk.difficulty,
-        questions: (byPack[pk.id] || []).map((x) => ({
-          template: x.template, answer: x.answer, alt_answer: x.alt_answer,
-          letters_hidden: x.letters_hidden, difficulty: x.difficulty,
-        })),
-      })),
-    };
+    questions.forEach(x => (byPack[x.pack_id] = byPack[x.pack_id] || []).push(x));
+    const out = { exported_at: new Date().toISOString(), version: 2, packs: pk.map(p => ({
+      slug: p.slug, name: p.name, emoji: p.emoji, description: p.description, color: p.color, difficulty: p.difficulty, status: p.status, is_custom: p.is_custom,
+      questions: (byPack[p.id] || []).map(x => ({ template: x.template, answer: x.answer, alt_answer: x.alt_answer, letters_hidden: x.letters_hidden, difficulty: x.difficulty, status: x.status })),
+    })) };
     const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = `positive-minds-packs-${Date.now()}.json`; a.click();
+    const a = document.createElement("a"); a.href = url; a.download = `positive-minds-export-${Date.now()}.json`; a.click();
     URL.revokeObjectURL(url);
-    flash(`Exported ${out.packs.length} published packs`);
+    notify(`Exported ${out.packs.length} packs`);
+  };
+  const onImportFile = () => fileRef.current?.click();
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0]; e.target.value = "";
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      const arr = data.packs || (Array.isArray(data) ? data : []);
+      if (!arr.length) { notify("No packs found in file", { kind: "error" }); return; }
+      const ok = await confirmDialog({ title: `Import ${arr.length} packs?`, message: "Packs are added as drafts. Existing packs with the same slug are skipped.", confirmLabel: `Import ${arr.length}` });
+      if (!ok) return;
+      const existing = new Set((packs || []).map(p => p.slug));
+      let created = 0, skipped = 0;
+      for (const p of arr) {
+        if (existing.has(p.slug)) { skipped++; continue; }
+        const newPack = await db.createPack({ slug: p.slug, name: p.name, emoji: p.emoji || "💡", description: p.description || "", color: p.color || C.brand, difficulty: p.difficulty || "basic", status: "draft", is_custom: !!p.is_custom, sort_order: (packs?.length || 0) + created + 1 });
+        if (newPack && p.questions?.length) {
+          await db.createQuestions(p.questions.map((q, i) => ({ pack_id: newPack.id, template: q.template, answer: (q.answer || "").toUpperCase(), alt_answer: (q.alt_answer || "").toUpperCase(), letters_hidden: q.letters_hidden ?? 2, difficulty: q.difficulty || "basic", status: q.status || "active", sort_order: i })));
+        }
+        created++;
+      }
+      await reloadPacks();
+      notify(`Imported ${created} pack${created === 1 ? "" : "s"}${skipped ? `, skipped ${skipped}` : ""}`);
+    } catch (err) { notify("Import failed: " + err.message, { kind: "error" }); }
   };
 
-  // Gate everything behind admin login
-  if (!authed) {
-    return (
-      <>
-        <style>{`@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800;900&display=swap');*{box-sizing:border-box}`}</style>
-        <Login onSuccess={() => { setAuthed(true); loadPacks(); }} />
-      </>
-    );
-  }
+  // hotkeys
+  useHotkey("mod+k", (e) => { e.preventDefault(); setNav("questions"); setActive(null); }, authed);
+
+  if (!authed) return (<><GlobalStyle /><ConfirmHost /><ToastHost /><Login onSuccess={() => { setAuthed(true); reloadPacks(); }} /></>);
+
+  const goNav = (id) => { setActive(null); setNav(id); setMenuOpen(false); };
 
   return (
-    <div style={{ minHeight: "100vh", background: T.bg, fontFamily: "'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", color: T.ink }}>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800;900&display=swap');
-        *{box-sizing:border-box}
-        html{ -webkit-text-size-adjust:100%; }
-        button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid ${T.spine};outline-offset:1px}
+    <div style={{ minHeight: "100vh", background: C.bg, fontFamily: FONT, color: C.ink, display: "flex" }}>
+      <GlobalStyle />
+      <ConfirmHost />
+      <ToastHost />
+      <input ref={fileRef} type="file" accept="application/json,.json" onChange={handleFile} style={{ display: "none" }} />
 
-        /* ---- Responsive containers ---- */
-        .pm-shell{ max-width:1120px; margin:0 auto; padding:14px 24px; }
-        .pm-main{ max-width:1120px; margin:0 auto; padding:28px 24px 96px; }
-
-        /* ---- Modal: centered dialog default, bottom-sheet on phones ---- */
-        .pm-modal-backdrop{ align-items:flex-start; padding:6vh 20px 20px; }
-        .pm-modal-card{ border-radius:18px; }
-
-        /* ---- Grids that reflow ---- */
-        .pm-stats{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
-        .pm-pack-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:16px; }
-        .pm-form-2{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }
-
-        /* ---- Toolbars ---- */
-        .pm-toolbar{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
-        .pm-grow{ flex:1; }
-        .pm-search{ width:200px; }
-        .pm-qrow{ display:flex; align-items:center; gap:16px; }
-        .pm-qrow-actions{ display:flex; gap:6px; }
-
-        /* ================= TABLET ( < 1024px ) ================= */
-        @media (max-width:1023px){
-          .pm-shell{ padding:12px 18px; }
-          .pm-main{ padding:22px 18px 96px; }
-          .pm-pack-grid{ grid-template-columns:repeat(2,1fr); }
-        }
-
-        /* ================= PHONE ( < 640px ) ================= */
-        @media (max-width:639px){
-          .pm-shell{ padding:12px 14px; }
-          .pm-main{ padding:16px 14px 96px; }
-
-          .pm-stats{ grid-template-columns:repeat(2,1fr); gap:10px; }
-          .pm-pack-grid{ grid-template-columns:1fr; gap:12px; }
-          .pm-form-2{ grid-template-columns:1fr; gap:14px; }
-
-          /* toolbars stack, search + controls go full width */
-          .pm-toolbar{ gap:10px; }
-          .pm-toolbar > *{ flex:1 1 auto; }
-          .pm-search{ width:100%; order:-1; }
-          .pm-grow{ flex-basis:100%; height:0; }
-
-          /* question rows stack vertically */
-          .pm-qrow{ flex-wrap:wrap; gap:10px; }
-          .pm-qrow-main{ flex-basis:100%; }
-          .pm-qrow-actions{ margin-left:auto; }
-
-          /* Modal becomes a bottom sheet */
-          .pm-modal-backdrop{ align-items:flex-end; padding:0; }
-          .pm-modal-card{
-            max-width:100% !important; border-radius:20px 20px 0 0;
-            max-height:94vh; overflow-y:auto;
-            animation:pm-sheet .22s ease-out;
-          }
-          @keyframes pm-sheet{ from{ transform:translateY(100%);} to{ transform:translateY(0);} }
-
-          /* larger touch targets */
-          input,select,textarea{ font-size:16px !important; } /* prevents iOS zoom-on-focus */
-        }
-
-        @media (prefers-reduced-motion:reduce){
-          .pm-modal-card{ animation:none !important; }
-          *{ scroll-behavior:auto !important; }
-        }
-      `}</style>
-
-      {/* top bar */}
-      <header style={{ background: T.panel, borderBottom: "1px solid " + T.line, position: "sticky", top: 0, zIndex: 50 }}>
-        <div className="pm-shell" style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ width: 38, height: 38, borderRadius: 11, background: `linear-gradient(135deg, ${T.spine}, #9B7BF0)`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, boxShadow: "0 4px 12px rgba(108,76,224,0.35)", flexShrink: 0 }}>🧠</div>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 16.5, fontWeight: 800, letterSpacing: -0.2, whiteSpace: "nowrap" }}>Positive Minds</div>
-            <div style={{ fontSize: 11.5, color: T.faint, fontWeight: 600, letterSpacing: 0.3, marginTop: -1, whiteSpace: "nowrap" }}>{bp.isPhone ? "PACK MANAGER" : "PACK CONTENT MANAGER"}</div>
+      {/* Sidebar (desktop) */}
+      {!bp.isPhone && (
+        <aside style={{ width: bp.isTablet ? 76 : 232, flexShrink: 0, background: C.panel, borderRight: "1px solid " + C.line, position: "sticky", top: 0, height: "100vh", display: "flex", flexDirection: "column", padding: bp.isTablet ? "18px 12px" : "20px 16px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 11, padding: bp.isTablet ? "0 0 20px" : "0 8px 22px" }}>
+            <div style={{ width: 38, height: 38, borderRadius: 11, background: `linear-gradient(135deg, ${C.brand}, ${C.brand2})`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, boxShadow: SH.brand, flexShrink: 0 }}>🧠</div>
+            {!bp.isTablet && <div style={{ minWidth: 0 }}><div style={{ fontSize: 15.5, fontWeight: 800, whiteSpace: "nowrap" }}>Positive Minds</div><div style={{ fontSize: 10.5, color: C.faint, fontWeight: 700, letterSpacing: 0.3 }}>PACK MANAGER</div></div>}
           </div>
-          <div className="pm-grow" />
-          {bp.isPhone ? (
-            <div style={{ position: "relative" }}>
-              <button onClick={() => setMenuOpen((o) => !o)} aria-label="Menu" style={{ ...hdrBtn, padding: "8px 12px", fontSize: 18, lineHeight: 1 }}>⋯</button>
-              {menuOpen && (
-                <>
+          <nav style={{ display: "grid", gap: 4 }}>
+            {NAV.map(n => (
+              <button key={n.id} onClick={() => goNav(n.id)} title={n.label}
+                style={{ display: "flex", alignItems: "center", gap: 12, padding: bp.isTablet ? "12px 0" : "11px 14px", justifyContent: bp.isTablet ? "center" : "flex-start",
+                  borderRadius: R.md, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 14, fontWeight: 700,
+                  background: nav === n.id && !active ? C.brandSoft : "transparent", color: nav === n.id && !active ? C.brandInk : C.sub, transition: "all .15s" }}>
+                <span style={{ fontSize: 17 }}>{n.icon}</span>{!bp.isTablet && n.label}
+              </button>
+            ))}
+          </nav>
+          <div style={{ flex: 1 }} />
+          <div style={{ display: "grid", gap: 4 }}>
+            <button onClick={() => setChangePw(true)} title="Change password" style={sideBtn(bp.isTablet)}><span style={{ fontSize: 16 }}>⚙</span>{!bp.isTablet && "Password"}</button>
+            <button onClick={() => { auth.logout(); setAuthed(false); setActive(null); }} title="Sign out" style={{ ...sideBtn(bp.isTablet), color: C.danger }}><span style={{ fontSize: 16 }}>⏻</span>{!bp.isTablet && "Sign out"}</button>
+          </div>
+        </aside>
+      )}
+
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+        {/* Mobile top bar */}
+        {bp.isPhone && (
+          <header style={{ background: C.panel, borderBottom: "1px solid " + C.line, position: "sticky", top: 0, zIndex: 50 }}>
+            <div style={{ padding: "12px 16px", display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ width: 34, height: 34, borderRadius: 10, background: `linear-gradient(135deg, ${C.brand}, ${C.brand2})`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flexShrink: 0 }}>🧠</div>
+              <div style={{ fontSize: 15.5, fontWeight: 800 }}>Positive Minds</div>
+              <div style={{ flex: 1 }} />
+              <div style={{ position: "relative" }}>
+                <button onClick={() => setMenuOpen(o => !o)} aria-label="Menu" style={{ background: "none", border: "1px solid " + C.line, borderRadius: R.md, padding: "8px 12px", fontSize: 18, lineHeight: 1, cursor: "pointer", color: C.ink2 }}>⋯</button>
+                {menuOpen && (<>
                   <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 60 }} />
-                  <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", background: T.panel, borderRadius: 12, border: "1px solid " + T.line, boxShadow: "0 12px 32px rgba(28,26,46,0.18)", zIndex: 61, minWidth: 170, overflow: "hidden" }}>
-                    <button onClick={() => { setMenuOpen(false); if (active) closePack(); else loadPacks(); }} style={menuItem}>↻ Refresh</button>
-                    <button onClick={() => { setMenuOpen(false); setChangePw(true); }} style={{ ...menuItem, borderTop: "1px solid " + T.line }}>Change password</button>
-                    <button onClick={() => { setMenuOpen(false); auth.logout(); setAuthed(false); setActive(null); }} style={{ ...menuItem, borderTop: "1px solid " + T.line, color: T.danger }}>Sign out</button>
+                  <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", background: C.panel, borderRadius: R.md, border: "1px solid " + C.line, boxShadow: SH.lg, zIndex: 61, minWidth: 180, overflow: "hidden" }}>
+                    <button onClick={() => { setMenuOpen(false); setChangePw(true); }} style={menuItem}>Change password</button>
+                    <button onClick={() => { setMenuOpen(false); auth.logout(); setAuthed(false); setActive(null); }} style={{ ...menuItem, borderTop: "1px solid " + C.line, color: C.danger }}>Sign out</button>
                   </div>
-                </>
-              )}
+                </>)}
+              </div>
             </div>
-          ) : (
-            <>
-              <button onClick={() => { if (active) closePack(); else loadPacks(); }} style={hdrBtn}>↻ Refresh</button>
-              <button onClick={() => setChangePw(true)} style={hdrBtn}>Password</button>
-              <button onClick={() => { auth.logout(); setAuthed(false); setActive(null); }} style={{ ...hdrBtn, color: T.danger, borderColor: T.dangerSoft }}>Sign out</button>
-            </>
-          )}
-        </div>
-      </header>
-
-      <main className="pm-main">
-        {connErr ? (
-          <div style={{ background: T.dangerSoft, border: "1px solid " + T.danger, borderRadius: 14, padding: 24, color: T.danger }}>
-            <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>Couldn't reach the database</div>
-            <div style={{ fontSize: 13.5, fontFamily: "monospace", color: "#8B2C2F" }}>{connErr}</div>
-          </div>
-        ) : active ? (
-          <PackDetail pack={active} onBack={closePack} refreshPacks={loadPacks} />
-        ) : (
-          <Library packs={packs} loading={loading} onOpen={openPack} onNew={() => setEditPack({})} onEdit={setEditPack} onDelete={deletePack} onExport={exportJSON} />
+          </header>
         )}
-      </main>
 
-      <Modal open={editPack !== null} onClose={() => setEditPack(null)}>
+        <main className="pm-main" style={{ flex: 1, paddingBottom: bp.isPhone ? 90 : 60 }}>
+          {active ? (
+            <PackDetail pack={active} onBack={closePack} refreshPacks={reloadPacks} />
+          ) : nav === "dashboard" ? (
+            <Dashboard onGoLibrary={() => goNav("library")} onGoQuestions={() => goNav("questions")} onNewPack={() => setEditPack({})} />
+          ) : nav === "library" ? (
+            <Library packs={packs} loading={packsState.loading} error={packsState.error} reload={reloadPacks}
+              onOpen={goPack} onNew={() => setEditPack({})} onEdit={setEditPack} onExport={exportJSON} onImportFile={onImportFile}
+              onDelete={deletePack} onClone={setClonePack} onReorder={reorderPacks} />
+          ) : (
+            <AllQuestions onOpenPack={openPackById} />
+          )}
+        </main>
+
+        {/* Mobile bottom nav */}
+        {bp.isPhone && !active && (
+          <nav style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: C.panel, borderTop: "1px solid " + C.line, display: "flex", zIndex: 50, paddingBottom: "env(safe-area-inset-bottom)" }}>
+            {NAV.map(n => (
+              <button key={n.id} onClick={() => goNav(n.id)} style={{ flex: 1, padding: "10px 0 12px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, color: nav === n.id ? C.brand : C.faint }}>
+                <span style={{ fontSize: 20 }}>{n.icon}</span>
+                <span style={{ fontSize: 10.5, fontWeight: 700 }}>{n.label}</span>
+              </button>
+            ))}
+          </nav>
+        )}
+      </div>
+
+      <Modal open={editPack !== null} onClose={() => setEditPack(null)} labelledBy="pm-pack-title">
         {editPack !== null && <PackEditor pack={editPack.id ? editPack : null} onSave={savePack} onClose={() => setEditPack(null)} />}
       </Modal>
-
-      <Modal open={changePw} onClose={() => setChangePw(false)} width={460}>
-        {changePw && <ChangePassword onClose={() => setChangePw(false)} onDone={() => flash("Password updated")} />}
+      <Modal open={clonePack !== null} onClose={() => setClonePack(null)}>
+        {clonePack !== null && <CloneDialog pack={clonePack} onClone={doClonePack} onClose={() => setClonePack(null)} />}
       </Modal>
-
-      {toast && (
-        <div style={{ position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", background: T.ink, color: "#fff", padding: "12px 22px", borderRadius: 11, fontSize: 14, fontWeight: 600, boxShadow: "0 12px 32px rgba(0,0,0,0.3)", zIndex: 200, display: "flex", alignItems: "center", gap: 9 }}>
-          <span style={{ color: "#7CE7D4" }}>✓</span> {toast}
-        </div>
-      )}
+      <Modal open={changePw} onClose={() => setChangePw(false)} width={460}>
+        {changePw && <ChangePassword onClose={() => setChangePw(false)} onDone={() => notify("Password updated")} />}
+      </Modal>
     </div>
   );
 }
+
+const sideBtn = (mini) => ({ display: "flex", alignItems: "center", gap: 12, padding: mini ? "11px 0" : "10px 14px", justifyContent: mini ? "center" : "flex-start", borderRadius: R.md, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 13.5, fontWeight: 700, background: "transparent", color: C.sub });
+const menuItem = { display: "block", width: "100%", textAlign: "left", background: "none", border: "none", padding: "12px 16px", fontSize: 14, fontWeight: 600, color: C.ink, cursor: "pointer", fontFamily: "inherit" };
+
+// ============================================================
+// Global styles (responsive)
+// ============================================================
+function GlobalStyle() {
+  return <style>{`
+    @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800;900&display=swap');
+    *{box-sizing:border-box}
+    html,body{margin:0;padding:0}
+    html{ -webkit-text-size-adjust:100%; }
+    body{ background:${C.bg}; }
+    button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,[tabindex]:focus-visible{ outline:2px solid ${C.brand}; outline-offset:2px; }
+
+    @keyframes pm-spin{ to{ transform:rotate(360deg);} }
+    @keyframes pm-shimmer{ 0%{ background-position:200% 0;} 100%{ background-position:-200% 0;} }
+    @keyframes pm-toast-in{ from{ transform:translateY(10px); opacity:0;} to{ transform:translateY(0); opacity:1;} }
+
+    .pm-main{ max-width:1080px; margin:0 auto; width:100%; padding:32px 28px; }
+    .pm-modal-backdrop{ align-items:flex-start; padding:6vh 20px 20px; }
+    .pm-modal-card{ border-radius:${R.xl}px; }
+
+    .pm-stats{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
+    .pm-pack-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(290px,1fr)); gap:16px; }
+    .pm-form-2{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+
+    .pm-toolbar{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+    .pm-grow{ flex:1; }
+    .pm-search{ width:230px; }
+    .pm-qrow{ display:flex; align-items:center; gap:14px; }
+    .pm-qrow-actions{ display:flex; gap:6px; }
+
+    @media (max-width:1023px){
+      .pm-main{ padding:24px 20px; }
+      .pm-pack-grid{ grid-template-columns:repeat(2,1fr); }
+      .pm-dash-2{ grid-template-columns:1fr !important; }
+    }
+    @media (max-width:639px){
+      .pm-main{ padding:16px 14px; }
+      .pm-stats{ grid-template-columns:repeat(2,1fr); gap:10px; }
+      .pm-pack-grid{ grid-template-columns:1fr; gap:12px; }
+      .pm-form-2{ grid-template-columns:1fr; gap:14px; }
+      .pm-toolbar > *{ flex:1 1 auto; }
+      .pm-search{ width:100%; order:-1; flex-basis:100%; }
+      .pm-grow{ flex-basis:100%; height:0; }
+      .pm-qrow{ flex-wrap:wrap; gap:10px; }
+      .pm-qrow-main{ flex-basis:100%; order:5; }
+      .pm-qrow-actions{ margin-left:auto; }
+      .pm-modal-backdrop{ align-items:flex-end; padding:0; }
+      .pm-modal-card{ max-width:100% !important; border-radius:20px 20px 0 0; max-height:94vh; overflow-y:auto; animation:pm-sheet .22s ease-out; }
+      @keyframes pm-sheet{ from{ transform:translateY(100%);} to{ transform:translateY(0);} }
+      .pm-input{ font-size:16px !important; }
+    }
+    @media (prefers-reduced-motion:reduce){ *{ animation-duration:.001ms !important; scroll-behavior:auto !important; } }
+  `}</style>;
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(React.createElement(App));
