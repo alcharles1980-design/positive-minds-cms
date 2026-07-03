@@ -2106,6 +2106,10 @@ config → data layer → design tokens → hooks → primitives → feature vie
 - **Design tokens:** \`C\` (colors, as CSS variables), \`S\` (spacing), \`R\` (radius),
   \`SH\` (shadows), \`FONT\`. Colors resolve to \`var(--name)\`; \`THEMES\` holds the light/dark
   values injected by GlobalStyle. \`data-theme\` on <html> flips the palette instantly.
+  All text colors are WCAG-checked: 'faint' is #726E88 light / #8A87A3 dark (≥4.5 on
+  their backgrounds). Inputs use the panel token (never hardcoded white — that broke dark
+  mode), 1.5px borders, and an explicit ::placeholder color (the 'sub' token) so search
+  fields stay legible while typing.
 - **Hooks:** useBreakpoint (phone<640/tablet 640–1024/desktop>1024), useAsync,
   useHotkey, useFocusTrap, useDebounced, useTheme; toast bus (notify), confirm bus.
 
@@ -2121,7 +2125,7 @@ config → data layer → design tokens → hooks → primitives → feature vie
 - \`pm_export_profiles\` — id, name, description, spec (jsonb transform config), is_builtin.
 - \`pm_sync_log\` — profile/target/channel/mode/status/counts/detail, created_at.
 - \`pm_sync_targets\` — id, name, channel, profile_id, config (jsonb), enabled.
-- \`pm_dev_notes\` — singleton row (id=1) holding the editable scratchpad.
+- \`pm_dev_notes\` — singleton row (id=1) holding the editable Developer-Notes scratchpad.
 
 **View:** \`pm_pack_overview\` — packs + active_questions + total_questions +
 has_pending_changes (= content_version > released_version).
@@ -2185,8 +2189,9 @@ sync calls pm_mark_released to clear it.
 
 ## 9. Navigation & views
 Sidebar (desktop) / icon rail (tablet) / bottom-tab bar (phone). Routes:
-Overview (Dashboard), Packs (Library), Questions (AllQuestions global search),
-Health (lint), Publishing (profiles/targets/channels/history), Activity, Developer.
+Overview (Dashboard, incl. an at-a-glance one-line index of every pack), Packs (Library),
+Questions (AllQuestions global search), Health (lint), Publishing (profiles/targets/
+channels/history), Activity, Developer (three embedded docs + editable scratchpad).
 History-based back button (pushState) so browser Back moves within the app.
 Command palette (⌘/Ctrl-K): fuzzy nav/actions/theme/jump-to-pack.
 
@@ -2207,6 +2212,27 @@ that network-first caches GETs).
 - **Client/server engine parity:** any change to buildOutput must be mirrored in game-feed.
 - **View column order:** adding a column to pm_packs shifts \`p.*\` in the view — drop &
   recreate pm_pack_overview rather than CREATE OR REPLACE.
+
+## 12. Recent hardening & changes (most recent first)
+- **Contrast/accessibility pass:** every text color WCAG-checked; 'faint' darkened
+  (2.57 → 4.88 on white) and brightened in dark mode; inputs now use the panel token
+  (fixed dark-mode white inputs), 1.5px borders, explicit readable ::placeholder.
+- **Developer Notes page** added (this page): 3 hardcoded docs (Architecture, CLAUDE.md,
+  Build Prompt) with copy+download, plus an autosaved scratchpad (pm_dev_notes table).
+- **Overview pack index:** compact one-line, tap-to-open list of every pack at the bottom
+  of the dashboard (responsive grid; 2 cols on phone).
+- **Mobile question cards:** below desktop, question rows became content-first cards
+  (sentence hero on top, meta+actions footer, checkbox floated to the corner) instead of
+  a folded desktop row that buried the sentence.
+- **Audit fixes:** (1) session token refresh + retry on 401, with fallback to login
+  (tokens expire ~1hr and the UI used to silently break); (2) release-state lifecycle —
+  pm_mark_released clears "pending changes" after a sync (was never advancing); (3)
+  restAll() pagination on client AND edge function to defeat the 1000-row cap; (4) command
+  palette closes on Escape; (5) confirmDialog fails safe if opened before host mount.
+- **Firebase channel + keyless-ish feed:** Firebase targets (RTDB/Firestore/CloudFn),
+  configurable path layouts; game-feed edge function with health probe (v3, paginated).
+
+IMPORTANT: keep this section and the CLAUDE.md/Build-Prompt docs updated on EVERY change.
 `;
 
 const DOC_CLAUDE_MD = `# CLAUDE.md — Positive Minds CMS
@@ -2245,6 +2271,13 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
 6. **Auth/session.** Access tokens expire ~1hr. rest()/rpc() auto-refresh + retry once on
    401 and fall back to the login screen. Don't remove that; don't leave the UI logged-in
    on a dead token.
+7. **Keep the docs current.** On EVERY change/feature/fix, update the three embedded docs
+   in devdocs.jsx (DOC_ARCHITECTURE incl. its §12 changelog, DOC_CLAUDE_MD, DOC_BUILD_PROMPT)
+   in the SAME pass, so the Developer Notes page never drifts from the real build.
+8. **Accessibility/tokens.** All text must meet WCAG AA on its background — use the C tokens
+   (faint is already the minimum readable grey; don't go lighter for text). Never hardcode
+   a hex where a token exists (dark mode + contrast depend on it). Inputs use C.panel bg and
+   the ::placeholder rule — don't reintroduce white input backgrounds.
 
 ## Data access
 - The \`db\` object (core.jsx) is the ONLY way to touch data. Add new queries there.
@@ -2363,12 +2396,17 @@ Anon publishable key authorizes reads only.
 7. **Activity log:** every mutation recorded (who/what/when) via pm_log.
 8. **Developer Notes page:** hardcoded architecture doc + CLAUDE.md + this build prompt,
    each viewable with copy + download, plus an editable scratchpad saved to pm_dev_notes.
+   These docs MUST be kept in sync with the app on every subsequent change.
 
 ## UX / cross-cutting
 - Dark mode (light/dark/system, persisted, CSS variables). Command palette (⌘/Ctrl-K):
   fuzzy nav/actions/theme/jump-to-pack. Styled confirm dialogs (no native confirm()).
   Focus trap + Escape on modals, ARIA dialog roles, visible focus rings. Toasts with
   actions, skeletons, empty/error states. History-based back button.
+- **Accessibility:** every text color must meet WCAG AA against its background (don't use a
+  grey lighter than ~4.5:1 for text). Inputs use the panel background (not hardcoded white,
+  which breaks dark mode) with an explicit readable ::placeholder color so search fields are
+  legible while typing.
 - Responsive: sidebar (desktop) / icon rail (tablet) / bottom-tab bar (phone). Question
   rows are compact single-lines on desktop and content-first CARDS below desktop (sentence
   hero on top, meta+actions footer, checkbox in the corner). 16px inputs, bottom-sheet
