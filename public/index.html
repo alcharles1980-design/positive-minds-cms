@@ -1804,6 +1804,7 @@ const COLORS = ["#F39C12", "#E84393", "#00B894", "#0984E3", "#6C4CE0", "#FDCB6E"
 const PACK_TAG_SUGGESTIONS = ["emotions", "confidence", "social", "calm", "focus", "resilience", "gratitude", "school-ready", "ages-5-7", "ages-8-10", "starter", "advanced"];
 function PackEditor({
   pack,
+  levels,
   onSave,
   onClose
 }) {
@@ -1817,6 +1818,7 @@ function PackEditor({
     difficulty: pack?.difficulty || "basic",
     status: pack?.status || "draft",
     is_custom: pack?.is_custom || false,
+    level: pack?.level || 1,
     tags: pack?.tags || []
   });
   const [slugTouched, setSlugTouched] = useState(!isNew);
@@ -1893,6 +1895,20 @@ function PackEditor({
   }, "Advanced"), /*#__PURE__*/React.createElement("option", {
     value: "mixed"
   }, "Mixed")))), /*#__PURE__*/React.createElement(Field, {
+    label: "Default level",
+    hint: "The starting level for questions in this pack (each question can override)"
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: f.level,
+    onChange: e => set("level", parseInt(e.target.value))
+  }, (levels && levels.length ? levels : Array.from({
+    length: 10
+  }, (_, i) => ({
+    level: i + 1,
+    name: ""
+  }))).map(l => /*#__PURE__*/React.createElement("option", {
+    key: l.level,
+    value: l.level
+  }, "Level ", l.level, l.name ? ` — ${l.name}` : "")))), /*#__PURE__*/React.createElement(Field, {
     label: "Description",
     hint: "Short blurb shown on the pack card"
   }, /*#__PURE__*/React.createElement(Textarea, {
@@ -2001,6 +2017,8 @@ function QuestionEditor({
   question,
   packId,
   packDifficulty,
+  packLevel,
+  levels,
   onSave,
   onClose
 }) {
@@ -2010,6 +2028,7 @@ function QuestionEditor({
     answer: question?.answer || "",
     alt_answer: question?.alt_answer || "",
     letters_hidden: question?.letters_hidden ?? 2,
+    level: question?.level ?? null,
     difficulty: question?.difficulty || (packDifficulty === "advanced" ? "advanced" : "basic"),
     status: question?.status || "active",
     notes: question?.notes || ""
@@ -2107,7 +2126,23 @@ function QuestionEditor({
     value: f.letters_hidden,
     disabled: f.difficulty === "advanced",
     onChange: e => set("letters_hidden", parseInt(e.target.value) || 0)
-  }))), /*#__PURE__*/React.createElement("div", {
+  }))), /*#__PURE__*/React.createElement(Field, {
+    label: "Level",
+    hint: "Override this question's level, or inherit the pack's default"
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: f.level ?? "",
+    onChange: e => set("level", e.target.value === "" ? null : parseInt(e.target.value))
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "Inherit pack", packLevel ? ` (Level ${packLevel})` : ""), (levels && levels.length ? levels : Array.from({
+    length: 10
+  }, (_, i) => ({
+    level: i + 1,
+    name: ""
+  }))).map(l => /*#__PURE__*/React.createElement("option", {
+    key: l.level,
+    value: l.level
+  }, "Level ", l.level, l.name ? ` — ${l.name}` : "")))), /*#__PURE__*/React.createElement("div", {
     style: {
       background: C.brandSoft,
       borderRadius: R.lg,
@@ -5226,6 +5261,10 @@ config → data layer → design tokens → hooks → primitives → feature vie
 - \`pm_sync_log\` — profile/target/channel/mode/status/counts/detail, created_at.
 - \`pm_sync_targets\` — id, name, channel, profile_id, config (jsonb), enabled.
 - \`pm_dev_notes\` — singleton row (id=1) holding the editable Developer-Notes scratchpad.
+- \`pm_levels\` — the game's progression structure (levels 1–10, editable): level (PK),
+  name, tagline, letters_rule, word_rule, theme, age_hint, tier (basic/advanced),
+  hidden_mode, letters_hidden_default, color. Packs have a \`level\` (default); questions
+  have a nullable \`level\` (null = inherit the pack's level).
 
 **View:** \`pm_pack_overview\` — packs + active_questions + total_questions +
 has_pending_changes (= content_version > released_version).
@@ -5291,7 +5330,8 @@ sync calls pm_mark_released to clear it.
 Sidebar (desktop) / icon rail (tablet) / bottom-tab bar (phone). Routes:
 Overview (Dashboard, incl. an at-a-glance one-line index of every pack), Packs (Library),
 Questions (AllQuestions global search), Health (lint), Publishing (profiles/targets/
-channels/history), Activity, Developer (three embedded docs + editable scratchpad).
+channels/history), Activity, Developer (three embedded docs + editable scratchpad),
+Levels (the 10-level progression structure — view/edit each level's rules).
 History-based back button (pushState) so browser Back moves within the app.
 Command palette (⌘/Ctrl-K): fuzzy nav/actions/theme/jump-to-pack.
 
@@ -5314,6 +5354,13 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **10-level progression structure:** a \`pm_levels\` table defines levels 1–10, each with
+  letter-hiding rules, word-length/complexity, emotional theme, and age hint (grounded in
+  the concept deck: Basic ≈ levels 1–6 partial letters, Advanced ≈ 7–10 whole word). Packs
+  carry a default \`level\`; questions can override (null = inherit). A dedicated Levels page
+  lets you view/edit each definition; LevelChip shows the level on cards and question rows;
+  the pack/question editors have level selectors. pm_search_questions returns the effective
+  level (coalesce question→pack).
 - **Contrast/accessibility pass:** every text color WCAG-checked; 'faint' darkened
   (2.57 → 4.88 on white) and brightened in dark mode; inputs now use the panel token
   (fixed dark-mode white inputs), 1.5px borders, explicit readable ::placeholder.
@@ -5382,6 +5429,10 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
 - The \`db\` object (core.jsx) is the ONLY way to touch data. Add new queries there.
 - RPCs live in Supabase: pm_dashboard_stats, pm_search_questions, pm_clone_pack, pm_lint,
   pm_lint_details, pm_log, pm_mark_released.
+- Levels: pm_levels holds the 10 editable level definitions. Packs have a default \`level\`;
+  questions have a nullable \`level\` (null = inherit pack). Effective level = coalesce(
+  question.level, pack.level). If you add a column to pm_packs, DROP+recreate pm_pack_overview
+  (it uses p.*) — this already bit us once when adding \`level\`.
 - RLS: anon read-only, authenticated full write. Never add anon write policies.
 
 ## Editing / build workflow
@@ -5495,6 +5546,15 @@ Anon publishable key authorizes reads only.
 8. **Developer Notes page:** hardcoded architecture doc + CLAUDE.md + this build prompt,
    each viewable with copy + download, plus an editable scratchpad saved to pm_dev_notes.
    These docs MUST be kept in sync with the app on every subsequent change.
+9. **Levels (progression structure):** a pm_levels table defining levels 1–10, each with a
+   name, tagline, letter-hiding rule, word-length/complexity rule, emotional theme, age hint,
+   tier (basic/advanced), and color. Ground the progression in the game concept: Basic tier
+   ≈ levels 1–6 (hide some letters, simple self-affirmation themes), Advanced ≈ 7–10 (hide
+   the whole word, nuanced social-emotional themes). Packs carry a default \`level\`; questions
+   have a nullable \`level\` override (null = inherit the pack). Build a dedicated Levels page
+   to view/edit each definition, a level chip shown on pack cards and question rows, and level
+   selectors in the pack and question editors. The question-search RPC returns the effective
+   level (coalesce question→pack).
 
 ## UX / cross-cutting
 - Dark mode (light/dark/system, persisted, CSS variables). Command palette (⌘/Ctrl-K):
@@ -5782,6 +5842,371 @@ const docTabStyle = on => ({
   fontWeight: 700
 });
 
+// ===== levels.jsx =====
+// ============================================================
+// Levels — the game's progression structure (1..10), editable.
+// Level lives on packs (default) and can be overridden per question.
+// ============================================================
+const db_levels = {
+  list: () => rest("pm_levels?order=level.asc&limit=50").then(r => r.data || []),
+  update: (level, patch) => rest(`pm_levels?level=eq.${level}`, {
+    method: "PATCH",
+    body: patch
+  }).then(r => r.data?.[0])
+};
+
+// Small helper: a colored level chip used across the app.
+function LevelChip({
+  level,
+  levels,
+  size = "sm"
+}) {
+  const def = (levels || []).find(l => l.level === level);
+  const color = def?.color || C.brand;
+  const pad = size === "xs" ? "1px 7px" : "2px 9px";
+  const fs = size === "xs" ? 10.5 : 11.5;
+  return /*#__PURE__*/React.createElement("span", {
+    title: def ? `Level ${level}: ${def.name}` : `Level ${level}`,
+    style: {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 5,
+      fontSize: fs,
+      fontWeight: 800,
+      padding: pad,
+      borderRadius: R.pill,
+      background: color + "1E",
+      color,
+      whiteSpace: "nowrap"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 6,
+      height: 6,
+      borderRadius: 99,
+      background: color
+    }
+  }), "L", level, def?.name ? ` · ${def.name}` : "");
+}
+
+// ============================================================
+// Levels management page
+// ============================================================
+function LevelsView() {
+  const {
+    loading,
+    error,
+    data,
+    reload
+  } = useAsync(() => db_levels.list(), []);
+  const [edit, setEdit] = useState(null);
+  if (error) return /*#__PURE__*/React.createElement(ErrorState, {
+    error: error,
+    onRetry: reload
+  });
+  const levels = data || [];
+  const save = async (level, patch) => {
+    await db_levels.update(level, patch);
+    await reload();
+    notify(`Level ${level} updated`);
+  };
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: S.lg
+    }
+  }, /*#__PURE__*/React.createElement("h1", {
+    style: {
+      margin: 0,
+      fontSize: 26,
+      fontWeight: 800,
+      color: C.ink,
+      letterSpacing: -0.3
+    }
+  }, "Levels"), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "4px 0 0",
+      color: C.sub,
+      fontSize: 14.5
+    }
+  }, "The game's progression structure. Each level defines how words are hidden and which themes it covers. Edit any level's rules below.")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.brandSoft,
+      borderRadius: R.md,
+      padding: "12px 16px",
+      marginBottom: S.lg,
+      fontSize: 13,
+      color: C.brandInk,
+      lineHeight: 1.5
+    }
+  }, "Levels combine two things: ", /*#__PURE__*/React.createElement("b", null, "mechanical difficulty"), " (how much of the word is hidden, word length) and ", /*#__PURE__*/React.createElement("b", null, "emotional depth"), " (from simple \"I am kind\" up to nuanced self-regulation). A pack has a default level; individual questions can override it."), loading ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gap: 10
+    }
+  }, Array.from({
+    length: 6
+  }).map((_, i) => /*#__PURE__*/React.createElement(Skeleton, {
+    key: i,
+    h: 84,
+    r: 12
+  }))) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gap: 10
+    }
+  }, levels.map(l => /*#__PURE__*/React.createElement("div", {
+    key: l.level,
+    style: {
+      background: C.panel,
+      border: "1px solid " + C.line,
+      borderRadius: R.lg,
+      borderLeft: `5px solid ${l.color}`,
+      padding: S.lg,
+      display: "flex",
+      gap: S.lg,
+      alignItems: "flex-start",
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 52,
+      height: 52,
+      borderRadius: 13,
+      background: l.color + "1E",
+      color: l.color,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: 22,
+      fontWeight: 900,
+      flexShrink: 0
+    }
+  }, l.level), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 200
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 16.5,
+      fontWeight: 800,
+      color: C.ink
+    }
+  }, l.name), /*#__PURE__*/React.createElement(Pill, {
+    tone: l.tier === "advanced" ? "info" : "muted"
+  }, l.tier), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12.5,
+      color: C.faint
+    }
+  }, l.age_hint)), l.tagline && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13.5,
+      color: C.sub,
+      marginTop: 3,
+      fontStyle: "italic"
+    }
+  }, "“", l.tagline, "”"), /*#__PURE__*/React.createElement("div", {
+    className: "pm-level-rules",
+    style: {
+      display: "grid",
+      gridTemplateColumns: "1fr 1fr 1fr",
+      gap: 10,
+      marginTop: 12
+    }
+  }, /*#__PURE__*/React.createElement(Rule, {
+    label: "Letters",
+    value: l.letters_rule
+  }), /*#__PURE__*/React.createElement(Rule, {
+    label: "Words",
+    value: l.word_rule
+  }), /*#__PURE__*/React.createElement(Rule, {
+    label: "Theme",
+    value: l.theme
+  }))), /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    size: "sm",
+    onClick: () => setEdit(l)
+  }, "Edit")))), /*#__PURE__*/React.createElement(Modal, {
+    open: edit !== null,
+    onClose: () => setEdit(null),
+    width: 560
+  }, edit !== null && /*#__PURE__*/React.createElement(LevelEditor, {
+    level: edit,
+    onSave: save,
+    onClose: () => setEdit(null)
+  })));
+}
+const Rule = ({
+  label,
+  value
+}) => /*#__PURE__*/React.createElement("div", {
+  style: {
+    background: C.bg,
+    borderRadius: R.sm,
+    padding: "8px 11px"
+  }
+}, /*#__PURE__*/React.createElement("div", {
+  style: {
+    fontSize: 10.5,
+    fontWeight: 800,
+    color: C.faint,
+    letterSpacing: 0.3,
+    textTransform: "uppercase"
+  }
+}, label), /*#__PURE__*/React.createElement("div", {
+  style: {
+    fontSize: 12.5,
+    color: C.ink2,
+    marginTop: 2,
+    lineHeight: 1.4
+  }
+}, value || "—"));
+function LevelEditor({
+  level,
+  onSave,
+  onClose
+}) {
+  const [f, setF] = useState({
+    ...level
+  });
+  const [busy, setBusy] = useState(false);
+  const set = (k, v) => setF(p => ({
+    ...p,
+    [k]: v
+  }));
+  const submit = async () => {
+    setBusy(true);
+    try {
+      await onSave(level.level, {
+        name: f.name,
+        tagline: f.tagline,
+        letters_rule: f.letters_rule,
+        word_rule: f.word_rule,
+        theme: f.theme,
+        age_hint: f.age_hint,
+        tier: f.tier,
+        hidden_mode: f.hidden_mode,
+        letters_hidden_default: f.letters_hidden_default,
+        color: f.color
+      });
+      onClose();
+    } catch {
+      setBusy(false);
+    }
+  };
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(ModalHead, {
+    title: `Edit Level ${level.level}`,
+    subtitle: "Define this level's rules and theme"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: S.xl,
+      display: "grid",
+      gap: S.md + 2,
+      maxHeight: "64vh",
+      overflowY: "auto"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "pm-form-2"
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Level name"
+  }, /*#__PURE__*/React.createElement(Input, {
+    value: f.name,
+    onChange: e => set("name", e.target.value),
+    autoFocus: true
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Tier"
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: f.tier,
+    onChange: e => set("tier", e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "basic"
+  }, "Basic"), /*#__PURE__*/React.createElement("option", {
+    value: "advanced"
+  }, "Advanced")))), /*#__PURE__*/React.createElement(Field, {
+    label: "Tagline",
+    hint: "Short, child-friendly description"
+  }, /*#__PURE__*/React.createElement(Input, {
+    value: f.tagline,
+    onChange: e => set("tagline", e.target.value)
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Letters rule",
+    hint: "How much of the word is hidden"
+  }, /*#__PURE__*/React.createElement(Input, {
+    value: f.letters_rule,
+    onChange: e => set("letters_rule", e.target.value)
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Words rule",
+    hint: "Word length / complexity"
+  }, /*#__PURE__*/React.createElement(Input, {
+    value: f.word_rule,
+    onChange: e => set("word_rule", e.target.value)
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Theme",
+    hint: "Emotional / thematic focus"
+  }, /*#__PURE__*/React.createElement(Input, {
+    value: f.theme,
+    onChange: e => set("theme", e.target.value)
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "pm-form-2"
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Age hint"
+  }, /*#__PURE__*/React.createElement(Input, {
+    value: f.age_hint,
+    onChange: e => set("age_hint", e.target.value)
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Default letters hidden",
+    hint: "Suggested for new questions"
+  }, /*#__PURE__*/React.createElement(Input, {
+    type: "number",
+    min: 0,
+    value: f.letters_hidden_default,
+    onChange: e => set("letters_hidden_default", parseInt(e.target.value) || 0)
+  }))), /*#__PURE__*/React.createElement(Field, {
+    label: "Hidden mode",
+    hint: "Authoring guidance"
+  }, /*#__PURE__*/React.createElement(Select, {
+    value: f.hidden_mode,
+    onChange: e => set("hidden_mode", e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "letters"
+  }, "Hide some letters"), /*#__PURE__*/React.createElement("option", {
+    value: "word"
+  }, "Hide the whole word"))), /*#__PURE__*/React.createElement(Field, {
+    label: "Color"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 8
+    }
+  }, ["#00B894", "#55EFC4", "#0984E3", "#74B9FF", "#6C4CE0", "#A29BFE", "#E17055", "#E84393", "#D63031", "#2D3436", "#F39C12", "#00CEC9"].map(c => /*#__PURE__*/React.createElement("button", {
+    key: c,
+    onClick: () => set("color", c),
+    style: {
+      width: 30,
+      height: 30,
+      borderRadius: R.sm,
+      cursor: "pointer",
+      background: c,
+      border: "3px solid " + (f.color === c ? C.ink : "transparent")
+    }
+  }))))), /*#__PURE__*/React.createElement(ModalFoot, null, /*#__PURE__*/React.createElement(Btn, {
+    variant: "ghost",
+    onClick: onClose
+  }, "Cancel"), /*#__PURE__*/React.createElement(Btn, {
+    onClick: submit,
+    disabled: busy
+  }, busy ? "Saving…" : "Save level")));
+}
+
 // ===== views1.jsx =====
 // ============================================================
 // Dashboard
@@ -6051,6 +6476,7 @@ const Row = ({
 // ============================================================
 function Library({
   packs,
+  levels,
   loading,
   error,
   onOpen,
@@ -6211,6 +6637,7 @@ function Library({
   }, shown.map(p => /*#__PURE__*/React.createElement(PackCard, {
     key: p.id,
     pack: p,
+    levels: levels,
     draggable: canReorder,
     dragging: dragId === p.id,
     onDragStart: () => setDragId(p.id),
@@ -6224,6 +6651,7 @@ function Library({
 }
 function PackCard({
   pack: p,
+  levels,
   draggable,
   dragging,
   onDragStart,
@@ -6313,7 +6741,11 @@ function PackCard({
     }
   }, /*#__PURE__*/React.createElement(Pill, null, p.difficulty), p.is_custom && /*#__PURE__*/React.createElement(Pill, {
     tone: "muted"
-  }, "custom"), /*#__PURE__*/React.createElement("div", {
+  }, "custom"), p.level && /*#__PURE__*/React.createElement(LevelChip, {
+    level: p.level,
+    levels: levels,
+    size: "xs"
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       flex: 1
     }
@@ -6378,6 +6810,7 @@ const CardBtn = ({
 // ============================================================
 function PackDetail({
   pack,
+  levels,
   onBack,
   refreshPacks,
   onEditPack
@@ -6753,7 +7186,11 @@ function PackDetail({
       className: "pm-qrow-meta"
     }, /*#__PURE__*/React.createElement(Pill, {
       tone: "muted"
-    }, q.difficulty), /*#__PURE__*/React.createElement("button", {
+    }, q.difficulty), /*#__PURE__*/React.createElement(LevelChip, {
+      level: q.level || pack.level,
+      levels: levels,
+      size: "xs"
+    }), /*#__PURE__*/React.createElement("button", {
       onClick: () => toggleQ(q),
       title: "Toggle active",
       style: {
@@ -6790,6 +7227,8 @@ function PackDetail({
     question: qEdit.id ? qEdit : null,
     packId: pack.id,
     packDifficulty: pack.difficulty,
+    packLevel: pack.level,
+    levels: levels,
     onSave: saveQ,
     onClose: () => setQEdit(null)
   })), /*#__PURE__*/React.createElement(Modal, {
@@ -6840,7 +7279,8 @@ const Pager = ({
 // All questions — global search across every pack (server-side)
 // ============================================================
 function AllQuestions({
-  onOpenPack
+  onOpenPack,
+  levels
 }) {
   const [q, setQ] = useState("");
   const [diff, setDiff] = useState("all");
@@ -7008,7 +7448,11 @@ function AllQuestions({
       className: "pm-qrow-meta"
     }, /*#__PURE__*/React.createElement(Pill, {
       tone: "muted"
-    }, r.difficulty), /*#__PURE__*/React.createElement(Badge, {
+    }, r.difficulty), r.level && /*#__PURE__*/React.createElement(LevelChip, {
+      level: r.level,
+      levels: levels,
+      size: "xs"
+    }), /*#__PURE__*/React.createElement(Badge, {
       kind: r.status
     })));
   })), pages > 1 && /*#__PURE__*/React.createElement(Pager, {
@@ -7274,6 +7718,10 @@ const NAV = [{
   label: "Questions",
   icon: "⌕"
 }, {
+  id: "levels",
+  label: "Levels",
+  icon: "▲"
+}, {
   id: "health",
   label: "Health",
   icon: "◉"
@@ -7321,6 +7769,8 @@ function App() {
   const packsState = useAsync(() => db.packsOverview(), [authed]);
   const packs = packsState.data;
   const reloadPacks = packsState.reload;
+  const levelsState = useAsync(() => db_levels.list(), [authed]);
+  const levels = levelsState.data || [];
 
   // history-based back button
   const goPack = useCallback(p => {
@@ -7593,6 +8043,13 @@ function App() {
       section: "Go",
       keywords: ["docs", "architecture", "claude", "prompt", "readme"],
       run: () => goNav("devnotes")
+    }, {
+      id: "nav-levels",
+      label: "Go to Levels",
+      icon: "▲",
+      section: "Go",
+      keywords: ["level", "progression", "difficulty", "stages"],
+      run: () => goNav("levels")
     }, {
       id: "act-newpack",
       label: "Create new pack",
@@ -7935,6 +8392,14 @@ function App() {
     style: menuItem
   }, "◉ Content health"), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
+      goNav("levels");
+    },
+    style: {
+      ...menuItem,
+      borderTop: "1px solid " + C.line
+    }
+  }, "▲ Levels"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
       goNav("activity");
     },
     style: {
@@ -7985,6 +8450,7 @@ function App() {
     }
   }, active ? /*#__PURE__*/React.createElement(PackDetail, {
     pack: active,
+    levels: levels,
     onBack: closePack,
     refreshPacks: reloadPacks,
     onEditPack: setEditPack
@@ -7996,6 +8462,7 @@ function App() {
     onNewPack: () => setEditPack({})
   }) : nav === "library" ? /*#__PURE__*/React.createElement(Library, {
     packs: packs,
+    levels: levels,
     loading: packsState.loading,
     error: packsState.error,
     reload: reloadPacks,
@@ -8008,8 +8475,9 @@ function App() {
     onClone: setClonePack,
     onReorder: reorderPacks
   }) : nav === "questions" ? /*#__PURE__*/React.createElement(AllQuestions, {
-    onOpenPack: openPackById
-  }) : nav === "health" ? /*#__PURE__*/React.createElement(HealthView, {
+    onOpenPack: openPackById,
+    levels: levels
+  }) : nav === "levels" ? /*#__PURE__*/React.createElement(LevelsView, null) : nav === "health" ? /*#__PURE__*/React.createElement(HealthView, {
     onOpenPack: openPackById
   }) : nav === "publish" ? /*#__PURE__*/React.createElement(PublishHub, {
     packs: packs,
@@ -8057,6 +8525,7 @@ function App() {
     labelledBy: "pm-pack-title"
   }, editPack !== null && /*#__PURE__*/React.createElement(PackEditor, {
     pack: editPack.id ? editPack : null,
+    levels: levels,
     onSave: savePack,
     onClose: () => setEditPack(null)
   })), /*#__PURE__*/React.createElement(Modal, {

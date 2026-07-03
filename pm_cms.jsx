@@ -762,12 +762,13 @@ const EMOJIS = ["💪","😊","🧘","🎯","🎓","💡","🛡️","🤝","🫶
 const COLORS = ["#F39C12","#E84393","#00B894","#0984E3","#6C4CE0","#FDCB6E","#D63031","#00CEC9","#E17055","#FAB1A0","#74B9FF","#A29BFE","#55EFC4","#81ECEC"];
 const PACK_TAG_SUGGESTIONS = ["emotions","confidence","social","calm","focus","resilience","gratitude","school-ready","ages-5-7","ages-8-10","starter","advanced"];
 
-function PackEditor({ pack, onSave, onClose }) {
+function PackEditor({ pack, levels, onSave, onClose }) {
   const isNew = !pack?.id;
   const [f, setF] = useState({
     name: pack?.name || "", slug: pack?.slug || "", emoji: pack?.emoji || "💪",
     description: pack?.description || "", color: pack?.color || C.brand,
     difficulty: pack?.difficulty || "basic", status: pack?.status || "draft", is_custom: pack?.is_custom || false,
+    level: pack?.level || 1,
     tags: pack?.tags || [],
   });
   const [slugTouched, setSlugTouched] = useState(!isNew);
@@ -803,6 +804,13 @@ function PackEditor({ pack, onSave, onClose }) {
             </Select>
           </Field>
         </div>
+        <Field label="Default level" hint="The starting level for questions in this pack (each question can override)">
+          <Select value={f.level} onChange={(e) => set("level", parseInt(e.target.value))}>
+            {(levels && levels.length ? levels : Array.from({ length: 10 }, (_, i) => ({ level: i + 1, name: "" }))).map(l => (
+              <option key={l.level} value={l.level}>Level {l.level}{l.name ? ` — ${l.name}` : ""}</option>
+            ))}
+          </Select>
+        </Field>
         <Field label="Description" hint="Short blurb shown on the pack card">
           <Textarea value={f.description} onChange={(e) => set("description", e.target.value)} rows={2} placeholder="Believe in yourself and take pride in what you do." />
         </Field>
@@ -846,12 +854,13 @@ function PackEditor({ pack, onSave, onClose }) {
   );
 }
 
-function QuestionEditor({ question, packId, packDifficulty, onSave, onClose }) {
+function QuestionEditor({ question, packId, packDifficulty, packLevel, levels, onSave, onClose }) {
   const isNew = !question?.id;
   const [f, setF] = useState({
     template: question?.template || "I am {blank} when …",
     answer: question?.answer || "", alt_answer: question?.alt_answer || "",
     letters_hidden: question?.letters_hidden ?? 2,
+    level: question?.level ?? null,
     difficulty: question?.difficulty || (packDifficulty === "advanced" ? "advanced" : "basic"),
     status: question?.status || "active", notes: question?.notes || "",
   });
@@ -899,6 +908,14 @@ function QuestionEditor({ question, packId, packDifficulty, onSave, onClose }) {
             <Input type="number" min={0} value={f.letters_hidden} disabled={f.difficulty === "advanced"} onChange={(e) => set("letters_hidden", parseInt(e.target.value) || 0)} />
           </Field>
         </div>
+        <Field label="Level" hint="Override this question's level, or inherit the pack's default">
+          <Select value={f.level ?? ""} onChange={(e) => set("level", e.target.value === "" ? null : parseInt(e.target.value))}>
+            <option value="">Inherit pack{packLevel ? ` (Level ${packLevel})` : ""}</option>
+            {(levels && levels.length ? levels : Array.from({ length: 10 }, (_, i) => ({ level: i + 1, name: "" }))).map(l => (
+              <option key={l.level} value={l.level}>Level {l.level}{l.name ? ` — ${l.name}` : ""}</option>
+            ))}
+          </Select>
+        </Field>
         <div style={{ background: C.brandSoft, borderRadius: R.lg, padding: `${S.lg}px ${S.lg + 2}px` }}>
           <div style={{ fontSize: 11, fontWeight: 800, color: C.brandInk, letterSpacing: 0.5, marginBottom: 8 }}>HOW THE CHILD SEES IT</div>
           <div style={{ fontSize: 17, color: C.ink, fontWeight: 500, lineHeight: 1.4 }}>{pv.sentence}</div>
@@ -2126,6 +2143,10 @@ config → data layer → design tokens → hooks → primitives → feature vie
 - \`pm_sync_log\` — profile/target/channel/mode/status/counts/detail, created_at.
 - \`pm_sync_targets\` — id, name, channel, profile_id, config (jsonb), enabled.
 - \`pm_dev_notes\` — singleton row (id=1) holding the editable Developer-Notes scratchpad.
+- \`pm_levels\` — the game's progression structure (levels 1–10, editable): level (PK),
+  name, tagline, letters_rule, word_rule, theme, age_hint, tier (basic/advanced),
+  hidden_mode, letters_hidden_default, color. Packs have a \`level\` (default); questions
+  have a nullable \`level\` (null = inherit the pack's level).
 
 **View:** \`pm_pack_overview\` — packs + active_questions + total_questions +
 has_pending_changes (= content_version > released_version).
@@ -2191,7 +2212,8 @@ sync calls pm_mark_released to clear it.
 Sidebar (desktop) / icon rail (tablet) / bottom-tab bar (phone). Routes:
 Overview (Dashboard, incl. an at-a-glance one-line index of every pack), Packs (Library),
 Questions (AllQuestions global search), Health (lint), Publishing (profiles/targets/
-channels/history), Activity, Developer (three embedded docs + editable scratchpad).
+channels/history), Activity, Developer (three embedded docs + editable scratchpad),
+Levels (the 10-level progression structure — view/edit each level's rules).
 History-based back button (pushState) so browser Back moves within the app.
 Command palette (⌘/Ctrl-K): fuzzy nav/actions/theme/jump-to-pack.
 
@@ -2214,6 +2236,13 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **10-level progression structure:** a \`pm_levels\` table defines levels 1–10, each with
+  letter-hiding rules, word-length/complexity, emotional theme, and age hint (grounded in
+  the concept deck: Basic ≈ levels 1–6 partial letters, Advanced ≈ 7–10 whole word). Packs
+  carry a default \`level\`; questions can override (null = inherit). A dedicated Levels page
+  lets you view/edit each definition; LevelChip shows the level on cards and question rows;
+  the pack/question editors have level selectors. pm_search_questions returns the effective
+  level (coalesce question→pack).
 - **Contrast/accessibility pass:** every text color WCAG-checked; 'faint' darkened
   (2.57 → 4.88 on white) and brightened in dark mode; inputs now use the panel token
   (fixed dark-mode white inputs), 1.5px borders, explicit readable ::placeholder.
@@ -2283,6 +2312,10 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
 - The \`db\` object (core.jsx) is the ONLY way to touch data. Add new queries there.
 - RPCs live in Supabase: pm_dashboard_stats, pm_search_questions, pm_clone_pack, pm_lint,
   pm_lint_details, pm_log, pm_mark_released.
+- Levels: pm_levels holds the 10 editable level definitions. Packs have a default \`level\`;
+  questions have a nullable \`level\` (null = inherit pack). Effective level = coalesce(
+  question.level, pack.level). If you add a column to pm_packs, DROP+recreate pm_pack_overview
+  (it uses p.*) — this already bit us once when adding \`level\`.
 - RLS: anon read-only, authenticated full write. Never add anon write policies.
 
 ## Editing / build workflow
@@ -2397,6 +2430,15 @@ Anon publishable key authorizes reads only.
 8. **Developer Notes page:** hardcoded architecture doc + CLAUDE.md + this build prompt,
    each viewable with copy + download, plus an editable scratchpad saved to pm_dev_notes.
    These docs MUST be kept in sync with the app on every subsequent change.
+9. **Levels (progression structure):** a pm_levels table defining levels 1–10, each with a
+   name, tagline, letter-hiding rule, word-length/complexity rule, emotional theme, age hint,
+   tier (basic/advanced), and color. Ground the progression in the game concept: Basic tier
+   ≈ levels 1–6 (hide some letters, simple self-affirmation themes), Advanced ≈ 7–10 (hide
+   the whole word, nuanced social-emotional themes). Packs carry a default \`level\`; questions
+   have a nullable \`level\` override (null = inherit the pack). Build a dedicated Levels page
+   to view/edit each definition, a level chip shown on pack cards and question rows, and level
+   selectors in the pack and question editors. The question-search RPC returns the effective
+   level (coalesce question→pack).
 
 ## UX / cross-cutting
 - Dark mode (light/dark/system, persisted, CSS variables). Command palette (⌘/Ctrl-K):
@@ -2533,6 +2575,134 @@ const docTabStyle = (on) => ({
   color: on ? C.brandInk : C.ink2, cursor: "pointer", fontFamily: "inherit", fontSize: 13.5, fontWeight: 700,
 });
 
+// ===== levels.jsx =====
+// ============================================================
+// Levels — the game's progression structure (1..10), editable.
+// Level lives on packs (default) and can be overridden per question.
+// ============================================================
+const db_levels = {
+  list: () => rest("pm_levels?order=level.asc&limit=50").then(r => r.data || []),
+  update: (level, patch) => rest(`pm_levels?level=eq.${level}`, { method: "PATCH", body: patch }).then(r => r.data?.[0]),
+};
+
+// Small helper: a colored level chip used across the app.
+function LevelChip({ level, levels, size = "sm" }) {
+  const def = (levels || []).find(l => l.level === level);
+  const color = def?.color || C.brand;
+  const pad = size === "xs" ? "1px 7px" : "2px 9px";
+  const fs = size === "xs" ? 10.5 : 11.5;
+  return (
+    <span title={def ? `Level ${level}: ${def.name}` : `Level ${level}`}
+      style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: fs, fontWeight: 800, padding: pad, borderRadius: R.pill, background: color + "1E", color, whiteSpace: "nowrap" }}>
+      <span style={{ width: 6, height: 6, borderRadius: 99, background: color }} />L{level}{def?.name ? ` · ${def.name}` : ""}
+    </span>
+  );
+}
+
+// ============================================================
+// Levels management page
+// ============================================================
+function LevelsView() {
+  const { loading, error, data, reload } = useAsync(() => db_levels.list(), []);
+  const [edit, setEdit] = useState(null);
+  if (error) return <ErrorState error={error} onRetry={reload} />;
+  const levels = data || [];
+
+  const save = async (level, patch) => { await db_levels.update(level, patch); await reload(); notify(`Level ${level} updated`); };
+
+  return (
+    <div>
+      <div style={{ marginBottom: S.lg }}>
+        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Levels</h1>
+        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>The game's progression structure. Each level defines how words are hidden and which themes it covers. Edit any level's rules below.</p>
+      </div>
+
+      <div style={{ background: C.brandSoft, borderRadius: R.md, padding: "12px 16px", marginBottom: S.lg, fontSize: 13, color: C.brandInk, lineHeight: 1.5 }}>
+        Levels combine two things: <b>mechanical difficulty</b> (how much of the word is hidden, word length) and <b>emotional depth</b> (from simple "I am kind" up to nuanced self-regulation). A pack has a default level; individual questions can override it.
+      </div>
+
+      {loading ? <div style={{ display: "grid", gap: 10 }}>{Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} h={84} r={12} />)}</div>
+        : (
+          <div style={{ display: "grid", gap: 10 }}>
+            {levels.map(l => (
+              <div key={l.level} style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, borderLeft: `5px solid ${l.color}`, padding: S.lg, display: "flex", gap: S.lg, alignItems: "flex-start", flexWrap: "wrap" }}>
+                <div style={{ width: 52, height: 52, borderRadius: 13, background: l.color + "1E", color: l.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, fontWeight: 900, flexShrink: 0 }}>{l.level}</div>
+                <div style={{ flex: 1, minWidth: 200 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 16.5, fontWeight: 800, color: C.ink }}>{l.name}</span>
+                    <Pill tone={l.tier === "advanced" ? "info" : "muted"}>{l.tier}</Pill>
+                    <span style={{ fontSize: 12.5, color: C.faint }}>{l.age_hint}</span>
+                  </div>
+                  {l.tagline && <div style={{ fontSize: 13.5, color: C.sub, marginTop: 3, fontStyle: "italic" }}>“{l.tagline}”</div>}
+                  <div className="pm-level-rules" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginTop: 12 }}>
+                    <Rule label="Letters" value={l.letters_rule} />
+                    <Rule label="Words" value={l.word_rule} />
+                    <Rule label="Theme" value={l.theme} />
+                  </div>
+                </div>
+                <Btn variant="ghost" size="sm" onClick={() => setEdit(l)}>Edit</Btn>
+              </div>
+            ))}
+          </div>
+        )}
+
+      <Modal open={edit !== null} onClose={() => setEdit(null)} width={560}>
+        {edit !== null && <LevelEditor level={edit} onSave={save} onClose={() => setEdit(null)} />}
+      </Modal>
+    </div>
+  );
+}
+const Rule = ({ label, value }) => (
+  <div style={{ background: C.bg, borderRadius: R.sm, padding: "8px 11px" }}>
+    <div style={{ fontSize: 10.5, fontWeight: 800, color: C.faint, letterSpacing: 0.3, textTransform: "uppercase" }}>{label}</div>
+    <div style={{ fontSize: 12.5, color: C.ink2, marginTop: 2, lineHeight: 1.4 }}>{value || "—"}</div>
+  </div>
+);
+
+function LevelEditor({ level, onSave, onClose }) {
+  const [f, setF] = useState({ ...level });
+  const [busy, setBusy] = useState(false);
+  const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+  const submit = async () => {
+    setBusy(true);
+    try { await onSave(level.level, { name: f.name, tagline: f.tagline, letters_rule: f.letters_rule, word_rule: f.word_rule, theme: f.theme, age_hint: f.age_hint, tier: f.tier, hidden_mode: f.hidden_mode, letters_hidden_default: f.letters_hidden_default, color: f.color }); onClose(); }
+    catch { setBusy(false); }
+  };
+  return (
+    <>
+      <ModalHead title={`Edit Level ${level.level}`} subtitle="Define this level's rules and theme" />
+      <div style={{ padding: S.xl, display: "grid", gap: S.md + 2, maxHeight: "64vh", overflowY: "auto" }}>
+        <div className="pm-form-2">
+          <Field label="Level name"><Input value={f.name} onChange={(e) => set("name", e.target.value)} autoFocus /></Field>
+          <Field label="Tier"><Select value={f.tier} onChange={(e) => set("tier", e.target.value)}><option value="basic">Basic</option><option value="advanced">Advanced</option></Select></Field>
+        </div>
+        <Field label="Tagline" hint="Short, child-friendly description"><Input value={f.tagline} onChange={(e) => set("tagline", e.target.value)} /></Field>
+        <Field label="Letters rule" hint="How much of the word is hidden"><Input value={f.letters_rule} onChange={(e) => set("letters_rule", e.target.value)} /></Field>
+        <Field label="Words rule" hint="Word length / complexity"><Input value={f.word_rule} onChange={(e) => set("word_rule", e.target.value)} /></Field>
+        <Field label="Theme" hint="Emotional / thematic focus"><Input value={f.theme} onChange={(e) => set("theme", e.target.value)} /></Field>
+        <div className="pm-form-2">
+          <Field label="Age hint"><Input value={f.age_hint} onChange={(e) => set("age_hint", e.target.value)} /></Field>
+          <Field label="Default letters hidden" hint="Suggested for new questions"><Input type="number" min={0} value={f.letters_hidden_default} onChange={(e) => set("letters_hidden_default", parseInt(e.target.value) || 0)} /></Field>
+        </div>
+        <Field label="Hidden mode" hint="Authoring guidance">
+          <Select value={f.hidden_mode} onChange={(e) => set("hidden_mode", e.target.value)}><option value="letters">Hide some letters</option><option value="word">Hide the whole word</option></Select>
+        </Field>
+        <Field label="Color">
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {["#00B894","#55EFC4","#0984E3","#74B9FF","#6C4CE0","#A29BFE","#E17055","#E84393","#D63031","#2D3436","#F39C12","#00CEC9"].map(c => (
+              <button key={c} onClick={() => set("color", c)} style={{ width: 30, height: 30, borderRadius: R.sm, cursor: "pointer", background: c, border: "3px solid " + (f.color === c ? C.ink : "transparent") }} />
+            ))}
+          </div>
+        </Field>
+      </div>
+      <ModalFoot>
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn onClick={submit} disabled={busy}>{busy ? "Saving…" : "Save level"}</Btn>
+      </ModalFoot>
+    </>
+  );
+}
+
 // ===== views1.jsx =====
 // ============================================================
 // Dashboard
@@ -2615,7 +2785,7 @@ const Row = ({ label, value, warn }) => (
 // ============================================================
 // Library — cards with drag-reorder, clone, delete
 // ============================================================
-function Library({ packs, loading, error, onOpen, onNew, onEdit, onExport, onImportFile, onDelete, onClone, onReorder, reload }) {
+function Library({ packs, levels, loading, error, onOpen, onNew, onEdit, onExport, onImportFile, onDelete, onClone, onReorder, reload }) {
   const [search, setSearch] = useState("");
   const [statusF, setStatusF] = useState("all");
   const [diffF, setDiffF] = useState("all");
@@ -2673,7 +2843,7 @@ function Library({ packs, loading, error, onOpen, onNew, onEdit, onExport, onImp
       ) : (
         <div className="pm-pack-grid">
           {shown.map(p => (
-            <PackCard key={p.id} pack={p} draggable={canReorder} dragging={dragId === p.id}
+            <PackCard key={p.id} pack={p} levels={levels} draggable={canReorder} dragging={dragId === p.id}
               onDragStart={() => setDragId(p.id)} onDragOver={(e) => e.preventDefault()} onDrop={() => onDrop(p.id)}
               onOpen={() => onOpen(p)} onEdit={() => onEdit(p)} onDelete={() => onDelete(p)} onClone={() => onClone(p)} />
           ))}
@@ -2683,7 +2853,7 @@ function Library({ packs, loading, error, onOpen, onNew, onEdit, onExport, onImp
   );
 }
 
-function PackCard({ pack: p, draggable, dragging, onDragStart, onDragOver, onDrop, onOpen, onEdit, onDelete, onClone }) {
+function PackCard({ pack: p, levels, draggable, dragging, onDragStart, onDragOver, onDrop, onOpen, onEdit, onDelete, onClone }) {
   const [hover, setHover] = useState(false);
   return (
     <div draggable={draggable} onDragStart={onDragStart} onDragOver={onDragOver} onDrop={onDrop}
@@ -2699,7 +2869,7 @@ function PackCard({ pack: p, draggable, dragging, onDragStart, onDragOver, onDro
         <div style={{ fontSize: 17, fontWeight: 800, color: C.ink }}>{p.name}</div>
         <div style={{ fontSize: 13, color: C.sub, marginTop: 5, lineHeight: 1.45, minHeight: 36, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{p.description || "No description"}</div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: S.md + 2, paddingTop: S.md + 2, borderTop: "1px solid " + C.line }}>
-          <Pill>{p.difficulty}</Pill>{p.is_custom && <Pill tone="muted">custom</Pill>}
+          <Pill>{p.difficulty}</Pill>{p.is_custom && <Pill tone="muted">custom</Pill>}{p.level && <LevelChip level={p.level} levels={levels} size="xs" />}
           <div style={{ flex: 1 }} />
           <span style={{ fontSize: 13, color: C.ink, fontWeight: 800 }}>{p.active_questions || 0}</span>
           <span style={{ fontSize: 12, color: C.faint }}>/ {p.total_questions || 0} Qs</span>
@@ -2722,7 +2892,7 @@ const CardBtn = ({ color, border, onClick, children }) => (
 // ============================================================
 // Pack detail — paginated question bank with multi-select
 // ============================================================
-function PackDetail({ pack, onBack, refreshPacks, onEditPack }) {
+function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
   const [page, setPage] = useState(0);
   const [total, setTotal] = useState(0);
   const [rows, setRows] = useState(null);
@@ -2839,6 +3009,7 @@ function PackDetail({ pack, onBack, refreshPacks, onEditPack }) {
                     </div>
                     <div className="pm-qrow-meta">
                       <Pill tone="muted">{q.difficulty}</Pill>
+                      <LevelChip level={q.level || pack.level} levels={levels} size="xs" />
                       <button onClick={() => toggleQ(q)} title="Toggle active" style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}><Badge kind={q.status} /></button>
                     </div>
                     <div className="pm-qrow-actions">
@@ -2854,7 +3025,7 @@ function PackDetail({ pack, onBack, refreshPacks, onEditPack }) {
         )}
 
       <Modal open={qEdit !== null} onClose={() => setQEdit(null)} labelledBy="pm-q-title">
-        {qEdit !== null && <QuestionEditor question={qEdit.id ? qEdit : null} packId={pack.id} packDifficulty={pack.difficulty} onSave={saveQ} onClose={() => setQEdit(null)} />}
+        {qEdit !== null && <QuestionEditor question={qEdit.id ? qEdit : null} packId={pack.id} packDifficulty={pack.difficulty} packLevel={pack.level} levels={levels} onSave={saveQ} onClose={() => setQEdit(null)} />}
       </Modal>
       <Modal open={bulk} onClose={() => setBulk(false)} labelledBy="pm-imp-title">
         {bulk && <BulkImport packId={pack.id} onDone={importQ} onClose={() => setBulk(false)} />}
@@ -2875,7 +3046,7 @@ const Pager = ({ page, pages, onPage }) => (
 // ============================================================
 // All questions — global search across every pack (server-side)
 // ============================================================
-function AllQuestions({ onOpenPack }) {
+function AllQuestions({ onOpenPack, levels }) {
   const [q, setQ] = useState("");
   const [diff, setDiff] = useState("all");
   const [stat, setStat] = useState("all");
@@ -2932,6 +3103,7 @@ function AllQuestions({ onOpenPack }) {
                     </div>
                     <div className="pm-qrow-meta">
                       <Pill tone="muted">{r.difficulty}</Pill>
+                      {r.level && <LevelChip level={r.level} levels={levels} size="xs" />}
                       <Badge kind={r.status} />
                     </div>
                   </div>
@@ -3031,6 +3203,7 @@ const NAV = [
   { id: "dashboard", label: "Overview", icon: "◈" },
   { id: "library", label: "Packs", icon: "▦" },
   { id: "questions", label: "Questions", icon: "⌕" },
+  { id: "levels", label: "Levels", icon: "▲" },
   { id: "health", label: "Health", icon: "◉" },
   { id: "publish", label: "Publishing", icon: "⇧" },
   { id: "activity", label: "Activity", icon: "≡" },
@@ -3063,6 +3236,8 @@ function App() {
   const packsState = useAsync(() => db.packsOverview(), [authed]);
   const packs = packsState.data;
   const reloadPacks = packsState.reload;
+  const levelsState = useAsync(() => db_levels.list(), [authed]);
+  const levels = levelsState.data || [];
 
   // history-based back button
   const goPack = useCallback((p) => { setActive(p); window.history.pushState({ v: "pack", id: p.id }, ""); }, []);
@@ -3161,6 +3336,7 @@ function App() {
       { id: "nav-publish", label: "Go to Publishing", icon: "⇧", section: "Go", keywords: ["sync", "export", "profile", "feed", "game"], run: () => goNav("publish") },
       { id: "nav-activity", label: "Go to Activity log", icon: "≡", section: "Go", keywords: ["history", "changes"], run: () => goNav("activity") },
       { id: "nav-devnotes", label: "Go to Developer notes", icon: "⌘", section: "Go", keywords: ["docs", "architecture", "claude", "prompt", "readme"], run: () => goNav("devnotes") },
+      { id: "nav-levels", label: "Go to Levels", icon: "▲", section: "Go", keywords: ["level", "progression", "difficulty", "stages"], run: () => goNav("levels") },
       { id: "act-newpack", label: "Create new pack", icon: "＋", section: "Action", keywords: ["add pack"], run: () => setEditPack({}) },
       { id: "act-import", label: "Import packs from JSON", icon: "⭳", section: "Action", keywords: ["upload"], run: onImportFile },
       { id: "act-export", label: "Export everything to JSON", icon: "⭱", section: "Action", keywords: ["download", "backup"], run: exportJSON },
@@ -3238,6 +3414,7 @@ function App() {
                   <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 60 }} />
                   <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", background: C.panel, borderRadius: R.md, border: "1px solid " + C.line, boxShadow: SH.lg, zIndex: 61, minWidth: 210, overflow: "hidden" }}>
                     <button onClick={() => { goNav("health"); }} style={menuItem}>◉ Content health</button>
+                    <button onClick={() => { goNav("levels"); }} style={{ ...menuItem, borderTop: "1px solid " + C.line }}>▲ Levels</button>
                     <button onClick={() => { goNav("activity"); }} style={{ ...menuItem, borderTop: "1px solid " + C.line }}>≡ Activity log</button>
                     <button onClick={() => { goNav("devnotes"); }} style={{ ...menuItem, borderTop: "1px solid " + C.line }}>⌘ Developer notes</button>
                     <div style={{ padding: "10px 12px", borderTop: "1px solid " + C.line }}><ThemeToggle theme={theme} /></div>
@@ -3252,15 +3429,17 @@ function App() {
 
         <main className="pm-main" style={{ flex: 1, paddingBottom: bp.isPhone ? 90 : 60 }}>
           {active ? (
-            <PackDetail pack={active} onBack={closePack} refreshPacks={reloadPacks} onEditPack={setEditPack} />
+            <PackDetail pack={active} levels={levels} onBack={closePack} refreshPacks={reloadPacks} onEditPack={setEditPack} />
           ) : nav === "dashboard" ? (
             <Dashboard packs={packs} onOpenPack={goPack} onGoLibrary={() => goNav("library")} onGoQuestions={() => goNav("questions")} onNewPack={() => setEditPack({})} />
           ) : nav === "library" ? (
-            <Library packs={packs} loading={packsState.loading} error={packsState.error} reload={reloadPacks}
+            <Library packs={packs} levels={levels} loading={packsState.loading} error={packsState.error} reload={reloadPacks}
               onOpen={goPack} onNew={() => setEditPack({})} onEdit={setEditPack} onExport={exportJSON} onImportFile={onImportFile}
               onDelete={deletePack} onClone={setClonePack} onReorder={reorderPacks} />
           ) : nav === "questions" ? (
-            <AllQuestions onOpenPack={openPackById} />
+            <AllQuestions onOpenPack={openPackById} levels={levels} />
+          ) : nav === "levels" ? (
+            <LevelsView />
           ) : nav === "health" ? (
             <HealthView onOpenPack={openPackById} />
           ) : nav === "publish" ? (
@@ -3286,7 +3465,7 @@ function App() {
       </div>
 
       <Modal open={editPack !== null} onClose={() => setEditPack(null)} labelledBy="pm-pack-title">
-        {editPack !== null && <PackEditor pack={editPack.id ? editPack : null} onSave={savePack} onClose={() => setEditPack(null)} />}
+        {editPack !== null && <PackEditor pack={editPack.id ? editPack : null} levels={levels} onSave={savePack} onClose={() => setEditPack(null)} />}
       </Modal>
       <Modal open={clonePack !== null} onClose={() => setClonePack(null)}>
         {clonePack !== null && <CloneDialog pack={clonePack} onClone={doClonePack} onClose={() => setClonePack(null)} />}
