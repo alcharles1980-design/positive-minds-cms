@@ -117,6 +117,27 @@ const STATUS_STYLES = {
 const slugify = (s) =>
   s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
+// --- responsive breakpoint hook ----------------------------
+// Returns { w, isPhone, isTablet, isDesktop } and re-renders on resize/rotate.
+const useBreakpoint = () => {
+  const [w, setW] = useState(typeof window !== "undefined" ? window.innerWidth : 1200);
+  useEffect(() => {
+    let raf;
+    const onResize = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => setW(window.innerWidth));
+    };
+    window.addEventListener("resize", onResize);
+    window.addEventListener("orientationchange", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("orientationchange", onResize);
+      cancelAnimationFrame(raf);
+    };
+  }, []);
+  return { w, isPhone: w < 640, isTablet: w >= 640 && w < 1024, isDesktop: w >= 1024 };
+};
+
 // preview a template with the answer blanked
 const renderPreview = (template, answer, altAnswer, letters, difficulty) => {
   const word = answer || "____";
@@ -202,13 +223,13 @@ const Select = (p) => <select {...p} style={{ ...inputStyle, ...p.style, appeara
 const Modal = ({ open, onClose, children, width = 560 }) => {
   if (!open) return null;
   return (
-    <div onClick={onClose} style={{
+    <div className="pm-modal-backdrop" onClick={onClose} style={{
       position: "fixed", inset: 0, background: "rgba(28,26,46,0.45)", zIndex: 100,
-      display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "6vh 20px 20px",
+      display: "flex", justifyContent: "center",
       backdropFilter: "blur(2px)", overflowY: "auto",
     }}>
-      <div onClick={(e) => e.stopPropagation()} style={{
-        background: T.panel, borderRadius: 18, width: "100%", maxWidth: width,
+      <div className="pm-modal-card" onClick={(e) => e.stopPropagation()} style={{
+        background: T.panel, width: "100%", maxWidth: width,
         boxShadow: "0 24px 70px rgba(28,26,46,0.28)", overflow: "hidden",
       }}>{children}</div>
     </div>
@@ -258,7 +279,7 @@ function PackEditor({ pack, onSave, onClose }) {
         <Field label="Pack name">
           <Input value={f.name} onChange={(e) => onName(e.target.value)} placeholder="e.g. Confidence Pack" autoFocus />
         </Field>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <div className="pm-form-2">
           <Field label="Slug" hint="URL-safe id used by the game">
             <Input value={f.slug} onChange={(e) => { setSlugEdited(true); set("slug", slugify(e.target.value)); }} placeholder="confidence" />
           </Field>
@@ -295,7 +316,7 @@ function PackEditor({ pack, onSave, onClose }) {
             ))}
           </div>
         </Field>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, alignItems: "end" }}>
+        <div className="pm-form-2" style={{ alignItems: "end" }}>
           <Field label="Status">
             <Select value={f.status} onChange={(e) => set("status", e.target.value)}>
               <option value="draft">Draft (hidden from game)</option>
@@ -356,7 +377,7 @@ function QuestionEditor({ question, packId, packDifficulty, onSave, onClose }) {
           <Textarea value={f.template} onChange={(e) => set("template", e.target.value)} rows={2} placeholder="I am {blank} when I try something new." autoFocus
             style={{ borderColor: hasBlank ? T.line : T.danger }} />
         </Field>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <div className="pm-form-2">
           <Field label="Answer (primary)" hint="Auto-uppercased">
             <Input value={f.answer} onChange={(e) => set("answer", e.target.value)} placeholder="BRAVE" />
           </Field>
@@ -364,7 +385,7 @@ function QuestionEditor({ question, packId, packDifficulty, onSave, onClose }) {
             <Input value={f.alt_answer} onChange={(e) => set("alt_answer", e.target.value)} placeholder="BOLD" />
           </Field>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <div className="pm-form-2">
           <Field label="Difficulty">
             <Select value={f.difficulty} onChange={(e) => set("difficulty", e.target.value)}>
               <option value="basic">Basic (hide letters)</option>
@@ -527,11 +548,11 @@ function PackDetail({ pack, onBack, refreshPacks }) {
       </div>
 
       {/* question toolbar */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+      <div className="pm-toolbar" style={{ marginBottom: 16 }}>
         <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: T.ink }}>Question bank</h3>
-        <div style={{ flex: 1 }} />
-        <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search questions…" style={{ width: 200, padding: "8px 12px" }} />
-        <Select value={qFilter} onChange={(e) => setQFilter(e.target.value)} style={{ width: 140, padding: "8px 12px" }}>
+        <div className="pm-grow" />
+        <Input value={search} onChange={(e) => setSearch(e.target.value)} className="pm-search" placeholder="Search questions…" style={{ padding: "8px 12px" }} />
+        <Select value={qFilter} onChange={(e) => setQFilter(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
           <option value="all">All levels</option>
           <option value="basic">Basic</option>
           <option value="advanced">Advanced</option>
@@ -555,14 +576,14 @@ function PackDetail({ pack, onBack, refreshPacks }) {
           {shown.map((q) => {
             const pv = renderPreview(q.template, q.answer, q.alt_answer, q.letters_hidden, q.difficulty);
             return (
-              <div key={q.id} style={{ background: T.panel, borderRadius: 12, padding: "14px 18px", border: "1px solid " + T.line, display: "flex", alignItems: "center", gap: 16, opacity: q.status === "active" ? 1 : 0.55 }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
+              <div key={q.id} className="pm-qrow" style={{ background: T.panel, borderRadius: 12, padding: "14px 18px", border: "1px solid " + T.line, opacity: q.status === "active" ? 1 : 0.55 }}>
+                <div className="pm-qrow-main" style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 15, color: T.ink, fontWeight: 500 }}>{pv.sentence}</div>
                   <div style={{ fontSize: 13, color: T.spine, fontWeight: 700, marginTop: 3 }}>→ {pv.opts}</div>
                 </div>
                 <Pill tone="muted">{q.difficulty}</Pill>
                 <button onClick={() => toggleQ(q)} title="Toggle active" style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}><Badge kind={q.status} /></button>
-                <div style={{ display: "flex", gap: 6 }}>
+                <div className="pm-qrow-actions">
                   <Btn variant="ghost" size="sm" onClick={() => setQEdit(q)}>Edit</Btn>
                   <Btn variant="danger" size="sm" onClick={() => delQ(q.id)}>Delete</Btn>
                 </div>
@@ -610,7 +631,7 @@ function Library({ packs, loading, onOpen, onNew, onEdit, onExport, onDelete }) 
   return (
     <div>
       {/* stat strip */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14, marginBottom: 24 }}>
+      <div className="pm-stats" style={{ marginBottom: 24 }}>
         {[
           { n: totals.packs, l: "Packs", c: T.spine },
           { n: totals.published, l: "Published", c: T.good },
@@ -625,17 +646,17 @@ function Library({ packs, loading, onOpen, onNew, onEdit, onExport, onDelete }) 
       </div>
 
       {/* toolbar */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18, flexWrap: "wrap" }}>
+      <div className="pm-toolbar" style={{ marginBottom: 18 }}>
         <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: T.ink }}>Pack library</h2>
-        <div style={{ flex: 1 }} />
-        <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search packs…" style={{ width: 200, padding: "8px 12px" }} />
-        <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ width: 150, padding: "8px 12px" }}>
+        <div className="pm-grow" />
+        <Input value={search} onChange={(e) => setSearch(e.target.value)} className="pm-search" placeholder="Search packs…" style={{ padding: "8px 12px" }} />
+        <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ minWidth: 140, padding: "8px 12px" }}>
           <option value="all">All statuses</option>
           <option value="published">Published</option>
           <option value="draft">Draft</option>
           <option value="archived">Archived</option>
         </Select>
-        <Select value={diffFilter} onChange={(e) => setDiffFilter(e.target.value)} style={{ width: 140, padding: "8px 12px" }}>
+        <Select value={diffFilter} onChange={(e) => setDiffFilter(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
           <option value="all">All levels</option>
           <option value="basic">Basic</option>
           <option value="advanced">Advanced</option>
@@ -656,7 +677,7 @@ function Library({ packs, loading, onOpen, onNew, onEdit, onExport, onDelete }) 
           {(packs || []).length === 0 && <Btn onClick={onNew}>+ Create first pack</Btn>}
         </div>
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 16 }}>
+        <div className="pm-pack-grid">
           {shown.map((p) => (
             <div key={p.id} onClick={() => onOpen(p)} style={{
               background: T.panel, borderRadius: 16, border: "1px solid " + T.line, cursor: "pointer",
@@ -675,7 +696,7 @@ function Library({ packs, loading, onOpen, onNew, onEdit, onExport, onDelete }) 
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 14, paddingTop: 14, borderTop: "1px solid " + T.line }}>
                   <Pill>{p.difficulty}</Pill>
                   {p.is_custom && <Pill tone="muted">custom</Pill>}
-                  <div style={{ flex: 1 }} />
+                  <div className="pm-grow" />
                   <span style={{ fontSize: 13, color: T.ink, fontWeight: 700 }}>{p.active_questions || 0}</span>
                   <span style={{ fontSize: 12, color: T.faint }}>/ {p.total_questions || 0} Qs</span>
                 </div>
@@ -778,12 +799,15 @@ function ChangePassword({ onClose, onDone }) {
 }
 
 const hdrBtn = { background: "none", border: "1px solid " + T.line, borderRadius: 9, padding: "8px 14px", fontSize: 13, fontWeight: 600, color: T.sub, cursor: "pointer", fontFamily: "inherit" };
+const menuItem = { display: "block", width: "100%", textAlign: "left", background: "none", border: "none", padding: "12px 16px", fontSize: 14, fontWeight: 600, color: T.ink, cursor: "pointer", fontFamily: "inherit" };
 
 // ============================================================
 // Root app
 // ============================================================
 export default function App() {
+  const bp = useBreakpoint();
   const [authed, setAuthed] = useState(() => !!session.load());
+  const [menuOpen, setMenuOpen] = useState(false);
   const [packs, setPacks] = useState(null);
   const [loading, setLoading] = useState(true);
   const [active, setActive] = useState(null);   // pack being viewed
@@ -889,26 +913,112 @@ export default function App() {
 
   return (
     <div style={{ minHeight: "100vh", background: T.bg, fontFamily: "'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", color: T.ink }}>
-      <style>{`@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800;900&display=swap');
-        *{box-sizing:border-box} button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid ${T.spine};outline-offset:1px}
-        @media (max-width:720px){.pm-stats{grid-template-columns:repeat(2,1fr)!important}}`}</style>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800;900&display=swap');
+        *{box-sizing:border-box}
+        html{ -webkit-text-size-adjust:100%; }
+        button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid ${T.spine};outline-offset:1px}
+
+        /* ---- Responsive containers ---- */
+        .pm-shell{ max-width:1120px; margin:0 auto; padding:14px 24px; }
+        .pm-main{ max-width:1120px; margin:0 auto; padding:28px 24px 96px; }
+
+        /* ---- Modal: centered dialog default, bottom-sheet on phones ---- */
+        .pm-modal-backdrop{ align-items:flex-start; padding:6vh 20px 20px; }
+        .pm-modal-card{ border-radius:18px; }
+
+        /* ---- Grids that reflow ---- */
+        .pm-stats{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
+        .pm-pack-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:16px; }
+        .pm-form-2{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+
+        /* ---- Toolbars ---- */
+        .pm-toolbar{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+        .pm-grow{ flex:1; }
+        .pm-search{ width:200px; }
+        .pm-qrow{ display:flex; align-items:center; gap:16px; }
+        .pm-qrow-actions{ display:flex; gap:6px; }
+
+        /* ================= TABLET ( < 1024px ) ================= */
+        @media (max-width:1023px){
+          .pm-shell{ padding:12px 18px; }
+          .pm-main{ padding:22px 18px 96px; }
+          .pm-pack-grid{ grid-template-columns:repeat(2,1fr); }
+        }
+
+        /* ================= PHONE ( < 640px ) ================= */
+        @media (max-width:639px){
+          .pm-shell{ padding:12px 14px; }
+          .pm-main{ padding:16px 14px 96px; }
+
+          .pm-stats{ grid-template-columns:repeat(2,1fr); gap:10px; }
+          .pm-pack-grid{ grid-template-columns:1fr; gap:12px; }
+          .pm-form-2{ grid-template-columns:1fr; gap:14px; }
+
+          /* toolbars stack, search + controls go full width */
+          .pm-toolbar{ gap:10px; }
+          .pm-toolbar > *{ flex:1 1 auto; }
+          .pm-search{ width:100%; order:-1; }
+          .pm-grow{ flex-basis:100%; height:0; }
+
+          /* question rows stack vertically */
+          .pm-qrow{ flex-wrap:wrap; gap:10px; }
+          .pm-qrow-main{ flex-basis:100%; }
+          .pm-qrow-actions{ margin-left:auto; }
+
+          /* Modal becomes a bottom sheet */
+          .pm-modal-backdrop{ align-items:flex-end; padding:0; }
+          .pm-modal-card{
+            max-width:100% !important; border-radius:20px 20px 0 0;
+            max-height:94vh; overflow-y:auto;
+            animation:pm-sheet .22s ease-out;
+          }
+          @keyframes pm-sheet{ from{ transform:translateY(100%);} to{ transform:translateY(0);} }
+
+          /* larger touch targets */
+          input,select,textarea{ font-size:16px !important; } /* prevents iOS zoom-on-focus */
+        }
+
+        @media (prefers-reduced-motion:reduce){
+          .pm-modal-card{ animation:none !important; }
+          *{ scroll-behavior:auto !important; }
+        }
+      `}</style>
 
       {/* top bar */}
       <header style={{ background: T.panel, borderBottom: "1px solid " + T.line, position: "sticky", top: 0, zIndex: 50 }}>
-        <div style={{ maxWidth: 1120, margin: "0 auto", padding: "14px 24px", display: "flex", alignItems: "center", gap: 14 }}>
-          <div style={{ width: 38, height: 38, borderRadius: 11, background: `linear-gradient(135deg, ${T.spine}, #9B7BF0)`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, boxShadow: "0 4px 12px rgba(108,76,224,0.35)" }}>🧠</div>
-          <div>
-            <div style={{ fontSize: 16.5, fontWeight: 800, letterSpacing: -0.2 }}>Positive Minds</div>
-            <div style={{ fontSize: 11.5, color: T.faint, fontWeight: 600, letterSpacing: 0.3, marginTop: -1 }}>PACK CONTENT MANAGER</div>
+        <div className="pm-shell" style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ width: 38, height: 38, borderRadius: 11, background: `linear-gradient(135deg, ${T.spine}, #9B7BF0)`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, boxShadow: "0 4px 12px rgba(108,76,224,0.35)", flexShrink: 0 }}>🧠</div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 16.5, fontWeight: 800, letterSpacing: -0.2, whiteSpace: "nowrap" }}>Positive Minds</div>
+            <div style={{ fontSize: 11.5, color: T.faint, fontWeight: 600, letterSpacing: 0.3, marginTop: -1, whiteSpace: "nowrap" }}>{bp.isPhone ? "PACK MANAGER" : "PACK CONTENT MANAGER"}</div>
           </div>
-          <div style={{ flex: 1 }} />
-          <button onClick={() => { if (active) closePack(); else loadPacks(); }} style={hdrBtn}>↻ Refresh</button>
-          <button onClick={() => setChangePw(true)} style={hdrBtn}>Password</button>
-          <button onClick={() => { auth.logout(); setAuthed(false); setActive(null); }} style={{ ...hdrBtn, color: T.danger, borderColor: T.dangerSoft }}>Sign out</button>
+          <div className="pm-grow" />
+          {bp.isPhone ? (
+            <div style={{ position: "relative" }}>
+              <button onClick={() => setMenuOpen((o) => !o)} aria-label="Menu" style={{ ...hdrBtn, padding: "8px 12px", fontSize: 18, lineHeight: 1 }}>⋯</button>
+              {menuOpen && (
+                <>
+                  <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 60 }} />
+                  <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", background: T.panel, borderRadius: 12, border: "1px solid " + T.line, boxShadow: "0 12px 32px rgba(28,26,46,0.18)", zIndex: 61, minWidth: 170, overflow: "hidden" }}>
+                    <button onClick={() => { setMenuOpen(false); if (active) closePack(); else loadPacks(); }} style={menuItem}>↻ Refresh</button>
+                    <button onClick={() => { setMenuOpen(false); setChangePw(true); }} style={{ ...menuItem, borderTop: "1px solid " + T.line }}>Change password</button>
+                    <button onClick={() => { setMenuOpen(false); auth.logout(); setAuthed(false); setActive(null); }} style={{ ...menuItem, borderTop: "1px solid " + T.line, color: T.danger }}>Sign out</button>
+                  </div>
+                </>
+              )}
+            </div>
+          ) : (
+            <>
+              <button onClick={() => { if (active) closePack(); else loadPacks(); }} style={hdrBtn}>↻ Refresh</button>
+              <button onClick={() => setChangePw(true)} style={hdrBtn}>Password</button>
+              <button onClick={() => { auth.logout(); setAuthed(false); setActive(null); }} style={{ ...hdrBtn, color: T.danger, borderColor: T.dangerSoft }}>Sign out</button>
+            </>
+          )}
         </div>
       </header>
 
-      <main className="pm-main" style={{ maxWidth: 1120, margin: "0 auto", padding: "28px 24px 80px" }}>
+      <main className="pm-main">
         {connErr ? (
           <div style={{ background: T.dangerSoft, border: "1px solid " + T.danger, borderRadius: 14, padding: 24, color: T.danger }}>
             <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>Couldn't reach the database</div>

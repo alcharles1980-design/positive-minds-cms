@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <title>Positive Minds — Pack Content Manager</title>
 <meta name="description" content="Content management for the Positive Minds CBMT word-game pack library." />
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧠%3C/text%3E%3C/svg%3E" />
@@ -201,6 +201,32 @@ const STATUS_STYLES = {
   }
 };
 const slugify = s => s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+
+// --- responsive breakpoint hook ----------------------------
+// Returns { w, isPhone, isTablet, isDesktop } and re-renders on resize/rotate.
+const useBreakpoint = () => {
+  const [w, setW] = useState(typeof window !== "undefined" ? window.innerWidth : 1200);
+  useEffect(() => {
+    let raf;
+    const onResize = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => setW(window.innerWidth));
+    };
+    window.addEventListener("resize", onResize);
+    window.addEventListener("orientationchange", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("orientationchange", onResize);
+      cancelAnimationFrame(raf);
+    };
+  }, []);
+  return {
+    w,
+    isPhone: w < 640,
+    isTablet: w >= 640 && w < 1024,
+    isDesktop: w >= 1024
+  };
+};
 
 // preview a template with the answer blanked
 const renderPreview = (template, answer, altAnswer, letters, difficulty) => {
@@ -406,6 +432,7 @@ const Modal = ({
 }) => {
   if (!open) return null;
   return /*#__PURE__*/React.createElement("div", {
+    className: "pm-modal-backdrop",
     onClick: onClose,
     style: {
       position: "fixed",
@@ -413,17 +440,15 @@ const Modal = ({
       background: "rgba(28,26,46,0.45)",
       zIndex: 100,
       display: "flex",
-      alignItems: "flex-start",
       justifyContent: "center",
-      padding: "6vh 20px 20px",
       backdropFilter: "blur(2px)",
       overflowY: "auto"
     }
   }, /*#__PURE__*/React.createElement("div", {
+    className: "pm-modal-card",
     onClick: e => e.stopPropagation(),
     style: {
       background: T.panel,
-      borderRadius: 18,
       width: "100%",
       maxWidth: width,
       boxShadow: "0 24px 70px rgba(28,26,46,0.28)",
@@ -521,11 +546,7 @@ function PackEditor({
     placeholder: "e.g. Confidence Pack",
     autoFocus: true
   })), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 16
-    }
+    className: "pm-form-2"
   }, /*#__PURE__*/React.createElement(Field, {
     label: "Slug",
     hint: "URL-safe id used by the game"
@@ -597,10 +618,8 @@ function PackEditor({
       boxShadow: f.color === c ? "0 0 0 2px #fff inset" : "none"
     }
   })))), /*#__PURE__*/React.createElement("div", {
+    className: "pm-form-2",
     style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 16,
       alignItems: "end"
     }
   }, /*#__PURE__*/React.createElement(Field, {
@@ -752,11 +771,7 @@ function QuestionEditor({
       borderColor: hasBlank ? T.line : T.danger
     }
   })), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 16
-    }
+    className: "pm-form-2"
   }, /*#__PURE__*/React.createElement(Field, {
     label: "Answer (primary)",
     hint: "Auto-uppercased"
@@ -772,11 +787,7 @@ function QuestionEditor({
     onChange: e => set("alt_answer", e.target.value),
     placeholder: "BOLD"
   }))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 16
-    }
+    className: "pm-form-2"
   }, /*#__PURE__*/React.createElement(Field, {
     label: "Difficulty"
   }, /*#__PURE__*/React.createElement(Select, {
@@ -1184,12 +1195,9 @@ function PackDetail({
       borderRadius: 5
     }
   }, pack.slug)))), /*#__PURE__*/React.createElement("div", {
+    className: "pm-toolbar",
     style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 12,
-      marginBottom: 16,
-      flexWrap: "wrap"
+      marginBottom: 16
     }
   }, /*#__PURE__*/React.createElement("h3", {
     style: {
@@ -1199,22 +1207,20 @@ function PackDetail({
       color: T.ink
     }
   }, "Question bank"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: 1
-    }
+    className: "pm-grow"
   }), /*#__PURE__*/React.createElement(Input, {
     value: search,
     onChange: e => setSearch(e.target.value),
+    className: "pm-search",
     placeholder: "Search questions…",
     style: {
-      width: 200,
       padding: "8px 12px"
     }
   }), /*#__PURE__*/React.createElement(Select, {
     value: qFilter,
     onChange: e => setQFilter(e.target.value),
     style: {
-      width: 140,
+      minWidth: 130,
       padding: "8px 12px"
     }
   }, /*#__PURE__*/React.createElement("option", {
@@ -1272,17 +1278,16 @@ function PackDetail({
     const pv = renderPreview(q.template, q.answer, q.alt_answer, q.letters_hidden, q.difficulty);
     return /*#__PURE__*/React.createElement("div", {
       key: q.id,
+      className: "pm-qrow",
       style: {
         background: T.panel,
         borderRadius: 12,
         padding: "14px 18px",
         border: "1px solid " + T.line,
-        display: "flex",
-        alignItems: "center",
-        gap: 16,
         opacity: q.status === "active" ? 1 : 0.55
       }
     }, /*#__PURE__*/React.createElement("div", {
+      className: "pm-qrow-main",
       style: {
         flex: 1,
         minWidth: 0
@@ -1314,10 +1319,7 @@ function PackDetail({
     }, /*#__PURE__*/React.createElement(Badge, {
       kind: q.status
     })), /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: "flex",
-        gap: 6
-      }
+      className: "pm-qrow-actions"
     }, /*#__PURE__*/React.createElement(Btn, {
       variant: "ghost",
       size: "sm",
@@ -1377,10 +1379,8 @@ function Library({
     };
   }, [packs]);
   return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "pm-stats",
     style: {
-      display: "grid",
-      gridTemplateColumns: "repeat(4,1fr)",
-      gap: 14,
       marginBottom: 24
     }
   }, [{
@@ -1422,12 +1422,9 @@ function Library({
       fontWeight: 500
     }
   }, s.l)))), /*#__PURE__*/React.createElement("div", {
+    className: "pm-toolbar",
     style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 12,
-      marginBottom: 18,
-      flexWrap: "wrap"
+      marginBottom: 18
     }
   }, /*#__PURE__*/React.createElement("h2", {
     style: {
@@ -1437,22 +1434,20 @@ function Library({
       color: T.ink
     }
   }, "Pack library"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: 1
-    }
+    className: "pm-grow"
   }), /*#__PURE__*/React.createElement(Input, {
     value: search,
     onChange: e => setSearch(e.target.value),
+    className: "pm-search",
     placeholder: "Search packs…",
     style: {
-      width: 200,
       padding: "8px 12px"
     }
   }), /*#__PURE__*/React.createElement(Select, {
     value: statusFilter,
     onChange: e => setStatusFilter(e.target.value),
     style: {
-      width: 150,
+      minWidth: 140,
       padding: "8px 12px"
     }
   }, /*#__PURE__*/React.createElement("option", {
@@ -1467,7 +1462,7 @@ function Library({
     value: diffFilter,
     onChange: e => setDiffFilter(e.target.value),
     style: {
-      width: 140,
+      minWidth: 130,
       padding: "8px 12px"
     }
   }, /*#__PURE__*/React.createElement("option", {
@@ -1519,11 +1514,7 @@ function Library({
   }, (packs || []).length === 0 ? "Create your first pack to get started." : "Try adjusting your filters."), (packs || []).length === 0 && /*#__PURE__*/React.createElement(Btn, {
     onClick: onNew
   }, "+ Create first pack")) : /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "grid",
-      gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))",
-      gap: 16
-    }
+    className: "pm-pack-grid"
   }, shown.map(p => /*#__PURE__*/React.createElement("div", {
     key: p.id,
     onClick: () => onOpen(p),
@@ -1605,9 +1596,7 @@ function Library({
   }, /*#__PURE__*/React.createElement(Pill, null, p.difficulty), p.is_custom && /*#__PURE__*/React.createElement(Pill, {
     tone: "muted"
   }, "custom"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: 1
-    }
+    className: "pm-grow"
   }), /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: 13,
@@ -1876,12 +1865,27 @@ const hdrBtn = {
   cursor: "pointer",
   fontFamily: "inherit"
 };
+const menuItem = {
+  display: "block",
+  width: "100%",
+  textAlign: "left",
+  background: "none",
+  border: "none",
+  padding: "12px 16px",
+  fontSize: 14,
+  fontWeight: 600,
+  color: T.ink,
+  cursor: "pointer",
+  fontFamily: "inherit"
+};
 
 // ============================================================
 // Root app
 // ============================================================
 function App() {
+  const bp = useBreakpoint();
   const [authed, setAuthed] = useState(() => !!session.load());
+  const [menuOpen, setMenuOpen] = useState(false);
   const [packs, setPacks] = useState(null);
   const [loading, setLoading] = useState(true);
   const [active, setActive] = useState(null); // pack being viewed
@@ -2025,9 +2029,77 @@ function App() {
       fontFamily: "'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
       color: T.ink
     }
-  }, /*#__PURE__*/React.createElement("style", null, `@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800;900&display=swap');
-        *{box-sizing:border-box} button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid ${T.spine};outline-offset:1px}
-        @media (max-width:720px){.pm-stats{grid-template-columns:repeat(2,1fr)!important}}`), /*#__PURE__*/React.createElement("header", {
+  }, /*#__PURE__*/React.createElement("style", null, `
+        @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800;900&display=swap');
+        *{box-sizing:border-box}
+        html{ -webkit-text-size-adjust:100%; }
+        button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid ${T.spine};outline-offset:1px}
+
+        /* ---- Responsive containers ---- */
+        .pm-shell{ max-width:1120px; margin:0 auto; padding:14px 24px; }
+        .pm-main{ max-width:1120px; margin:0 auto; padding:28px 24px 96px; }
+
+        /* ---- Modal: centered dialog default, bottom-sheet on phones ---- */
+        .pm-modal-backdrop{ align-items:flex-start; padding:6vh 20px 20px; }
+        .pm-modal-card{ border-radius:18px; }
+
+        /* ---- Grids that reflow ---- */
+        .pm-stats{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
+        .pm-pack-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:16px; }
+        .pm-form-2{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+
+        /* ---- Toolbars ---- */
+        .pm-toolbar{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+        .pm-grow{ flex:1; }
+        .pm-search{ width:200px; }
+        .pm-qrow{ display:flex; align-items:center; gap:16px; }
+        .pm-qrow-actions{ display:flex; gap:6px; }
+
+        /* ================= TABLET ( < 1024px ) ================= */
+        @media (max-width:1023px){
+          .pm-shell{ padding:12px 18px; }
+          .pm-main{ padding:22px 18px 96px; }
+          .pm-pack-grid{ grid-template-columns:repeat(2,1fr); }
+        }
+
+        /* ================= PHONE ( < 640px ) ================= */
+        @media (max-width:639px){
+          .pm-shell{ padding:12px 14px; }
+          .pm-main{ padding:16px 14px 96px; }
+
+          .pm-stats{ grid-template-columns:repeat(2,1fr); gap:10px; }
+          .pm-pack-grid{ grid-template-columns:1fr; gap:12px; }
+          .pm-form-2{ grid-template-columns:1fr; gap:14px; }
+
+          /* toolbars stack, search + controls go full width */
+          .pm-toolbar{ gap:10px; }
+          .pm-toolbar > *{ flex:1 1 auto; }
+          .pm-search{ width:100%; order:-1; }
+          .pm-grow{ flex-basis:100%; height:0; }
+
+          /* question rows stack vertically */
+          .pm-qrow{ flex-wrap:wrap; gap:10px; }
+          .pm-qrow-main{ flex-basis:100%; }
+          .pm-qrow-actions{ margin-left:auto; }
+
+          /* Modal becomes a bottom sheet */
+          .pm-modal-backdrop{ align-items:flex-end; padding:0; }
+          .pm-modal-card{
+            max-width:100% !important; border-radius:20px 20px 0 0;
+            max-height:94vh; overflow-y:auto;
+            animation:pm-sheet .22s ease-out;
+          }
+          @keyframes pm-sheet{ from{ transform:translateY(100%);} to{ transform:translateY(0);} }
+
+          /* larger touch targets */
+          input,select,textarea{ font-size:16px !important; } /* prevents iOS zoom-on-focus */
+        }
+
+        @media (prefers-reduced-motion:reduce){
+          .pm-modal-card{ animation:none !important; }
+          *{ scroll-behavior:auto !important; }
+        }
+      `), /*#__PURE__*/React.createElement("header", {
     style: {
       background: T.panel,
       borderBottom: "1px solid " + T.line,
@@ -2036,13 +2108,11 @@ function App() {
       zIndex: 50
     }
   }, /*#__PURE__*/React.createElement("div", {
+    className: "pm-shell",
     style: {
-      maxWidth: 1120,
-      margin: "0 auto",
-      padding: "14px 24px",
       display: "flex",
       alignItems: "center",
-      gap: 14
+      gap: 12
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -2054,13 +2124,19 @@ function App() {
       alignItems: "center",
       justifyContent: "center",
       fontSize: 20,
-      boxShadow: "0 4px 12px rgba(108,76,224,0.35)"
+      boxShadow: "0 4px 12px rgba(108,76,224,0.35)",
+      flexShrink: 0
     }
-  }, "🧠"), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+  }, "🧠"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 16.5,
       fontWeight: 800,
-      letterSpacing: -0.2
+      letterSpacing: -0.2,
+      whiteSpace: "nowrap"
     }
   }, "Positive Minds"), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -2068,13 +2144,72 @@ function App() {
       color: T.faint,
       fontWeight: 600,
       letterSpacing: 0.3,
-      marginTop: -1
+      marginTop: -1,
+      whiteSpace: "nowrap"
     }
-  }, "PACK CONTENT MANAGER")), /*#__PURE__*/React.createElement("div", {
+  }, bp.isPhone ? "PACK MANAGER" : "PACK CONTENT MANAGER")), /*#__PURE__*/React.createElement("div", {
+    className: "pm-grow"
+  }), bp.isPhone ? /*#__PURE__*/React.createElement("div", {
     style: {
-      flex: 1
+      position: "relative"
     }
-  }), /*#__PURE__*/React.createElement("button", {
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setMenuOpen(o => !o),
+    "aria-label": "Menu",
+    style: {
+      ...hdrBtn,
+      padding: "8px 12px",
+      fontSize: 18,
+      lineHeight: 1
+    }
+  }, "⋯"), menuOpen && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    onClick: () => setMenuOpen(false),
+    style: {
+      position: "fixed",
+      inset: 0,
+      zIndex: 60
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "absolute",
+      right: 0,
+      top: "calc(100% + 6px)",
+      background: T.panel,
+      borderRadius: 12,
+      border: "1px solid " + T.line,
+      boxShadow: "0 12px 32px rgba(28,26,46,0.18)",
+      zIndex: 61,
+      minWidth: 170,
+      overflow: "hidden"
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setMenuOpen(false);
+      if (active) closePack();else loadPacks();
+    },
+    style: menuItem
+  }, "↻ Refresh"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setMenuOpen(false);
+      setChangePw(true);
+    },
+    style: {
+      ...menuItem,
+      borderTop: "1px solid " + T.line
+    }
+  }, "Change password"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setMenuOpen(false);
+      auth.logout();
+      setAuthed(false);
+      setActive(null);
+    },
+    style: {
+      ...menuItem,
+      borderTop: "1px solid " + T.line,
+      color: T.danger
+    }
+  }, "Sign out")))) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       if (active) closePack();else loadPacks();
     },
@@ -2093,13 +2228,8 @@ function App() {
       color: T.danger,
       borderColor: T.dangerSoft
     }
-  }, "Sign out"))), /*#__PURE__*/React.createElement("main", {
-    className: "pm-main",
-    style: {
-      maxWidth: 1120,
-      margin: "0 auto",
-      padding: "28px 24px 80px"
-    }
+  }, "Sign out")))), /*#__PURE__*/React.createElement("main", {
+    className: "pm-main"
   }, connErr ? /*#__PURE__*/React.createElement("div", {
     style: {
       background: T.dangerSoft,
