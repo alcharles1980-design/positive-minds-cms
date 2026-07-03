@@ -1,0 +1,8 @@
+name = "positive-minds-cms"
+compatibility_date = "2026-07-03"
+
+# Serve ONLY the public/ directory as static assets.
+# This guarantees .git, README.md, SETUP.md, and workflow files
+# are never uploaded or exposed.
+[assets]
+directory = "./public"
