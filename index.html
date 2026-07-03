@@ -1489,7 +1489,11 @@ const projectRow = (row, fields, vm) => {
 const buildOutput = (spec, packs, byPack, keyField = "id") => {
   const vm = spec.value_maps || {};
   const qKey = spec.questions_key || "questions";
-  const projectQ = q => projectRow(q, spec.question_fields, vm);
+  const projectQ = q => {
+    const base = projectRow(q, spec.question_fields, vm);
+    if (spec.expand_levels && q.levels) base.levels = q.levels;
+    return base;
+  };
   const k = p => p[keyField];
   if (spec.structure === "flat") {
     const arr = [];
@@ -1542,7 +1546,7 @@ const withMeta = (spec, body, counts) => {
 
 // Field names available to map from
 const PACK_SOURCE_FIELDS = ["slug", "name", "emoji", "description", "color", "difficulty", "status", "is_custom", "tags"];
-const QUESTION_SOURCE_FIELDS = ["template", "answer", "alt_answer", "letters_hidden", "difficulty", "status", "notes"];
+const QUESTION_SOURCE_FIELDS = ["template", "answer", "alt_answer", "letters_hidden", "difficulty", "status", "notes", "level", "effective_level", "letter_position", "letter_grouping"];
 const emptySpec = () => ({
   structure: "nested",
   root_key: "packs",
@@ -1600,13 +1604,40 @@ const db_sync = {
 };
 
 // Fetch all content for building an export (paginated — no silent 1000 cap).
-const fetchAllContent = async (filters = {}) => {
+const fetchAllContent = async (filters = {}, opts = {}) => {
   let pQ = "pm_packs?order=sort_order.asc";
   if (filters.status) pQ += `&status=eq.${filters.status}`;
   const packs = await restAll(pQ);
   let qQ = "pm_questions?order=sort_order.asc";
   if (filters.question_status) qQ += `&status=eq.${filters.question_status}`;
   const questions = await restAll(qQ);
+  const packLevelById = {};
+  for (const p of packs) packLevelById[p.id] = p.level || 1;
+
+  // Attach the effective level to every question (question override → pack default).
+  for (const q of questions) q.effective_level = q.level ?? packLevelById[q.pack_id] ?? 1;
+
+  // If the profile wants per-level variants, fetch level defs + overrides and expand.
+  if (opts.expandLevels) {
+    const levels = await restAll("pm_levels?order=level.asc");
+    const overrideRows = await restAll("pm_question_levels?order=level.asc");
+    const ovByQ = {};
+    for (const r of overrideRows) {
+      (ovByQ[r.question_id] = ovByQ[r.question_id] || {})[r.level] = r;
+    }
+    for (const q of questions) {
+      q.levels = buildLevelVariants(q, levels, ovByQ[q.id] || {}).filter(v => v.enabled).map(v => ({
+        level: v.level,
+        level_name: v.name,
+        tier: v.tier,
+        sentence: v.sentence,
+        blank: v.blank,
+        answer: q.answer,
+        alt_answer: q.alt_answer,
+        opts: v.opts
+      }));
+    }
+  }
   const byPack = {};
   for (const q of questions) (byPack[q.pack_id] = byPack[q.pack_id] || []).push(q);
   const packList = packs.filter(p => (byPack[p.id]?.length || 0) > 0 || filters.include_empty);
@@ -1799,7 +1830,9 @@ const fbWriters = {
 // Orchestrate a Firebase sync for a target.
 const runFirebaseSync = async (target, profile) => {
   const cfg = target.config || {};
-  const content = await fetchAllContent(profile.spec.filters || {});
+  const content = await fetchAllContent(profile.spec.filters || {}, {
+    expandLevels: !!profile.spec.expand_levels
+  });
   const spec = {
     ...profile.spec,
     __name: profile.name
@@ -3623,7 +3656,38 @@ function ProfileBuilder({
       color: C.ink,
       fontWeight: 600
     }
-  }, "Include metadata envelope (version, counts, timestamp)"))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionLabel, null, "What to include"), /*#__PURE__*/React.createElement("div", {
+  }, "Include metadata envelope (version, counts, timestamp)")), /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "flex-start",
+      gap: 9,
+      marginTop: S.sm + 2,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: !!spec.expand_levels,
+    onChange: e => setSpecField("expand_levels", e.target.checked),
+    style: {
+      width: 16,
+      height: 16,
+      accentColor: C.brand,
+      marginTop: 2
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13.5,
+      color: C.ink,
+      fontWeight: 600
+    }
+  }, "Expand levels", /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.sub,
+      fontWeight: 500,
+      marginTop: 1
+    }
+  }, "Add a ", /*#__PURE__*/React.createElement("code", null, "levels"), " array to each question with the sentence + blank for all 10 levels, so the game can serve the right difficulty per child.")))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionLabel, null, "What to include"), /*#__PURE__*/React.createElement("div", {
     className: "pm-form-2"
   }, /*#__PURE__*/React.createElement(Field, {
     label: "Pack status"
@@ -4397,6 +4461,8 @@ function PublishHub({
     fetchAllContent({
       status: "published",
       question_status: "active"
+    }, {
+      expandLevels: true
     }).then(setSample).catch(() => {});
   }, []);
   const pendingCount = (packs || []).filter(p => p.has_pending_changes && p.status === "published").length;
@@ -4482,7 +4548,9 @@ function PublishHub({
   const exportFile = async profile => {
     setBusyId(profile.id);
     try {
-      const content = await fetchAllContent(profile.spec.filters || {});
+      const content = await fetchAllContent(profile.spec.filters || {}, {
+        expandLevels: !!profile.spec.expand_levels
+      });
       const spec = {
         ...profile.spec,
         __name: profile.name
@@ -4533,7 +4601,9 @@ function PublishHub({
     }
     setBusyId(profile.id);
     try {
-      const content = await fetchAllContent(profile.spec.filters || {});
+      const content = await fetchAllContent(profile.spec.filters || {}, {
+        expandLevels: !!profile.spec.expand_levels
+      });
       const spec = {
         ...profile.spec,
         __name: profile.name
@@ -5436,6 +5506,12 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Audit fixes:** (1) level data now reaches the game — the export engine + game-feed
+  (v4) attach effective_level to every question and, when a profile enables "Expand levels",
+  add a \`levels\` array with the sentence + blank for all 10 levels (client and edge kept in
+  sync; verified via the feed). (2) pm_clone_pack now copies the pack level, question-level
+  overrides, and pm_question_levels rows (was silently dropping them). (3) NaN guard on the
+  per-level editor's letters_hidden.
 - **Questions are multi-level concepts:** each question auto-renders all 10 levels (same
   affirmation, blank difficulty derived per level via buildLevelVariants). The question bank
   keeps flat rows with a "Levels" expand toggle that reveals every level's version. Any level
@@ -5533,7 +5609,10 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
 - Multi-level concepts: every question renders all 10 levels via buildLevelVariants (question
   + level rules → per-level blank). Overrides live in pm_question_levels (one row per edited
   level; absent = auto-generated). The question-bank row expands to show all variants. Don't
-  duplicate a question into 10 rows — it's ONE row, derived.
+  duplicate a question into 10 rows — it's ONE row, derived. To send levels to the game, a
+  profile sets spec.expand_levels → fetchAllContent({...},{expandLevels:true}) attaches a
+  \`levels\` array; the game-feed edge function mirrors this. If you touch buildLevelVariants or
+  the expand logic, update BOTH engine.jsx and the edge function (parity invariant).
   If you add a column to pm_packs, DROP+recreate pm_pack_overview (it uses p.*).
 - RLS: anon read-only, authenticated full write. Never add anon write policies.
 
@@ -6618,7 +6697,7 @@ function QuestionLevelEditor({
       template: f.template.trim() || null,
       answer: f.answer.trim().toUpperCase() || null,
       alt_answer: f.alt_answer.trim().toUpperCase() || null,
-      letters_hidden: f.letters_hidden === "" ? null : parseInt(f.letters_hidden),
+      letters_hidden: f.letters_hidden === "" || isNaN(parseInt(f.letters_hidden)) ? null : Math.max(0, parseInt(f.letters_hidden)),
       letter_position: f.letter_position || null,
       letter_grouping: f.letter_grouping || null,
       enabled: f.enabled
