@@ -2312,14 +2312,16 @@ function PackDetail({ pack, onBack, refreshPacks, onEditPack }) {
                 const pv = previewQuestion(q.template, q.answer, q.alt_answer, q.letters_hidden, q.difficulty);
                 const selected = sel.has(q.id);
                 return (
-                  <div key={q.id} className="pm-qrow" style={{ background: selected ? C.brandSoft : C.panel, borderRadius: R.md, padding: "12px 16px", border: "1px solid " + (selected ? C.brand : C.line), opacity: q.status === "active" ? 1 : 0.55 }}>
-                    <input type="checkbox" checked={selected} onChange={() => toggleSel(q.id)} style={{ width: 16, height: 16, accentColor: C.brand, flexShrink: 0 }} />
-                    <div className="pm-qrow-main" style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 15, color: C.ink, fontWeight: 500 }}>{pv.sentence}</div>
-                      <div style={{ fontSize: 13, color: C.brandInk, fontWeight: 800, marginTop: 3 }}>→ {pv.opts}</div>
+                  <div key={q.id} className="pm-qrow" style={{ background: selected ? C.brandSoft : C.panel, borderRadius: R.md, border: "1px solid " + (selected ? C.brand : C.line), opacity: q.status === "active" ? 1 : 0.6 }}>
+                    <input type="checkbox" className="pm-qrow-check" checked={selected} onChange={() => toggleSel(q.id)} aria-label="Select question" style={{ width: 18, height: 18, accentColor: C.brand, flexShrink: 0 }} />
+                    <div className="pm-qrow-main">
+                      <div className="pm-qrow-sentence" style={{ color: C.ink, fontWeight: 500 }}>{pv.sentence}</div>
+                      <div style={{ fontSize: 13.5, color: C.brandInk, fontWeight: 800, marginTop: 4 }}>→ {pv.opts}</div>
                     </div>
-                    <Pill tone="muted">{q.difficulty}</Pill>
-                    <button onClick={() => toggleQ(q)} title="Toggle active" style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}><Badge kind={q.status} /></button>
+                    <div className="pm-qrow-meta">
+                      <Pill tone="muted">{q.difficulty}</Pill>
+                      <button onClick={() => toggleQ(q)} title="Toggle active" style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}><Badge kind={q.status} /></button>
+                    </div>
                     <div className="pm-qrow-actions">
                       <Btn variant="ghost" size="sm" onClick={() => setQEdit(q)}>Edit</Btn>
                       <Btn variant="danger" size="sm" onClick={() => delQ(q)}>Delete</Btn>
@@ -2400,17 +2402,19 @@ function AllQuestions({ onOpenPack }) {
               {rows.map(r => {
                 const pv = previewQuestion(r.template, r.answer, r.alt_answer, r.letters_hidden, r.difficulty);
                 return (
-                  <div key={r.id} className="pm-qrow" style={{ background: C.panel, borderRadius: R.md, padding: "12px 16px", border: "1px solid " + C.line, opacity: r.status === "active" ? 1 : 0.6 }}>
-                    <button onClick={() => onOpenPack(r.pack_id)} title={`Open ${r.pack_name}`} style={{ display: "flex", alignItems: "center", gap: 7, background: r.pack_color + "18", border: "none", borderRadius: R.sm, padding: "5px 10px", cursor: "pointer", flexShrink: 0 }}>
+                  <div key={r.id} className="pm-qrow pm-qrow-search" style={{ background: C.panel, borderRadius: R.md, border: "1px solid " + C.line, opacity: r.status === "active" ? 1 : 0.6 }}>
+                    <button className="pm-qrow-pack" onClick={() => onOpenPack(r.pack_id)} title={`Open ${r.pack_name}`} style={{ display: "flex", alignItems: "center", gap: 7, background: r.pack_color + "18", border: "none", borderRadius: R.sm, padding: "6px 10px", cursor: "pointer", flexShrink: 0 }}>
                       <span style={{ fontSize: 15 }}>{r.pack_emoji}</span>
-                      <span style={{ fontSize: 12, fontWeight: 700, color: C.ink2, maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.pack_name}</span>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: C.ink2, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.pack_name}</span>
                     </button>
-                    <div className="pm-qrow-main" style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 15, color: C.ink, fontWeight: 500 }}>{pv.sentence}</div>
-                      <div style={{ fontSize: 13, color: C.brandInk, fontWeight: 800, marginTop: 3 }}>→ {pv.opts}</div>
+                    <div className="pm-qrow-main">
+                      <div className="pm-qrow-sentence" style={{ color: C.ink, fontWeight: 500 }}>{pv.sentence}</div>
+                      <div style={{ fontSize: 13.5, color: C.brandInk, fontWeight: 800, marginTop: 4 }}>→ {pv.opts}</div>
                     </div>
-                    <Pill tone="muted">{r.difficulty}</Pill>
-                    <Badge kind={r.status} />
+                    <div className="pm-qrow-meta">
+                      <Pill tone="muted">{r.difficulty}</Pill>
+                      <Badge kind={r.status} />
+                    </div>
                   </div>
                 );
               })}
@@ -2803,13 +2807,32 @@ function GlobalStyle() {
     .pm-toolbar{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
     .pm-grow{ flex:1; }
     .pm-search{ width:230px; }
-    .pm-qrow{ display:flex; align-items:center; gap:14px; }
-    .pm-qrow-actions{ display:flex; gap:6px; }
+    .pm-qrow{ display:flex; align-items:center; gap:14px; padding:12px 16px; }
+    .pm-qrow-check{ align-self:center; }
+    .pm-qrow-main{ flex:1; min-width:0; }
+    .pm-qrow-sentence{ font-size:15px; line-height:1.4; }
+    .pm-qrow-meta{ display:flex; align-items:center; gap:10px; flex-shrink:0; }
+    .pm-qrow-actions{ display:flex; gap:6px; flex-shrink:0; }
+    .pm-qrow-pack{ flex-shrink:0; }
 
     @media (max-width:1023px){
       .pm-main{ padding:24px 20px; }
       .pm-pack-grid{ grid-template-columns:repeat(2,1fr); }
       .pm-dash-2{ grid-template-columns:1fr !important; }
+      /* Question becomes a content-first card below desktop: sentence on top,
+         meta + actions in a footer bar, checkbox floated to the top-right so it
+         stays out of the reading flow. */
+      .pm-qrow{ display:block; position:relative; padding:15px 16px 13px; }
+      .pm-qrow-check{ position:absolute; top:15px; right:15px; width:20px; height:20px; z-index:1; }
+      .pm-qrow-main{ padding-right:34px; }
+      .pm-qrow-sentence{ font-size:15.5px; }
+      .pm-qrow-meta{ margin-top:13px; padding-top:12px; border-top:1px solid var(--lineSoft); gap:10px; }
+      .pm-qrow-actions{ margin-top:10px; gap:8px; }
+      .pm-qrow-actions button{ flex:1; min-height:40px; }
+      /* Global-search rows: pack chip moves into the footer, sentence leads. */
+      .pm-qrow-search .pm-qrow-pack{ position:absolute; top:13px; right:13px; max-width:55%; }
+      .pm-qrow-search .pm-qrow-main{ padding-right:0; margin-top:2px; }
+      .pm-qrow-search .pm-qrow-pack + .pm-qrow-main{ margin-top:34px; }
     }
     @media (max-width:639px){
       .pm-main{ padding:16px 14px; }
@@ -2819,9 +2842,7 @@ function GlobalStyle() {
       .pm-toolbar > *{ flex:1 1 auto; }
       .pm-search{ width:100%; order:-1; flex-basis:100%; }
       .pm-grow{ flex-basis:100%; height:0; }
-      .pm-qrow{ flex-wrap:wrap; gap:10px; }
-      .pm-qrow-main{ flex-basis:100%; order:5; }
-      .pm-qrow-actions{ margin-left:auto; }
+      .pm-qrow-sentence{ font-size:16px; }
       .pm-modal-backdrop{ align-items:flex-end; padding:0; }
       .pm-modal-card{ max-width:100% !important; border-radius:20px 20px 0 0; max-height:94vh; overflow-y:auto; animation:pm-sheet .22s ease-out; }
       @keyframes pm-sheet{ from{ transform:translateY(100%);} to{ transform:translateY(0);} }

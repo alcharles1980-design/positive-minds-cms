@@ -5987,40 +5987,39 @@ function PackDetail({
       style: {
         background: selected ? C.brandSoft : C.panel,
         borderRadius: R.md,
-        padding: "12px 16px",
         border: "1px solid " + (selected ? C.brand : C.line),
-        opacity: q.status === "active" ? 1 : 0.55
+        opacity: q.status === "active" ? 1 : 0.6
       }
     }, /*#__PURE__*/React.createElement("input", {
       type: "checkbox",
+      className: "pm-qrow-check",
       checked: selected,
       onChange: () => toggleSel(q.id),
+      "aria-label": "Select question",
       style: {
-        width: 16,
-        height: 16,
+        width: 18,
+        height: 18,
         accentColor: C.brand,
         flexShrink: 0
       }
     }), /*#__PURE__*/React.createElement("div", {
-      className: "pm-qrow-main",
-      style: {
-        flex: 1,
-        minWidth: 0
-      }
+      className: "pm-qrow-main"
     }, /*#__PURE__*/React.createElement("div", {
+      className: "pm-qrow-sentence",
       style: {
-        fontSize: 15,
         color: C.ink,
         fontWeight: 500
       }
     }, pv.sentence), /*#__PURE__*/React.createElement("div", {
       style: {
-        fontSize: 13,
+        fontSize: 13.5,
         color: C.brandInk,
         fontWeight: 800,
-        marginTop: 3
+        marginTop: 4
       }
-    }, "→ ", pv.opts)), /*#__PURE__*/React.createElement(Pill, {
+    }, "→ ", pv.opts)), /*#__PURE__*/React.createElement("div", {
+      className: "pm-qrow-meta"
+    }, /*#__PURE__*/React.createElement(Pill, {
       tone: "muted"
     }, q.difficulty), /*#__PURE__*/React.createElement("button", {
       onClick: () => toggleQ(q),
@@ -6033,7 +6032,7 @@ function PackDetail({
       }
     }, /*#__PURE__*/React.createElement(Badge, {
       kind: q.status
-    })), /*#__PURE__*/React.createElement("div", {
+    }))), /*#__PURE__*/React.createElement("div", {
       className: "pm-qrow-actions"
     }, /*#__PURE__*/React.createElement(Btn, {
       variant: "ghost",
@@ -6222,15 +6221,15 @@ function AllQuestions({
     const pv = previewQuestion(r.template, r.answer, r.alt_answer, r.letters_hidden, r.difficulty);
     return /*#__PURE__*/React.createElement("div", {
       key: r.id,
-      className: "pm-qrow",
+      className: "pm-qrow pm-qrow-search",
       style: {
         background: C.panel,
         borderRadius: R.md,
-        padding: "12px 16px",
         border: "1px solid " + C.line,
         opacity: r.status === "active" ? 1 : 0.6
       }
     }, /*#__PURE__*/React.createElement("button", {
+      className: "pm-qrow-pack",
       onClick: () => onOpenPack(r.pack_id),
       title: `Open ${r.pack_name}`,
       style: {
@@ -6240,7 +6239,7 @@ function AllQuestions({
         background: r.pack_color + "18",
         border: "none",
         borderRadius: R.sm,
-        padding: "5px 10px",
+        padding: "6px 10px",
         cursor: "pointer",
         flexShrink: 0
       }
@@ -6253,35 +6252,33 @@ function AllQuestions({
         fontSize: 12,
         fontWeight: 700,
         color: C.ink2,
-        maxWidth: 110,
+        maxWidth: 120,
         overflow: "hidden",
         textOverflow: "ellipsis",
         whiteSpace: "nowrap"
       }
     }, r.pack_name)), /*#__PURE__*/React.createElement("div", {
-      className: "pm-qrow-main",
-      style: {
-        flex: 1,
-        minWidth: 0
-      }
+      className: "pm-qrow-main"
     }, /*#__PURE__*/React.createElement("div", {
+      className: "pm-qrow-sentence",
       style: {
-        fontSize: 15,
         color: C.ink,
         fontWeight: 500
       }
     }, pv.sentence), /*#__PURE__*/React.createElement("div", {
       style: {
-        fontSize: 13,
+        fontSize: 13.5,
         color: C.brandInk,
         fontWeight: 800,
-        marginTop: 3
+        marginTop: 4
       }
-    }, "→ ", pv.opts)), /*#__PURE__*/React.createElement(Pill, {
+    }, "→ ", pv.opts)), /*#__PURE__*/React.createElement("div", {
+      className: "pm-qrow-meta"
+    }, /*#__PURE__*/React.createElement(Pill, {
       tone: "muted"
     }, r.difficulty), /*#__PURE__*/React.createElement(Badge, {
       kind: r.status
-    }));
+    })));
   })), pages > 1 && /*#__PURE__*/React.createElement(Pager, {
     page: page,
     pages: pages,
@@ -7387,13 +7384,32 @@ function GlobalStyle() {
     .pm-toolbar{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
     .pm-grow{ flex:1; }
     .pm-search{ width:230px; }
-    .pm-qrow{ display:flex; align-items:center; gap:14px; }
-    .pm-qrow-actions{ display:flex; gap:6px; }
+    .pm-qrow{ display:flex; align-items:center; gap:14px; padding:12px 16px; }
+    .pm-qrow-check{ align-self:center; }
+    .pm-qrow-main{ flex:1; min-width:0; }
+    .pm-qrow-sentence{ font-size:15px; line-height:1.4; }
+    .pm-qrow-meta{ display:flex; align-items:center; gap:10px; flex-shrink:0; }
+    .pm-qrow-actions{ display:flex; gap:6px; flex-shrink:0; }
+    .pm-qrow-pack{ flex-shrink:0; }
 
     @media (max-width:1023px){
       .pm-main{ padding:24px 20px; }
       .pm-pack-grid{ grid-template-columns:repeat(2,1fr); }
       .pm-dash-2{ grid-template-columns:1fr !important; }
+      /* Question becomes a content-first card below desktop: sentence on top,
+         meta + actions in a footer bar, checkbox floated to the top-right so it
+         stays out of the reading flow. */
+      .pm-qrow{ display:block; position:relative; padding:15px 16px 13px; }
+      .pm-qrow-check{ position:absolute; top:15px; right:15px; width:20px; height:20px; z-index:1; }
+      .pm-qrow-main{ padding-right:34px; }
+      .pm-qrow-sentence{ font-size:15.5px; }
+      .pm-qrow-meta{ margin-top:13px; padding-top:12px; border-top:1px solid var(--lineSoft); gap:10px; }
+      .pm-qrow-actions{ margin-top:10px; gap:8px; }
+      .pm-qrow-actions button{ flex:1; min-height:40px; }
+      /* Global-search rows: pack chip moves into the footer, sentence leads. */
+      .pm-qrow-search .pm-qrow-pack{ position:absolute; top:13px; right:13px; max-width:55%; }
+      .pm-qrow-search .pm-qrow-main{ padding-right:0; margin-top:2px; }
+      .pm-qrow-search .pm-qrow-pack + .pm-qrow-main{ margin-top:34px; }
     }
     @media (max-width:639px){
       .pm-main{ padding:16px 14px; }
@@ -7403,9 +7419,7 @@ function GlobalStyle() {
       .pm-toolbar > *{ flex:1 1 auto; }
       .pm-search{ width:100%; order:-1; flex-basis:100%; }
       .pm-grow{ flex-basis:100%; height:0; }
-      .pm-qrow{ flex-wrap:wrap; gap:10px; }
-      .pm-qrow-main{ flex-basis:100%; order:5; }
-      .pm-qrow-actions{ margin-left:auto; }
+      .pm-qrow-sentence{ font-size:16px; }
       .pm-modal-backdrop{ align-items:flex-end; padding:0; }
       .pm-modal-card{ max-width:100% !important; border-radius:20px 20px 0 0; max-height:94vh; overflow-y:auto; animation:pm-sheet .22s ease-out; }
       @keyframes pm-sheet{ from{ transform:translateY(100%);} to{ transform:translateY(0);} }
