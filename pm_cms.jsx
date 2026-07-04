@@ -680,6 +680,9 @@ const realtime = (() => {
 
   const connect = () => {
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+    // If a previous socket is still CLOSING, tear it down cleanly before opening a new one
+    // so we never end up with two live sockets (and two heartbeats).
+    if (ws && ws.readyState === WebSocket.CLOSING) { try { ws.onclose = null; ws.close(); } catch {} ws = null; clearInterval(heartbeat); }
     intentionalClose = false;
     const wsUrl = CFG.url.replace(/^http/, "ws") + `/realtime/v1/websocket?apikey=${encodeURIComponent(CFG.key)}&vsn=1.0.0`;
     try { ws = new WebSocket(wsUrl); } catch { scheduleReconnect(); return; }
@@ -786,9 +789,15 @@ const TRANSFORMS = [
 
 const xf = (val, t) => {
   if (val == null) return val;
+  if (typeof val === "object") return val; // never stringify objects/arrays (e.g. frame_slots, tags)
   switch (t) { case "upper": return String(val).toUpperCase(); case "lower": return String(val).toLowerCase(); case "trim": return String(val).trim(); default: return val; }
 };
-const mapVal = (field, val, vm) => (vm?.[field] && val in vm[field]) ? vm[field][val] : val;
+const mapVal = (field, val, vm) => {
+  const m = vm?.[field];
+  if (!m) return val;
+  const key = (typeof val === "object" || val == null) ? null : val; // only primitives can key a value_map
+  return (key != null && key in m) ? m[key] : val;
+};
 const projectRow = (row, fields, vm) => {
   const out = {};
   for (const f of fields || []) { if (!f.to) continue; let v = xf(row[f.from], f.transform || "none"); v = mapVal(f.to, v, vm); out[f.to] = v; }
@@ -1597,10 +1606,10 @@ function HealthView({ onOpenPack }) {
   if (error) return <ErrorState error={error} onRetry={reload} />;
   const s = data?.summary || {};
   const details = data?.details || [];
-  const totalIssues = (s.invalid_template || 0) + (s.missing_alt || 0) + (s.duplicates || 0);
+  const totalIssues = details.length;
 
   const sevStyle = { error: { bg: C.dangerSoft, fg: C.dangerInk, dot: C.danger, label: "Error" }, warning: { bg: C.warnSoft, fg: C.warnInk, dot: C.warn, label: "Warning" } };
-  const issueLabel = { invalid_template: "Invalid template", missing_alt: "Missing 2nd option", duplicate: "Duplicate" };
+  const issueLabel = { invalid_template: "Invalid template", missing_alt: "Missing 2nd option", duplicate: "Duplicate", revealed_answer: "Answer revealed", empty_answer: "Empty answer" };
 
   return (
     <div>
@@ -2597,7 +2606,8 @@ draft/unpublished packs through the public API.
 - \`pm_search_questions(q,pack,diff,stat,lvl,lim,off)\` — global paginated question search.
 - \`pm_clone_pack(src,new_slug,new_name)\` — duplicate a pack + its questions (as draft).
 - \`pm_lint()\` / \`pm_lint_details()\` — content health checks (invalid templates,
-  missing 2nd option, duplicates, thin packs).
+  missing 2nd option, duplicates, thin packs, revealed answer [basic hides 0 letters],
+  empty answer).
 - \`pm_log(...)\` — append an activity row.
 - \`pm_mark_released(pack_ids uuid[])\` — set released_version = content_version
   (null = all published) so "pending changes" clears after a sync.
@@ -2681,6 +2691,23 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Polymath audit pass:**
+  · TRANSFORM ENGINE (xf/mapVal + edge applyTransform/mapValue): guarded against object/array
+    values — an accidental upper/lower/trim on frame_slots or tags would have produced
+    "[object Object]"; now objects pass through untouched, and value_maps only key on
+    primitives (the \`in\` operator on an object was fragile). Client + edge kept identical.
+  · REALTIME: connect() now tears down a socket still in CLOSING state before opening a new
+    one (a tab-refocus during close could otherwise create two live sockets + double
+    heartbeats). Set REPLICA IDENTITY FULL on pm_questions/pm_question_levels so DELETE events
+    carry pack_id (the PackDetail live-refresh filter needs it; before, deletes reloaded
+    every open pack view).
+  · LINT: added two checks — "revealed_answer" (a basic question hiding 0 letters shows the
+    child the answer) and "empty_answer"; the health total now counts actual detail rows so
+    new rules always reflect in the count. New issue labels added to the UI.
+  Verified safe-but-noted (no live bug): {Blank}/{BLANK} as a target is caught by the
+  {blank}-required save validation; byLevel numeric/string key coercion is correct; optimistic
+  pack delete doesn't race the realtime refresh; localStorage access is exception-safe.
+  Verified clean: frame-word feed render across L1–10 after the changes; feed 200 OK.
 - **Frame-word variations:** the sentence template can now contain swappable {token} words
   (other than {blank}, which stays the selectable target). Each such token gets a \`frame_slots\`
   config on pm_questions: a \`pool\` of alternatives + optional per-level pins (\`byLevel\`). This
