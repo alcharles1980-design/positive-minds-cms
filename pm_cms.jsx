@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.04-4", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.04-5", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -2782,8 +2782,11 @@ The app is authored as modular \`.jsx\` files in \`/v2/\`, then concatenated and
 into one file. **Assembly order matters** (const helpers must precede their consumers;
 all cross-file components are \`function\` declarations so they hoist):
 
-    core.jsx        config, session/auth, data layer (rest/rpc/restAll), tokens, hooks
+    core.jsx        config (incl CFG.build stamp), session/auth, data layer (rest/rpc/restAll),
+                    tokens, hooks, AND the shared rendering engine (maskWord, resolveSlots,
+                    resolveFrameMap, buildLevelVariants, previewAtLevel)
     primitives.jsx  Btn, Badge, Pill, Field, inputs, Modal, Confirm, Toasts, states
+    realtime.jsx    lean realtime sync (raw websocket, no SDK): connect/reconnect + useRealtime hooks
     engine.jsx      transformation engine (buildOutput), profiles/sync/targets data, fetchAllContent
     firebase.jsx    Firebase transport (RTDB/Firestore/CloudFn writers), planWrites
     editors.jsx     PackEditor, QuestionEditor, FrameSlotEditor, BulkImport (with duplicate detection)
@@ -2793,6 +2796,7 @@ all cross-file components are \`function\` declarations so they hoist):
     publish2.jsx    PublishHub, ChannelsPanel, SyncHistory, FeedRow
     devnotes.jsx    Developer Notes page + embedded docs (this file)
     generator.jsx   Content Generator (AI prompt builder): GeneratorView, buildGeneratorPrompt, buildAvoidList, OUTPUT_FORMATS, MASTER_CONTEXT
+    levels.jsx      LevelsView, LevelEditor, LevelChip, QuestionLevelsPanel, QuestionLevelEditor (the 10-level UI + per-question level overrides)
     views1.jsx      Dashboard, Library, PackCard
     views2.jsx      PackDetail, AllQuestions, Pager
     shell.jsx       Login, ChangePassword, CloneDialog, App (nav/routing/state), GlobalStyle
@@ -3375,9 +3379,15 @@ directly from bash. Work around it:
   react-dom/server \`renderToString\` inside a vm sandbox (stub window/document/fetch/localStorage).
   This catches real runtime crashes and lets you assert on the output HTML — it found several
   bugs a grep never would.
-- Everything else: verify deterministically (node --check, component/db/rpc reference
-  resolution, running engine logic in Node against real data pulled via SQL, parse each inline
-  script via vm.Script, babel-parse the doc template literals to confirm they're balanced).
+- **Confirm the build actually rebuilt (learned the hard way):** the assemble step Babel-compiles
+  the combined source; if it THROWS, it leaves the old compiled file and the HTML builder wraps the
+  STALE bundle. \`node --check app.compiled.js\` still passes (checking the old valid file), so it
+  does NOT catch this — a broken build can ship silently for several commits. After every build,
+  verify assemble printed its success summary AND the compiled file was freshly written (mtime, or
+  grep a just-added string / the bumped build stamp) before trusting anything downstream.
+- Everything else: verify deterministically (component/db/rpc reference resolution, running engine
+  logic in Node against real data pulled via SQL, parse each inline script via vm.Script,
+  babel-parse the doc template literals to confirm they're balanced).
 
 ## Known-safe "do not touch"
 - The four seeded builtin export profiles (is_builtin=true) unless explicitly asked: "Flat API
@@ -3593,14 +3603,23 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
 - Responsive: sidebar (desktop) / icon rail (tablet) / bottom-tab bar (phone). Question
   rows are compact single-lines on desktop and content-first CARDS below desktop (sentence
   hero on top, meta+actions footer, checkbox in the corner). 16px inputs, bottom-sheet
-  modals on phone, prefers-reduced-motion respected.
+  modals on phone, prefers-reduced-motion respected. A small BUILD STAMP (from a bumped
+  CFG.build constant) sits in the sidebar footer so a stale cached build is obvious at a glance.
 
 ## Build & verify discipline
-Edit modular files, not compiled output. Rebuild with assemble+build scripts. Before
-deploy: node --check the compiled JS; confirm every JSX component/db call/RPC resolves;
-parse each inline <script>. Test DB (RPCs, RLS) against the live project. Deploy by pushing
-to main (Cloudflare auto-builds). Verify empirically — never assert a capability works
-without testing it.
+Edit modular files, not compiled output. Rebuild with the assemble + build-html scripts.
+CRITICAL: the assemble step Babel-compiles the combined source — if it throws, it leaves the
+OLD compiled file in place and the HTML builder happily wraps the stale bundle. \`node --check\`
+on the compiled JS will still PASS (it's checking the old valid file), so it will NOT catch a
+broken build. After every build you MUST confirm assemble printed its success summary AND that
+the compiled output was freshly written (check its mtime, or grep for a string you just added,
+or bump+grep the build stamp). Only then: confirm every JSX component/db call/RPC resolves;
+parse each inline <script>; babel-parse the doc template literals to confirm they're balanced
+(raw backticks inside a doc string must be escaped). Test DB (RPCs, RLS) against the live
+project; test HTTP endpoints via pg_net → net._http_response; render components headless with
+react-dom/server to catch runtime crashes. Deploy by pushing to main (Cloudflare auto-builds);
+bump CFG.build each deploy. Verify empirically — never assert a capability works without
+testing it.
 `;
 
 // ===== devnotes.jsx =====
