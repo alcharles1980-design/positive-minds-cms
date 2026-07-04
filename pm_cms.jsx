@@ -183,7 +183,7 @@ const db = {
   // and import de-duplication. Returns the full array.
   allQuestionsForPack: (packId) => restAll(`pm_questions?pack_id=eq.${packId}&order=sort_order.asc`),
   searchQuestions: (args) => rpc("pm_search_questions", args),
-  // args: { q, pack, diff, stat, lvl, lim, off } — lvl filters by effective level
+  // args: { q, pack, stat, lvl, lim, off } — lvl filters by effective level
   createQuestion: (q) => rest("pm_questions", { method: "POST", body: q }).then(r => r.data?.[0]),
   createQuestions: (rows) => rest("pm_questions", { method: "POST", body: rows }).then(r => r.data),
   updateQuestion: (id, q) => rest(`pm_questions?id=eq.${id}`, { method: "PATCH", body: q }).then(r => r.data?.[0]),
@@ -2813,7 +2813,7 @@ draft/unpublished packs through the public API.
 
 **Functions (RPC):**
 - \`pm_dashboard_stats()\` — aggregate counts for the Overview.
-- \`pm_search_questions(q,pack,diff,stat,lvl,lim,off)\` — global paginated question search.
+- \`pm_search_questions(q,pack,stat,lvl,lim,off)\` — global paginated question search.
 - \`pm_clone_pack(src,new_slug,new_name)\` — duplicate a pack + its questions (as draft).
 - \`pm_lint()\` / \`pm_lint_details()\` — content health checks (invalid templates,
   missing 2nd option, duplicates, thin packs, revealed answer [basic hides 0 letters],
@@ -2901,6 +2901,11 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Search RPC signature scrubbed:** pm_search_questions dropped its legacy \`diff\` (question
+  difficulty) parameter and filter clause — signature is now (q, pack, stat, lvl, lim, off).
+  The client call and its doc comment were updated to match. Verified 200 OK through the actual
+  PostgREST endpoint with the client's exact payload. (Returned columns still include the
+  derived-legacy difficulty/letters_hidden so nothing reading them breaks.)
 - **Old difficulty/letters model purged from the app (follow-through cleanup):** after the
   editor was reconciled with levels, a full sweep removed the remaining old-model residue.
   Per-question difficulty is now DERIVED from the level (never authored), so: the question-list
@@ -3244,7 +3249,7 @@ is the authoring + publishing layer; a separate game backend consumes the conten
   (content_version > released_version). Create it with security_invoker=true so it respects
   the caller's RLS (otherwise anon can read draft packs via the public API).
 - Triggers: touch updated_at; bump pack content_version on any question change
-- RPCs: pm_dashboard_stats, pm_search_questions(q,pack,diff,stat,lvl,lim,off) [paginated],
+- RPCs: pm_dashboard_stats, pm_search_questions(q,pack,stat,lvl,lim,off) [paginated],
   pm_clone_pack(src,slug,name), pm_lint + pm_lint_details, pm_log, pm_mark_released(uuid[])
 - CRITICAL: paginate all list reads in 1000-row batches (restAll) — PostgREST caps at 1000.
 
@@ -4606,7 +4611,7 @@ function AllQuestions({ onOpenPack, levels }) {
   const load = useCallback(async () => {
     setErr("");
     try {
-      const r = await db.searchQuestions({ q: debounced, pack: null, diff: null, stat: stat === "all" ? null : stat, lvl: lvl === "all" ? null : parseInt(lvl), lim: CFG.pageSize, off: page * CFG.pageSize });
+      const r = await db.searchQuestions({ q: debounced, pack: null, stat: stat === "all" ? null : stat, lvl: lvl === "all" ? null : parseInt(lvl), lim: CFG.pageSize, off: page * CFG.pageSize });
       setRows(r || []); setTotal(r?.[0]?.total_count ? Number(r[0].total_count) : 0);
     } catch (e) { setErr(e.message); }
   }, [debounced, stat, lvl, page]);
