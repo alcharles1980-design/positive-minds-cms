@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.04-3", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.04-4", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -1709,6 +1709,10 @@ function PlayMode({ pack, levels, onClose }) {
   const [picked, setPicked] = useState(null);
   const [correct, setCorrect] = useState(0);
   const [done, setDone] = useState(false);
+  // Level filter: null = play each question at its OWN effective level; a number = force
+  // every question to render at that level (to preview how the pack plays at that difficulty).
+  const [playLevel, setPlayLevel] = useState(null);
+  const levelList = (levels && levels.length) ? levels : Array.from({ length: 10 }, (_, n) => ({ level: n + 1, name: "" }));
 
   useEffect(() => {
     (async () => {
@@ -1740,7 +1744,10 @@ function PlayMode({ pack, levels, onClose }) {
   };
 
   const restart = () => { setI(0); setPicked(null); setCorrect(0); setDone(false); };
-  const pv = q ? previewAtLevel(q, levels, pack.level) : null;
+  // Switch the level filter and restart the run so progress/score stay consistent.
+  const changeLevel = (lvl) => { setPlayLevel(lvl); restart(); };
+  // Force the chosen level by overriding the question's own level; null = its natural level.
+  const pv = q ? previewAtLevel(playLevel != null ? { ...q, level: playLevel } : q, levels, pack.level) : null;
 
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 150, background: `linear-gradient(160deg, ${pack.color}22, ${C.bg} 55%)`, display: "flex", flexDirection: "column", fontFamily: FONT }}>
@@ -1749,10 +1756,23 @@ function PlayMode({ pack, levels, onClose }) {
         <div style={{ fontSize: 26 }}>{pack.emoji}</div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 15, fontWeight: 800, color: C.ink }}>{pack.name}</div>
-          <div style={{ fontSize: 12, color: C.sub }}>Play preview{questions ? ` · ${questions.length} questions` : ""}</div>
+          <div style={{ fontSize: 12, color: C.sub }}>Play preview{questions ? ` · ${questions.length} questions` : ""}{playLevel != null ? ` · Level ${playLevel}` : ""}</div>
         </div>
         <Btn variant="ghost" size="sm" onClick={onClose}>✕ Exit</Btn>
       </div>
+
+      {/* Level filter — play the whole pack at one level, or each at its own */}
+      {questions && questions.length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 20px", borderBottom: "1px solid " + C.line, background: C.panel, overflowX: "auto", flexWrap: "wrap" }}>
+          <span style={{ fontSize: 11.5, fontWeight: 800, color: C.faint, letterSpacing: 0.4, flexShrink: 0 }}>PLAY AT:</span>
+          <button onClick={() => changeLevel(null)} style={playChip(playLevel === null, C)}>Each own level</button>
+          {levelList.map(l => (
+            <button key={l.level} onClick={() => changeLevel(l.level)} title={l.name ? `Level ${l.level} — ${l.name}` : `Level ${l.level}`} style={playChip(playLevel === l.level, C, l.color)}>
+              L{l.level}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* progress bar */}
       {questions && questions.length > 0 && !done && (
@@ -1814,6 +1834,14 @@ function PlayMode({ pack, levels, onClose }) {
     </div>
   );
 }
+
+// Level-filter chip in Play mode. Active chip fills with the level's color (or brand).
+const playChip = (active, C, color) => ({
+  flexShrink: 0, padding: "5px 11px", borderRadius: 999, fontSize: 12, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap", fontFamily: "inherit",
+  border: "1px solid " + (active ? (color || C.brand) : C.line),
+  background: active ? (color || C.brand) : C.bg,
+  color: active ? "#fff" : C.sub, transition: "all .15s",
+});
 
 // ============================================================
 // Content Health (lint) — flags dupes, weak, invalid questions
@@ -2953,6 +2981,11 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Play mode level filter:** added a level selector at the top of Play mode. Default "each own
+  level" plays every question at its own effective level; picking a specific level forces the whole
+  pack to render at that level's blank difficulty (via previewAtLevel with an overridden q.level —
+  same shared engine, parity preserved), so you can feel how the pack plays at any difficulty.
+  Changing the filter restarts the run and the active level shows in the header.
 - **CRITICAL — the build was silently broken; recent "deploys" shipped a STALE bundle.** The
   earlier pack-undo edit (preserving all pack fields on Undo) left a brace mismatch — the onClick
   arrow closed with a stray \`}\` and the \`action\`/\`notify\` closers were dropped — so assemble.cjs's
@@ -3432,7 +3465,9 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    (the alternate is positive too but doesn't match the blank pattern). Picking the primary shows
    "Correct! ✓" and scores a point; picking the alternate shows "Not quite — the answer is X" and
    reveals the right word (green/red button states). The done screen shows "X of Y correct". Load
-   ALL active questions (paginate — do NOT cap at 100).
+   ALL active questions (paginate — do NOT cap at 100). A LEVEL FILTER at the top plays the whole
+   pack at one chosen level (forcing every question to that level's blank difficulty) or "each own
+   level" (default); changing it restarts the run.
 4. **All questions:** server-side global search across every pack, paginated, click-through
    to the source pack.
 5. **Content health:** lint flags invalid templates (no {blank}), missing 2nd option,
