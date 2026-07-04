@@ -338,12 +338,35 @@ const effectiveMask = (q, packLevel, levels) => {
   };
 };
 
-const previewQuestion = (template, answer, alt, letters, difficulty, position = "end", grouping = "grouped") => {
+// Resolve frame-word slots for a given level. A slot is any {token} in the template other
+// than {blank} (the selectable target). Each slot may define a `pool` of variations and an
+// optional per-level pick in `byLevel`. Resolution: byLevel[level] wins; else a deterministic
+// pick from the pool (seeded by token+level so it's stable across renders AND matches the
+// game/edge exactly); else the token name itself as a plain fallback word.
+const resolveSlots = (template, frameSlots, level) => {
+  if (!template) return "";
+  return template.replace(/\{([a-zA-Z][\w-]*)\}/g, (m, token) => {
+    if (token === "blank") return m; // target blank is handled separately
+    const slot = frameSlots && frameSlots[token];
+    if (!slot) return token; // no config → show the bare word (strip braces)
+    const byLevel = slot.byLevel || {};
+    if (byLevel[level] != null && byLevel[level] !== "") return byLevel[level];
+    const pool = Array.isArray(slot.pool) ? slot.pool.filter(Boolean) : [];
+    if (pool.length === 0) return token;
+    if (pool.length === 1) return pool[0];
+    let seed = level | 0;
+    for (let i = 0; i < token.length; i++) seed = (seed * 31 + token.charCodeAt(i)) >>> 0;
+    return pool[seed % pool.length];
+  });
+};
+
+const previewQuestion = (template, answer, alt, letters, difficulty, position = "end", grouping = "grouped", frameSlots = null, level = 1) => {
   const word = (answer || "____").toUpperCase();
   let blank;
   if (difficulty === "advanced" || letters >= word.length) blank = "_".repeat(Math.max(3, word.length));
   else blank = maskWord(word, letters, position, grouping);
-  const sentence = (template || "").replace(/\{blank\}/g, blank);
+  const withSlots = resolveSlots(template, frameSlots, level);
+  const sentence = withSlots.replace(/\{blank\}/g, blank);
   const opts = [answer, alt].filter(Boolean).map(w => w.toUpperCase()).join(" / ");
   return { sentence, opts };
 };
@@ -828,7 +851,7 @@ const withMeta = (spec, body, counts) => {
 
 // Field names available to map from
 const PACK_SOURCE_FIELDS = ["slug", "name", "emoji", "description", "color", "difficulty", "status", "is_custom", "tags", "level", "purpose", "focus_areas", "style_approach", "example_objectives"];
-const QUESTION_SOURCE_FIELDS = ["template", "answer", "alt_answer", "letters_hidden", "difficulty", "status", "notes", "level", "effective_level", "letter_position", "letter_grouping"];
+const QUESTION_SOURCE_FIELDS = ["template", "answer", "alt_answer", "letters_hidden", "difficulty", "status", "notes", "level", "effective_level", "letter_position", "letter_grouping", "frame_slots"];
 
 const emptySpec = () => ({
   structure: "nested", root_key: "packs", questions_key: "questions", key_by: "slug",
@@ -1159,6 +1182,47 @@ function PackEditor({ pack, levels, onSave, onClose }) {
   );
 }
 
+// Editor for one frame-word slot: a pool of variations + optional per-level pins.
+function FrameSlotEditor({ token, slot, setSlot, levels }) {
+  const [showLevels, setShowLevels] = useState(false);
+  const pool = slot.pool || [];
+  const byLevel = slot.byLevel || {};
+  const levelList = (levels && levels.length ? levels : Array.from({ length: 10 }, (_, i) => ({ level: i + 1, name: "" })));
+  const pinnedCount = Object.values(byLevel).filter(v => v != null && v !== "").length;
+  return (
+    <div style={{ background: C.bg, borderRadius: R.md, padding: "12px 14px", display: "grid", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <code style={{ background: C.brandSoft, color: C.brandInk, padding: "2px 8px", borderRadius: 6, fontSize: 13, fontWeight: 800 }}>{`{${token}}`}</code>
+        <span style={{ fontSize: 12.5, color: C.sub }}>variations for this word</span>
+      </div>
+      <div>
+        <div style={{ fontSize: 11, fontWeight: 700, color: C.faint, marginBottom: 5 }}>Pool of alternatives (the game varies among these)</div>
+        <TagInput tags={pool} onChange={(t) => setSlot({ pool: t })} suggestions={[]} />
+      </div>
+      {pool.length > 0 && (
+        <div>
+          <button type="button" onClick={() => setShowLevels(v => !v)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: C.brandInk, fontSize: 12.5, fontWeight: 700 }}>
+            {showLevels ? "▾" : "▸"} Pin a specific word per level {pinnedCount > 0 ? `(${pinnedCount} pinned)` : "(optional)"}
+          </button>
+          {showLevels && (
+            <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 8 }}>
+              {levelList.map(l => (
+                <div key={l.level} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 700, color: C.sub, minWidth: 26 }}>L{l.level}</span>
+                  <Select value={byLevel[l.level] ?? ""} onChange={(e) => { const v = e.target.value; const nb = { ...byLevel }; if (v === "") delete nb[l.level]; else nb[l.level] = v; setSlot({ byLevel: nb }); }} style={{ padding: "5px 8px", fontSize: 12.5, flex: 1 }}>
+                    <option value="">(vary)</option>
+                    {pool.map(w => <option key={w} value={w}>{w}</option>)}
+                  </Select>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function QuestionEditor({ question, packId, packDifficulty, packLevel, levels, onSave, onClose }) {
   const isNew = !question?.id;
   const [f, setF] = useState({
@@ -1170,13 +1234,16 @@ function QuestionEditor({ question, packId, packDifficulty, packLevel, levels, o
     letter_grouping: question?.letter_grouping ?? null,
     difficulty: question?.difficulty || (packDifficulty === "advanced" ? "advanced" : "basic"),
     status: question?.status || "active", notes: question?.notes || "",
+    frame_slots: question?.frame_slots || {},
   });
   const [busy, setBusy] = useState(false);
   const [errs, setErrs] = useState({});
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
   const hasBlank = f.template.includes("{blank}");
   const em = effectiveMask(f, packLevel, levels);
-  const pv = previewQuestion(f.template, f.answer, f.alt_answer, f.letters_hidden, f.difficulty, em.position, em.grouping);
+  const pv = previewQuestion(f.template, f.answer, f.alt_answer, f.letters_hidden, f.difficulty, em.position, em.grouping, f.frame_slots, f.level || packLevel || 1);
+  // Detect frame-word tokens in the template ({token} where token !== blank).
+  const frameTokens = [...new Set([...f.template.matchAll(/\{([a-zA-Z][\w-]*)\}/g)].map(m => m[1]).filter(t => t !== "blank"))];
 
   const submit = async () => {
     const e = {};
@@ -1184,7 +1251,10 @@ function QuestionEditor({ question, packId, packDifficulty, packLevel, levels, o
     if (!f.answer.trim()) e.answer = "Enter the answer word.";
     setErrs(e); if (Object.keys(e).length) return;
     setBusy(true);
-    try { await onSave({ ...f, pack_id: packId, answer: f.answer.toUpperCase().trim(), alt_answer: f.alt_answer.toUpperCase().trim() }, question?.id); onClose(); }
+    // Only persist slots whose token still appears in the template.
+    const cleanedSlots = {};
+    for (const t of frameTokens) if (f.frame_slots[t]) cleanedSlots[t] = f.frame_slots[t];
+    try { await onSave({ ...f, frame_slots: cleanedSlots, pack_id: packId, answer: f.answer.toUpperCase().trim(), alt_answer: f.alt_answer.toUpperCase().trim() }, question?.id); onClose(); }
     catch (err) { setErrs({ form: err.message }); setBusy(false); }
   };
   useHotkey("mod+enter", submit, true);
@@ -1193,7 +1263,7 @@ function QuestionEditor({ question, packId, packDifficulty, packLevel, levels, o
     <>
       <ModalHead title={isNew ? "New question" : "Edit question"} subtitle="A fill-in-the-blank affirming sentence" id="pm-q-title" />
       <div style={{ padding: S.xl + 2, display: "grid", gap: S.lg + 2, maxHeight: "64vh", overflowY: "auto" }}>
-        <Field label="Sentence template" hint="Use {blank} where the missing word goes" error={errs.template}>
+        <Field label="Sentence template" hint="Use {blank} for the word to guess. Add other {words} to make them swappable (e.g. …when things get {hard})." error={errs.template}>
           <Textarea value={f.template} onChange={(e) => set("template", e.target.value)} rows={2} placeholder="I am {blank} when I try something new." autoFocus
             style={{ borderColor: hasBlank ? C.line : C.danger }} />
         </Field>
@@ -1249,6 +1319,22 @@ function QuestionEditor({ question, packId, packDifficulty, packLevel, levels, o
           <div style={{ fontSize: 17, color: C.ink, fontWeight: 500, lineHeight: 1.4 }}>{pv.sentence}</div>
           {pv.opts && <div style={{ fontSize: 14, color: C.brandInk, fontWeight: 800, marginTop: 8 }}>→ {pv.opts}</div>}
         </div>
+
+        {frameTokens.length > 0 && (
+          <div style={{ border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg, display: "grid", gap: S.md }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 800, color: C.ink }}>Frame word variations</div>
+              <div style={{ fontSize: 12.5, color: C.sub, marginTop: 2, lineHeight: 1.45 }}>These are swappable words in the sentence — <b>not</b> the word the child guesses. Give each a pool of alternatives, and optionally pin a specific one per level (useful for levels 7–10 where the blank stops changing).</div>
+            </div>
+            {frameTokens.map(token => {
+              const slot = f.frame_slots[token] || { pool: [], byLevel: {} };
+              const setSlot = (patch) => set("frame_slots", { ...f.frame_slots, [token]: { pool: slot.pool || [], byLevel: slot.byLevel || {}, ...patch } });
+              return (
+                <FrameSlotEditor key={token} token={token} slot={slot} setSlot={setSlot} levels={levels} />
+              );
+            })}
+          </div>
+        )}
         <Field label="Internal notes" hint="Optional — not shown to players">
           <Input value={f.notes} onChange={(e) => set("notes", e.target.value)} />
         </Field>
@@ -2476,9 +2562,10 @@ config → data layer → design tokens → hooks → primitives → feature vie
   (basic/advanced/mixed), status (draft/published/archived), sort_order, is_custom,
   tags text[], content_version, released_version, released_at, level, and structured
   descriptive fields: purpose, focus_areas, style_approach, example_objectives. timestamps.
-- \`pm_questions\` — id, pack_id (FK cascade), template (with \`{blank}\`), answer,
-  alt_answer, letters_hidden, difficulty (basic/advanced), status (active/inactive),
-  sort_order, notes, timestamps.
+- \`pm_questions\` — id, pack_id (FK cascade), template (with \`{blank}\` for the target, plus
+  optional \`{token}\` frame-word slots), answer, alt_answer, letters_hidden, difficulty
+  (basic/advanced), status (active/inactive), sort_order, notes, level, letter_position,
+  letter_grouping, frame_slots (jsonb: per-token {pool, byLevel}), timestamps.
 - \`pm_activity\` — audit log: entity, entity_id, entity_name, action, actor, detail, created_at.
 - \`pm_export_profiles\` — id, name, description, spec (jsonb transform config), is_builtin.
 - \`pm_sync_log\` — profile/target/channel/mode/status/counts/detail, created_at.
@@ -2594,6 +2681,15 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Frame-word variations:** the sentence template can now contain swappable {token} words
+  (other than {blank}, which stays the selectable target). Each such token gets a \`frame_slots\`
+  config on pm_questions: a \`pool\` of alternatives + optional per-level pins (\`byLevel\`). This
+  lets levels 7–10 differ even when the blank is a whole word (e.g. "…when things get {hard}"
+  → difficult / stressful / challenging / problematic per level). resolveSlots (in core.jsx,
+  mirrored in the game-feed edge fn) resolves them deterministically: byLevel wins, else a
+  seeded pick from the pool (stable + identical client/edge), else the bare token. The question
+  editor auto-detects tokens and shows a pool editor + per-level pin grid (FrameSlotEditor).
+  frame_slots is exportable and the search RPC returns it. Verified end-to-end via the feed.
 - **Full audit pass — security + robustness fixes:**
   · SECURITY: pm_pack_overview was SECURITY DEFINER, so anon could read draft/unpublished
     packs' metadata through the public API. Set security_invoker=true — anon now only sees
@@ -2755,7 +2851,10 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
   duplicate a question into 10 rows — it's ONE row, derived. To send levels to the game, a
   profile sets spec.expand_levels → fetchAllContent({...},{expandLevels:true}) attaches a
   \`levels\` array; the game-feed edge function mirrors this. If you touch buildLevelVariants or
-  the expand logic, update BOTH engine.jsx and the edge function (parity invariant).
+  the expand logic, update BOTH engine.jsx and the edge function (parity invariant). Same for
+  maskWord AND resolveSlots (frame-word slots): the client (core.jsx) and edge fn must stay
+  byte-identical, including the deterministic seeded pool-pick, or the CMS preview won't match
+  what the game renders.
   If you add a column to pm_packs, DROP+recreate pm_pack_overview (it uses p.*).
 - RLS: anon read-only, authenticated full write. Never add anon write policies.
 
@@ -2922,6 +3021,14 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    global question search, levels). Show a "Live/Offline" status badge in the header, and
    auto-reconnect (and re-subscribe) when the tab regains focus. Enable the Realtime
    publication on those tables server-side.
+15. **Frame-word variations:** the sentence template may contain swappable {token} words other
+   than {blank} (which stays the word the child guesses). Store a \`frame_slots\` jsonb on the
+   question: per token, a \`pool\` of alternatives + an optional \`byLevel\` pin map. Render per
+   level: a pinned word wins, else a DETERMINISTIC seeded pick from the pool (stable + identical
+   client/edge), else the bare token. This lets levels 7–10 differ even when the blank is a
+   whole word (e.g. "…things get {hard}" → difficult/stressful/challenging across levels). The
+   question editor auto-detects {tokens} and offers a pool editor + per-level pin grid. Keep
+   the resolver byte-identical between the client engine and the game-feed edge function.
 
 ## UX / cross-cutting
 - Dark mode (light/dark/system, persisted, CSS variables). Command palette (⌘/Ctrl-K):
@@ -3090,7 +3197,9 @@ const buildLevelVariants = (q, levels, overrides = {}) => {
     const position = ov.letter_position ?? lvl.letter_position ?? "end";
     const grouping = ov.letter_grouping ?? lvl.letter_grouping ?? "grouped";
     const blank = (isWord || letters >= word.length) ? "_".repeat(Math.max(3, word.length)) : maskWord(word, letters, position, grouping);
-    const sentence = (template || "").replace(/\{blank\}/g, blank);
+    // Resolve frame-word slots first, then substitute the target blank.
+    const withSlots = resolveSlots(template, q.frame_slots, lvl.level);
+    const sentence = withSlots.replace(/\{blank\}/g, blank);
     return {
       level: lvl.level, name: lvl.name, color: lvl.color, tier: lvl.tier,
       sentence, blank, letters, position, grouping,
@@ -3717,7 +3826,7 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
             <div style={{ display: "grid", gap: 10 }}>
               {shown.map(q => {
                 const em = effectiveMask(q, pack.level, levels);
-                const pv = previewQuestion(q.template, q.answer, q.alt_answer, q.letters_hidden, q.difficulty, em.position, em.grouping);
+                const pv = previewQuestion(q.template, q.answer, q.alt_answer, q.letters_hidden, q.difficulty, em.position, em.grouping, q.frame_slots, q.level || pack.level || 1);
                 const selected = sel.has(q.id);
                 const isOpen = expanded.has(q.id);
                 return (
@@ -3829,7 +3938,7 @@ function AllQuestions({ onOpenPack, levels }) {
           <>
             <div style={{ display: "grid", gap: 10 }}>
               {rows.map(r => {
-                const pv = previewQuestion(r.template, r.answer, r.alt_answer, r.letters_hidden, r.difficulty, r.letter_position, r.letter_grouping);
+                const pv = previewQuestion(r.template, r.answer, r.alt_answer, r.letters_hidden, r.difficulty, r.letter_position, r.letter_grouping, r.frame_slots, r.level || 1);
                 return (
                   <div key={r.id} className="pm-qrow pm-qrow-search" style={{ background: C.panel, borderRadius: R.md, border: "1px solid " + C.line, opacity: r.status === "active" ? 1 : 0.6 }}>
                     <button className="pm-qrow-pack" onClick={() => onOpenPack(r.pack_id)} title={`Open ${r.pack_name}`} style={{ display: "flex", alignItems: "center", gap: 7, background: r.pack_color + "18", border: "none", borderRadius: R.sm, padding: "6px 10px", cursor: "pointer", flexShrink: 0 }}>
