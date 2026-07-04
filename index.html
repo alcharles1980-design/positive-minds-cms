@@ -6479,7 +6479,7 @@ a consumer needs. A profile's \`spec\` (jsonb) describes:
 - \`filters\`: { status, question_status }
 - \`pack_fields\` / \`question_fields\`: [{ from, to, transform }] — rename + include/exclude
   + per-field transform (none/upper/lower/trim)
-- \`value_maps\`: { outputField: { fromValue: toValue } } — e.g. difficulty:basic → level:1
+- \`value_maps\`: { outputField: { fromValue: toValue } } — e.g. status:active → state:1
 
 \`buildOutput(spec, packs, byPack, keyField)\` runs the projection; \`withMeta\` adds the
 envelope. The engine exists in TWO places that MUST stay in sync: the client (engine.jsx)
@@ -6536,6 +6536,13 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Dashboard stats fixed to use level tiers (was counting dead difficulty):** pm_dashboard_stats
+  computed its basic/advanced question split from the derived-legacy difficulty column. It now
+  counts by the effective LEVEL's tier (question level → pack level → pm_levels.tier), which is
+  the meaningful measure; the Overview cards were relabelled "Basic-tier / Advanced-tier levels".
+  Also swept the three developer docs for stale old-model teaching (outside the changelog):
+  removed the "difficulty→level" value-map examples, and expanded the Build Prompt's question-
+  editor + dashboard + JSON-backup descriptions to match the current level-based reality.
 - **Search RPC signature scrubbed:** pm_search_questions dropped its legacy \`diff\` (question
   difficulty) parameter and filter clause — signature is now (q, pack, stat, lvl, lim, off).
   The client call and its doc comment were updated to match. Verified 200 OK through the actual
@@ -6894,15 +6901,22 @@ refocus) AND reactively on a 401 with one retry, falling back to login only if t
 token is genuinely dead or the 7 days elapse. Anon publishable key authorizes reads only.
 
 ## Features to build
-1. **Dashboard/Overview:** aggregate stats (packs, questions, basic/advanced, empty packs,
+1. **Dashboard/Overview:** aggregate stats (packs, questions, questions by level tier
+   [basic-tier vs advanced-tier, computed from each question's effective level], empty packs,
    avg/pack) via one RPC; quick actions; and a compact at-a-glance index of ALL pack names
    (one line each, tap to open).
 2. **Library:** pack cards (emoji, color accent, status, question counts); search + status/
    difficulty filters; drag-to-reorder; clone (duplicate pack + questions); delete with
-   optimistic Undo; JSON import (round-trip) and export.
-3. **Pack detail:** paginated question bank; add/edit questions with a live "how the child
-   sees it" preview; bulk import (pipe format OR JSON); multi-select bulk activate/deactivate/
-   delete; Play mode (experience the pack as a child, with progress + celebration).
+   optimistic Undo; JSON import/export that round-trips the FULL model (pack level + purpose/
+   focus/style, and per-question level/position/grouping/frame_slots).
+3. **Pack detail:** paginated question bank (filter by level; each row shows a level chip and
+   a per-question "Levels" expander); add/edit questions. The question editor is LEVEL-BASED —
+   it has NO difficulty or letters-hidden controls (those are derived from the level). It offers
+   the sentence template, the two positive words, a Level selector (controls letters-vs-whole-
+   word), position/grouping overrides that appear only when the previewed level hides letters,
+   and a "how the child sees it" preview that renders through the real level engine with a
+   level-chip picker so you can flip through every level. Also: bulk import (pipe OR JSON, with
+   duplicate detection); multi-select bulk activate/deactivate/delete; Play mode.
 4. **All questions:** server-side global search across every pack, paginated, click-through
    to the source pack.
 5. **Content health:** lint flags invalid templates (no {blank}), missing 2nd option,
@@ -6911,7 +6925,7 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    - A **transformation engine** with user-defined "export profiles" whose spec (jsonb)
      controls output shape: structure (nested/flat/keyed), root/questions keys, field
      rename+include/exclude, per-field transforms (upper/lower/trim), value maps
-     (e.g. difficulty→level), filters, meta envelope.
+     (e.g. status→a numeric code), filters, meta envelope.
    - A **profile builder** UI: visual field-mapper + raw JSON editor + live preview, all synced.
    - Seed 3 starter profiles: Firebase (nested), Flat API (flat), Unity (keyed).
    - Three channels, all emitting through a chosen profile: **File** download;
@@ -8829,7 +8843,7 @@ function Dashboard({
     style: {
       marginBottom: S.lg
     }
-  }, stat(d.total_packs ?? 0, "Total packs", C.brand, `${d.published_packs ?? 0} published · ${d.draft_packs ?? 0} draft`), stat(d.total_questions ?? 0, "Questions", C.ink, `${d.active_questions ?? 0} active`), stat(d.basic_questions ?? 0, "Basic level", C.good), stat(d.advanced_questions ?? 0, "Advanced level", C.warn)), /*#__PURE__*/React.createElement("div", {
+  }, stat(d.total_packs ?? 0, "Total packs", C.brand, `${d.published_packs ?? 0} published · ${d.draft_packs ?? 0} draft`), stat(d.total_questions ?? 0, "Questions", C.ink, `${d.active_questions ?? 0} active`), stat(d.basic_questions ?? 0, "Basic-tier levels", C.good), stat(d.advanced_questions ?? 0, "Advanced-tier levels", C.warn)), /*#__PURE__*/React.createElement("div", {
     className: "pm-dash-2",
     style: {
       display: "grid",
