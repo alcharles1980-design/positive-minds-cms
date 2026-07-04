@@ -179,6 +179,9 @@ const db = {
 
   questions: (packId, { page = 0, size = CFG.pageSize } = {}) =>
     rest(`pm_questions?pack_id=eq.${packId}&order=sort_order.asc,created_at.asc`, { range: [page * size, page * size + size - 1] }),
+  // All questions for a pack (paginated past the 1000-row cap) — for the generator avoid-list
+  // and import de-duplication. Returns the full array.
+  allQuestionsForPack: (packId) => restAll(`pm_questions?pack_id=eq.${packId}&order=sort_order.asc`),
   searchQuestions: (args) => rpc("pm_search_questions", args),
   // args: { q, pack, diff, stat, lvl, lim, off } — lvl filters by effective level
   createQuestion: (q) => rest("pm_questions", { method: "POST", body: q }).then(r => r.data?.[0]),
@@ -1393,39 +1396,98 @@ function BulkImport({ packId, onDone, onClose }) {
   const [raw, setRaw] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [existing, setExisting] = useState([]);
+  const [skipIds, setSkipIds] = useState(() => new Set()); // row indices the user chose to skip
+  const [userTouched, setUserTouched] = useState(() => new Set()); // rows the user manually toggled
+
+  // Load the pack's existing questions so we can flag duplicates.
+  useEffect(() => {
+    let alive = true;
+    (async () => { try { const qs = await db.allQuestionsForPack(packId); if (alive) setExisting(qs || []); } catch { if (alive) setExisting([]); } })();
+    return () => { alive = false; };
+  }, [packId]);
+
+  // Normalize a sentence for comparison: lowercase, blank/tokens collapsed, whitespace/punct trimmed.
+  const normSentence = (t) => (t || "").toLowerCase().replace(/\{blank\}/g, "▢").replace(/\{[a-zA-Z][\w-]*\}/g, "▢").replace(/[^a-z0-9▢]+/g, " ").trim();
+  const existingIndex = useMemo(() => {
+    const bySentence = new Map(); const byAnswer = new Map();
+    for (const q of existing) {
+      const ns = normSentence(q.template);
+      if (!bySentence.has(ns)) bySentence.set(ns, []);
+      bySentence.get(ns).push(q);
+      for (const a of [q.answer, q.alt_answer].filter(Boolean)) {
+        const k = a.toUpperCase(); if (!byAnswer.has(k)) byAnswer.set(k, []); byAnswer.get(k).push(q);
+      }
+    }
+    return { bySentence, byAnswer };
+  }, [existing]);
 
   const parsed = useMemo(() => {
     const txt = raw.trim();
+    let rows = [];
     if (!txt) return [];
-    // Try JSON array first
     if (txt.startsWith("[") || txt.startsWith("{")) {
       try {
         const j = JSON.parse(txt);
         const arr = Array.isArray(j) ? j : (j.questions || []);
-        return arr.map(o => ({
+        rows = arr.map(o => ({
           template: o.template || "", answer: (o.answer || "").toUpperCase(),
           alt_answer: (o.alt_answer || o.alt || "").toUpperCase(),
           frame_slots: (o.frame_slots && typeof o.frame_slots === "object") ? o.frame_slots : null,
           ok: (o.template || "").includes("{blank}") && !!o.answer,
         }));
-      } catch { return [{ template: "Invalid JSON", answer: "", alt_answer: "", ok: false }]; }
+      } catch { return [{ template: "Invalid JSON", answer: "", alt_answer: "", ok: false, dup: "none" }]; }
+    } else {
+      rows = txt.split("\n").map(l => l.trim()).filter(Boolean).map(line => {
+        const [t, a, alt] = line.split("|").map(s => (s || "").trim());
+        return { template: t || "", answer: (a || "").toUpperCase(), alt_answer: (alt || "").toUpperCase(), ok: (t || "").includes("{blank}") && !!a };
+      });
     }
-    // Pipe format
-    return txt.split("\n").map(l => l.trim()).filter(Boolean).map(line => {
-      const [t, a, alt] = line.split("|").map(s => (s || "").trim());
-      return { template: t || "", answer: (a || "").toUpperCase(), alt_answer: (alt || "").toUpperCase(), ok: (t || "").includes("{blank}") && !!a };
+    // Tag duplicates: exact = same sentence shape AND same answer word; near = same sentence OR same answer.
+    const seenInBatch = new Set();
+    return rows.map(r => {
+      if (!r.ok) return { ...r, dup: "none" };
+      const ns = normSentence(r.template);
+      const ans = (r.answer || "").toUpperCase();
+      const sentenceHits = existingIndex.bySentence.get(ns) || [];
+      const answerHits = existingIndex.byAnswer.get(ans) || [];
+      const exactExisting = sentenceHits.some(q => (q.answer || "").toUpperCase() === ans || (q.alt_answer || "").toUpperCase() === ans);
+      const batchKey = ns + "|" + ans;
+      const inBatchDup = seenInBatch.has(batchKey);
+      seenInBatch.add(batchKey);
+      let dup = "none";
+      if (exactExisting || inBatchDup) dup = "exact";
+      else if (sentenceHits.length || answerHits.length) dup = "near";
+      return { ...r, dup, dupInfo: dup === "exact" ? (inBatchDup ? "duplicate within this batch" : "already in this pack") : (sentenceHits.length ? "same sentence exists" : "answer word already used") };
     });
-  }, [raw]);
+  }, [raw, existingIndex]);
+
+  // Default skip: exact duplicates are skipped unless the user un-skips them.
+  useEffect(() => {
+    setSkipIds(prev => {
+      const next = new Set(prev);
+      parsed.forEach((p, i) => { if (!userTouched.has(i)) { if (p.dup === "exact") next.add(i); else next.delete(i); } });
+      return next;
+    });
+  }, [parsed, userTouched]);
+
+  const toggleSkip = (i) => { setUserTouched(t => new Set(t).add(i)); setSkipIds(s => { const n = new Set(s); n.has(i) ? n.delete(i) : n.add(i); return n; }); };
+
   const valid = parsed.filter(p => p.ok);
+  const toImport = parsed.filter((p, i) => p.ok && !skipIds.has(i));
+  const exactCount = parsed.filter(p => p.dup === "exact").length;
+  const nearCount = parsed.filter(p => p.dup === "near").length;
 
   const submit = async () => {
-    if (!valid.length) { setErr("Nothing valid to import yet."); return; }
+    if (!toImport.length) { setErr("Nothing selected to import."); return; }
     setBusy(true); setErr("");
     try {
-      await onDone(valid.map((v, i) => ({ pack_id: packId, template: v.template, answer: v.answer, alt_answer: v.alt_answer, difficulty: "basic", letters_hidden: 2, status: "active", sort_order: 100 + i, ...(v.frame_slots ? { frame_slots: v.frame_slots } : {}) })));
+      await onDone(toImport.map((v, i) => ({ pack_id: packId, template: v.template, answer: v.answer, alt_answer: v.alt_answer, difficulty: "basic", letters_hidden: 2, status: "active", sort_order: 100 + i, ...(v.frame_slots ? { frame_slots: v.frame_slots } : {}) })));
       onClose();
     } catch (e) { setErr(e.message); setBusy(false); }
   };
+
+  const dupStyle = { exact: { fg: C.danger, label: "Duplicate" }, near: { fg: C.warn, label: "Similar" }, none: null };
 
   return (
     <>
@@ -1437,22 +1499,36 @@ function BulkImport({ packId, onDone, onClose }) {
         </div>
         <Textarea value={raw} onChange={(e) => setRaw(e.target.value)} rows={7} autoFocus placeholder={"I am {blank} when I try something new. | BRAVE | BOLD\nBeing {blank} helps me make friends. | KIND | CARING"} style={{ fontFamily: "ui-monospace, monospace", fontSize: 13 }} />
         {raw.trim() && (
-          <div style={{ background: C.bg, borderRadius: R.md, padding: S.md + 2, maxHeight: 200, overflowY: "auto" }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 8 }}>{valid.length} valid · {parsed.length - valid.length} skipped</div>
-            {parsed.map((p, i) => (
-              <div key={i} style={{ fontSize: 13, padding: "5px 0", color: p.ok ? C.ink : C.faint, display: "flex", gap: 8, alignItems: "center", borderBottom: "1px solid " + C.line }}>
-                <span style={{ color: p.ok ? C.good : C.danger, fontWeight: 800 }}>{p.ok ? "✓" : "✕"}</span>
-                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.template.replace(/\{blank\}/g, "___") || <em>empty</em>}</span>
-                {p.ok && <span style={{ color: C.brandInk, fontWeight: 700, fontSize: 12 }}>{[p.answer, p.alt_answer].filter(Boolean).join(" / ")}</span>}
-              </div>
-            ))}
+          <div style={{ background: C.bg, borderRadius: R.md, padding: S.md + 2, maxHeight: 260, overflowY: "auto" }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 8, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <span>{toImport.length} to import · {valid.length - toImport.length} skipped · {parsed.length - valid.length} invalid</span>
+              {exactCount > 0 && <span style={{ color: C.danger }}>● {exactCount} duplicate{exactCount === 1 ? "" : "s"}</span>}
+              {nearCount > 0 && <span style={{ color: C.warn }}>● {nearCount} similar</span>}
+            </div>
+            {parsed.map((p, i) => {
+              const ds = dupStyle[p.dup];
+              const skipped = skipIds.has(i);
+              return (
+                <div key={i} style={{ fontSize: 13, padding: "6px 0", color: !p.ok ? C.faint : skipped ? C.faint : C.ink, display: "flex", gap: 8, alignItems: "center", borderBottom: "1px solid " + C.line, opacity: skipped ? 0.6 : 1 }}>
+                  <span style={{ color: p.ok ? C.good : C.danger, fontWeight: 800 }}>{p.ok ? "✓" : "✕"}</span>
+                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textDecoration: skipped ? "line-through" : "none" }}>{p.template.replace(/\{blank\}/g, "___").replace(/\{([a-zA-Z][\w-]*)\}/g, "$1") || <em>empty</em>}</span>
+                  {p.ok && <span style={{ color: C.brandInk, fontWeight: 700, fontSize: 12 }}>{[p.answer, p.alt_answer].filter(Boolean).join(" / ")}</span>}
+                  {ds && <span title={p.dupInfo} style={{ color: ds.fg, fontWeight: 700, fontSize: 11, padding: "1px 7px", borderRadius: R.pill, border: "1px solid " + ds.fg + "66", whiteSpace: "nowrap" }}>{ds.label}</span>}
+                  {p.ok && p.dup !== "none" && (
+                    <button type="button" onClick={() => toggleSkip(i)} style={{ background: "none", border: "1px solid " + C.line, borderRadius: R.sm, padding: "2px 8px", fontSize: 11, fontWeight: 700, cursor: "pointer", color: C.sub, whiteSpace: "nowrap" }}>
+                      {skipped ? "Keep" : "Skip"}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
         {err && <ErrorState error={err} />}
       </div>
       <ModalFoot>
         <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
-        <Btn onClick={submit} disabled={busy || !valid.length}>{busy ? "Importing…" : `Import ${valid.length} question${valid.length === 1 ? "" : "s"}`}</Btn>
+        <Btn onClick={submit} disabled={busy || !toImport.length}>{busy ? "Importing…" : `Import ${toImport.length} question${toImport.length === 1 ? "" : "s"}`}</Btn>
       </ModalFoot>
     </>
   );
@@ -2558,13 +2634,13 @@ all cross-file components are \`function\` declarations so they hoist):
     primitives.jsx  Btn, Badge, Pill, Field, inputs, Modal, Confirm, Toasts, states
     engine.jsx      transformation engine (buildOutput), profiles/sync/targets data, fetchAllContent
     firebase.jsx    Firebase transport (RTDB/Firestore/CloudFn writers), planWrites
-    editors.jsx     PackEditor, QuestionEditor, BulkImport
+    editors.jsx     PackEditor, QuestionEditor, FrameSlotEditor, BulkImport (with duplicate detection)
     features.jsx    CommandPalette, PlayMode, HealthView, ActivityView, TagInput, ThemeToggle
     publish1.jsx    ProfileBuilder (visual + JSON + preview), ValueMapEditor, FieldMapRow
     firebase2.jsx   FirebaseTargetEditor, CloudFnDocs
     publish2.jsx    PublishHub, ChannelsPanel, SyncHistory, FeedRow
     devnotes.jsx    Developer Notes page + embedded docs (this file)
-    generator.jsx   Content Generator (AI prompt builder): GeneratorView, buildGeneratorPrompt, OUTPUT_FORMATS
+    generator.jsx   Content Generator (AI prompt builder): GeneratorView, buildGeneratorPrompt, buildAvoidList, OUTPUT_FORMATS, MASTER_CONTEXT
     views1.jsx      Dashboard, Library, PackCard
     views2.jsx      PackDetail, AllQuestions, Pager
     shell.jsx       Login, ChangePassword, CloneDialog, App (nav/routing/state), GlobalStyle
@@ -2724,6 +2800,19 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Generator: background context + duplicate avoidance (belt & suspenders):**
+  · A standalone, reusable MASTER_CONTEXT document (the full CBMT "why", who the child is, what
+    good/bad looks like) lives on the Generator page with copy — paste it once at the top of a
+    fresh AI chat, then paste generated prompts after it. An "Include background context" toggle
+    also folds a compact version into the prompt itself.
+  · An "Avoid existing questions" toggle loads the selected pack's questions (new
+    db.allQuestionsForPack, paginated) and appends an "ALREADY COVERED — do not repeat" list
+    (answer words already used + existing sentence signatures) so the AI steers away from dupes.
+  · The Bulk importer now flags duplicates against the pack's existing questions: EXACT (same
+    normalized sentence + same answer, punctuation-insensitive; also catches repeats within the
+    pasted batch) and SIMILAR (same sentence OR same answer word). Exact defaults to skip,
+    similar defaults to keep-but-flagged; every flagged row has a per-row Skip/Keep toggle, and
+    only kept rows import. All verified against real pack data.
 - **Content Generator page (prompt builder):** a new "Generator" nav page (generator.jsx,
   GeneratorView) that assembles a ready-to-paste AI prompt for authoring a batch of questions
   in our format. Controls: pack picker (pre-fills themes from the pack's focus_areas/purpose,
@@ -3124,7 +3213,15 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    {token} system (when toggled), and end with the exact output shape plus a concrete example.
    It live-updates as controls change and offers one-click copy. The bulk importer must accept
    the same JSON shape (including frame_slots) so the generate → paste-into-AI → import loop is
-   closed.
+   closed. The generator should also (a) offer a standalone, reusable "master context" document
+   — the full CBMT background — with copy, plus a toggle to fold a compact version into the
+   prompt; and (b) help avoid regenerating existing content: a toggle that loads the selected
+   pack's questions and appends an "already covered — do not repeat" list (answer words +
+   sentence signatures) to the prompt. As a second line of defense, the bulk importer must flag
+   duplicates against the pack's existing questions — exact (same normalized sentence + answer,
+   punctuation-insensitive, and repeats within the pasted batch) vs similar (same sentence or
+   same answer word) — defaulting exact to skip and similar to keep-but-flagged, with a per-row
+   skip/keep control so the user decides.
 
 ## UX / cross-cutting
 - Dark mode (light/dark/system, persisted, CSS variables). Command palette (⌘/Ctrl-K):
@@ -3589,6 +3686,47 @@ function QuestionLevelEditor({ question, variant, onSave, onClose }) {
 
 const miniLink = { background: "none", border: "none", padding: "2px 4px", cursor: "pointer", color: C.brandInk, fontSize: 12, fontWeight: 700 };
 
+// The standalone, reusable background document. Gives an AI the full "why" behind the game so
+// it authors on-model content rather than pattern-matching. Paste once alongside any prompt.
+const MASTER_CONTEXT = `# Positive Minds — Background & Authoring Context
+
+## What this is
+Positive Minds is a word game for children (roughly ages 5–12) built on **Cognitive Bias Modification Therapy (CBMT)**. The premise of CBMT is simple but powerful: the thoughts a child rehearses shape the thoughts that come automatically. By having children repeatedly complete warm, self-affirming sentences, the game gently trains a more positive, resilient internal voice — building the habit of thinking well of themselves and the world.
+
+## The core mechanic
+Each question is a short, first-person sentence with one missing word — shown as {blank}. The child completes it by choosing between **two words, and both are positive**. There is never a negative or "wrong feeling" option. Whichever the child picks, they affirm something good: "I am BRAVE / BOLD when I try new things." The two words are near-synonyms or equally valid positive choices, so the child is choosing *how* to feel good, never *whether* to.
+
+## Why both words are positive
+This is the therapeutic heart of the design and must never be broken. In ordinary quizzes a child can pick the "wrong" answer and feel bad. Here, the act of answering is itself the intervention: the child's mind rehearses an affirming completion every single time. Offering a negative option would rehearse the exact bias we're trying to soften. So both options are always constructive, kind, and true-feeling.
+
+## Who the child is
+Assume a child who may be shy, anxious, still building confidence, or simply learning emotional vocabulary. The tone is warm, safe, and encouraging — like a kind adult who believes in them. Never clinical, never scary, never shaming. Nothing that references the child doing something wrong, being in danger, or failing. Language is simple and concrete; words are ones a child that age would recognise and be able to spell.
+
+## Developmental progression (levels)
+Content spans developmental levels, from very simple self-affirmations for the youngest ("I am {blank}" → HAPPY / GLAD) up to more nuanced emotional regulation for older children ("I can stay {blank} even when things feel unfair" → CALM / STEADY). Early levels use short, common words and the simplest feelings (confidence, kindness, happiness). Later levels introduce resilience, gratitude, empathy, moral reasoning, and self-regulation. The **game itself** controls how much of the word is hidden at each level — so an author does not need to vary the blank's difficulty, only to write sentences and word-pairs appropriate to the level's theme and age.
+
+## Themes worth covering
+Confidence and self-worth · kindness and caring for others · courage and trying new things · honesty · friendship and belonging · gratitude · patience · resilience and coping with hard feelings · respect · empathy · calm and self-regulation · hope and optimism. Each pack usually centres on one theme.
+
+## What makes a GOOD question
+- A warm, natural, first-person sentence ("I am…", "I feel…", "Being…", "I can…").
+- Exactly one {blank}, placed where a feeling/quality word belongs.
+- Two positive answer words that BOTH fit naturally and are genuinely age-appropriate.
+- Answer words: single words, uppercase, spellable, common for the age.
+- Emotionally true — a child could mean it and feel good saying it.
+
+## What to AVOID
+- Any negative, frightening, sad, or clinical framing.
+- Any implication the child did something wrong or is at fault.
+- Obscure or hard-to-spell words; multi-word answers.
+- Two words where one is clearly better than the other (both should be valid).
+- Repeating an affirmation the pack already covers (see the "already covered" list when provided).
+
+## Optional: frame words
+Some sentences include a second braced word besides {blank} — e.g. "…when things are {hard}". These "frame words" are NOT guessed; they exist so the sentence can be varied for freshness or made gently more advanced at higher levels (hard → difficult → challenging). They are always neutral-to-mild and never undo the positivity of the sentence.
+
+Keep all of the above in mind when authoring. The goal is not just correct puzzles — it is small, repeated moments that leave a child feeling a little braver, kinder, and more capable.`;
+
 // Output-format templates. Each returns the instruction text + a concrete example
 // so the AI knows precisely what to emit. Import-ready formats mirror BulkImport.
 const OUTPUT_FORMATS = {
@@ -3646,13 +3784,43 @@ The Sentence must contain {blank} where the guess word goes.`,
 };
 
 // The core: assemble the full prompt from the chosen options.
-function buildGeneratorPrompt({ pack, levels, selectedLevels, themes, count, format, withFrames, extraNotes }) {
+// Build a compact "already covered — avoid these" section from the pack's existing questions,
+// so the AI steers away from duplicates. We give the answer words (the concepts already used)
+// plus a short signature of each sentence, rather than the full objects, to keep it light.
+function buildAvoidList(existingQuestions) {
+  const qs = existingQuestions || [];
+  if (!qs.length) return "";
+  const answers = new Set();
+  const sigs = [];
+  for (const q of qs) {
+    if (q.answer) answers.add(q.answer.toUpperCase());
+    if (q.alt_answer) answers.add(q.alt_answer.toUpperCase());
+    // A readable signature: the sentence with the blank shown as ___, trimmed.
+    const sig = (q.template || "").replace(/\{blank\}/g, "___").replace(/\{([a-zA-Z][\w-]*)\}/g, "$1").trim();
+    if (sig) sigs.push(sig);
+  }
+  const lines = [];
+  lines.push(`ALREADY COVERED — DO NOT REPEAT THESE:`);
+  lines.push(`This pack already contains ${qs.length} question${qs.length === 1 ? "" : "s"}. Do NOT reproduce any of them, and avoid trivial rewordings. Produce genuinely new sentences and, where possible, fresh answer words.`);
+  if (answers.size) lines.push(`Answer words already used (prefer different words): ${[...answers].sort().join(", ")}.`);
+  if (sigs.length) {
+    lines.push(`Existing sentences (do not duplicate these):`);
+    for (const s of sigs) lines.push(`- ${s}`);
+  }
+  return lines.join("\n");
+}
+
+function buildGeneratorPrompt({ pack, levels, selectedLevels, themes, count, format, withFrames, extraNotes, existingQuestions, includeContext, avoidExisting }) {
   const fmt = OUTPUT_FORMATS[format] || OUTPUT_FORMATS.json;
   const levelDefs = (levels || []).filter(l => selectedLevels.includes(l.level)).sort((a, b) => a.level - b.level);
 
   const lines = [];
   lines.push(`You are helping author content for "Positive Minds", a Cognitive Bias Modification Therapy (CBMT) word game for children roughly aged 5–12.`);
   lines.push("");
+  if (includeContext) {
+    lines.push(`BACKGROUND (why this matters): CBMT works on the principle that the thoughts a child rehearses become the thoughts that come automatically. Every question has the child complete a warm, first-person sentence by choosing between TWO positive words — so the act of answering always rehearses an affirming thought. There is never a negative option. The tone is warm, safe and encouraging, never clinical or shaming, and never implies the child did anything wrong. Words are simple, common, and spellable for the age. The aim is small, repeated moments that leave a child feeling a little braver, kinder, and more capable.`);
+    lines.push("");
+  }
   lines.push(`THE GAME MECHANIC: each question is a short, affirming sentence with one missing word. The child fills in the blank by choosing between TWO words — and BOTH words are positive. There is never a "wrong feeling" option; the child always affirms something good about themselves. The missing word is written as {blank} in the sentence.`);
   lines.push("");
 
@@ -3696,6 +3864,11 @@ function buildGeneratorPrompt({ pack, levels, selectedLevels, themes, count, for
     lines.push(`ADDITIONAL INSTRUCTIONS: ${extraNotes.trim()}`);
   }
 
+  if (avoidExisting) {
+    const avoid = buildAvoidList(existingQuestions);
+    if (avoid) { lines.push(""); lines.push(avoid); }
+  }
+
   lines.push("");
   lines.push(`HOW MANY: produce ${count} questions.`);
   lines.push("");
@@ -3720,16 +3893,28 @@ function GeneratorView({ packs, levels }) {
   const [withFrames, setWithFrames] = useState(false);
   const [extraNotes, setExtraNotes] = useState("");
   const [copied, setCopied] = useState(false);
+  const [includeContext, setIncludeContext] = useState(true);
+  const [avoidExisting, setAvoidExisting] = useState(true);
+  const [existingQuestions, setExistingQuestions] = useState([]);
+  const [loadingQs, setLoadingQs] = useState(false);
+  const [showContextDoc, setShowContextDoc] = useState(false);
+  const [ctxCopied, setCtxCopied] = useState(false);
 
-  // When a pack is chosen, pre-fill themes from its focus areas (editable).
-  const applyPack = (id) => {
+  // When a pack is chosen, pre-fill themes from its focus areas (editable) and load its
+  // existing questions so we can build an "avoid these" list.
+  const applyPack = async (id) => {
     setPackId(id);
     const p = (packs || []).find(x => x.id === id);
     if (p) {
       setThemes(p.focus_areas || p.purpose || "");
-      // Default the level selection to the pack's own level if nothing chosen yet.
       if (selectedLevels.length === 0 && p.level) setSelectedLevels([p.level]);
     }
+    setExistingQuestions([]);
+    if (!id) return;
+    setLoadingQs(true);
+    try { const qs = await db.allQuestionsForPack(id); setExistingQuestions(qs || []); }
+    catch { setExistingQuestions([]); }
+    finally { setLoadingQs(false); }
   };
 
   const toggleLevel = (lvl) => setSelectedLevels(s => s.includes(lvl) ? s.filter(x => x !== lvl) : [...s, lvl].sort((a, b) => a - b));
@@ -3737,9 +3922,14 @@ function GeneratorView({ packs, levels }) {
   const noLevels = () => setSelectedLevels([]);
 
   const prompt = useMemo(
-    () => buildGeneratorPrompt({ pack, levels: realLevels, selectedLevels, themes, count, format, withFrames, extraNotes }),
-    [pack, realLevels, selectedLevels, themes, count, format, withFrames, extraNotes]
+    () => buildGeneratorPrompt({ pack, levels: realLevels, selectedLevels, themes, count, format, withFrames, extraNotes, existingQuestions, includeContext, avoidExisting }),
+    [pack, realLevels, selectedLevels, themes, count, format, withFrames, extraNotes, existingQuestions, includeContext, avoidExisting]
   );
+
+  const copyContextDoc = async () => {
+    try { await navigator.clipboard.writeText(MASTER_CONTEXT); setCtxCopied(true); setTimeout(() => setCtxCopied(false), 1800); notify("Context document copied"); }
+    catch { notify("Couldn't copy — select and copy manually", { kind: "error" }); }
+  };
 
   const copyPrompt = async () => {
     try { await navigator.clipboard.writeText(prompt); setCopied(true); setTimeout(() => setCopied(false), 1800); notify("Prompt copied"); }
@@ -3812,9 +4002,46 @@ function GeneratorView({ packs, levels }) {
               </span>
             </label>
 
+            <label style={{ display: "flex", alignItems: "flex-start", gap: 9, cursor: "pointer" }}>
+              <input type="checkbox" checked={includeContext} onChange={(e) => setIncludeContext(e.target.checked)} style={{ width: 16, height: 16, accentColor: C.brand, marginTop: 2 }} />
+              <span style={{ fontSize: 13.5, color: C.ink, fontWeight: 600 }}>Include background context
+                <div style={{ fontSize: 12, color: C.sub, fontWeight: 500, marginTop: 1 }}>Prepend a short "why this matters" so the AI writes on-model. (Full doc below.)</div>
+              </span>
+            </label>
+
+            <label style={{ display: "flex", alignItems: "flex-start", gap: 9, cursor: pack ? "pointer" : "not-allowed", opacity: pack ? 1 : 0.55 }}>
+              <input type="checkbox" checked={avoidExisting} disabled={!pack} onChange={(e) => setAvoidExisting(e.target.checked)} style={{ width: 16, height: 16, accentColor: C.brand, marginTop: 2 }} />
+              <span style={{ fontSize: 13.5, color: C.ink, fontWeight: 600 }}>Avoid existing questions
+                <div style={{ fontSize: 12, color: C.sub, fontWeight: 500, marginTop: 1 }}>
+                  {!pack ? "Pick a pack first." : loadingQs ? "Loading this pack's questions…" : `Tell the AI not to repeat the ${existingQuestions.length} question${existingQuestions.length === 1 ? "" : "s"} already in this pack.`}
+                </div>
+              </span>
+            </label>
+
             <Field label="Extra instructions" hint="Optional — anything specific to add to the prompt">
               <Textarea value={extraNotes} onChange={(e) => setExtraNotes(e.target.value)} rows={2} placeholder="e.g. avoid words with silent letters; keep answers under 6 letters" />
             </Field>
+          </div>
+
+          {/* Master context document — standalone, reusable */}
+          <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, overflow: "hidden" }}>
+            <button type="button" onClick={() => setShowContextDoc(v => !v)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: S.lg, background: "none", border: "none", cursor: "pointer", textAlign: "left" }}>
+              <span style={{ fontSize: 14, fontWeight: 800, color: C.ink }}>{showContextDoc ? "▾" : "▸"} Master context document</span>
+              <div style={{ flex: 1 }} />
+              <span style={{ fontSize: 12, color: C.faint }}>reusable</span>
+            </button>
+            {showContextDoc && (
+              <div style={{ padding: `0 ${S.lg}px ${S.lg}px`, display: "grid", gap: S.md }}>
+                <div style={{ fontSize: 12.5, color: C.sub, lineHeight: 1.5 }}>
+                  The full background on the game's purpose and CBMT model. Paste this once at the top of a fresh AI chat, then paste the generated prompt after it — the AI keeps the context for every batch you ask for in that chat.
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <Btn size="sm" onClick={copyContextDoc} icon={ctxCopied ? "✓" : "⧉"}>{ctxCopied ? "Copied" : "Copy document"}</Btn>
+                </div>
+                <Textarea readOnly value={MASTER_CONTEXT} rows={12} onFocus={(e) => e.target.select()}
+                  style={{ fontFamily: "ui-monospace, monospace", fontSize: 12, lineHeight: 1.55, background: C.bg, resize: "vertical" }} />
+              </div>
+            )}
           </div>
         </div>
 
