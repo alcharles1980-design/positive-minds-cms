@@ -85,7 +85,7 @@ const {
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.04-6",
+  build: "2026.07.04-7",
   // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
@@ -6651,6 +6651,14 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Overview: dropped the "Levels in use / of 10" box — it was measuring the wrong thing.** It
+  counted the distinct DEFAULT levels questions are assigned to, but every question renders at ALL
+  10 levels (that's the point of the level system), so "2 of 10" wrongly implied only 2 levels'
+  worth of content existed. Replaced it with a "Published packs · live in the game" box (a
+  genuinely operational number). The level DISTRIBUTION is still shown correctly by the "questions
+  by level" mini bar-chart in the Library-health card, which conveys the spread without the
+  misleading "of 10" framing. (The RPC's now-unused distinct_levels_used field was left in place;
+  harmless.)
 - **Removed the basic/advanced TIER concept entirely — the level number is the difficulty.**
   Tier was a redundant leftover from the old model (like the purged difficulty field): the app
   already has a clean 1–10 level progression, so classifying levels into basic/advanced added
@@ -7130,10 +7138,12 @@ refocus) AND reactively on a 401 with one retry, falling back to login only if t
 token is genuinely dead or the 7 days elapse. Anon publishable key authorizes reads only.
 
 ## Features to build
-1. **Dashboard/Overview:** aggregate stats (packs, questions, levels in use [how many of the
-   10 levels have questions], a "questions by level" mini bar-chart of the distribution, empty
-   packs, avg/pack) via one RPC; quick actions; and a compact at-a-glance index of ALL pack names
-   (one line each, tap to open).
+1. **Dashboard/Overview:** four headline stat boxes — total packs (published/draft in subtitle),
+   questions (active in subtitle), published packs (live in the game), and empty packs (need
+   content) — plus a "questions by level" mini bar-chart showing the distribution across the 10
+   levels in the Library-health card. Do NOT add a "levels in use / of 10" box: every question
+   renders at all 10 levels, so counting distinct assigned levels is misleading. All via one RPC;
+   quick actions; and a compact at-a-glance index of ALL pack names (one line each, tap to open).
 2. **Library:** pack cards (emoji, color accent, status, question counts); search + status/
    difficulty filters; drag-to-reorder; clone (duplicate pack + questions); delete with
    optimistic Undo; JSON import/export that round-trips the FULL model (pack level + purpose/
@@ -9086,7 +9096,7 @@ function Dashboard({
     style: {
       marginBottom: S.lg
     }
-  }, stat(d.total_packs ?? 0, "Total packs", C.brand, `${d.published_packs ?? 0} published · ${d.draft_packs ?? 0} draft`), stat(d.total_questions ?? 0, "Questions", C.ink, `${d.active_questions ?? 0} active`), stat(d.distinct_levels_used ?? 0, "Levels in use", C.good, "of 10 levels"), stat(d.empty_packs ?? 0, "Empty packs", (d.empty_packs ?? 0) > 0 ? C.warn : C.good, "need content")), /*#__PURE__*/React.createElement("div", {
+  }, stat(d.total_packs ?? 0, "Total packs", C.brand, `${d.published_packs ?? 0} published · ${d.draft_packs ?? 0} draft`), stat(d.total_questions ?? 0, "Questions", C.ink, `${d.active_questions ?? 0} active`), stat(d.published_packs ?? 0, "Published packs", C.good, "live in the game"), stat(d.empty_packs ?? 0, "Empty packs", (d.empty_packs ?? 0) > 0 ? C.warn : C.good, "need content")), /*#__PURE__*/React.createElement("div", {
     className: "pm-dash-2",
     style: {
       display: "grid",
