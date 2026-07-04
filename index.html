@@ -655,15 +655,6 @@ const maskWord = (word, letters, position = "end", grouping = "grouped") => {
 
 // Resolve the effective blank-shape settings for a question:
 // question override → its level's default → pack's level default → fallback.
-const effectiveMask = (q, packLevel, levels) => {
-  const lvlNum = q?.level ?? packLevel ?? 1;
-  const def = (levels || []).find(l => l.level === lvlNum) || {};
-  return {
-    position: q?.letter_position || def.letter_position || "end",
-    grouping: q?.letter_grouping || def.letter_grouping || "grouped"
-  };
-};
-
 // Resolve frame-word slots for a given level. A slot is any {token} in the template other
 // than {blank} (the selectable target). Each slot may define a `pool` of variations and an
 // optional per-level pick in `byLevel`. Resolution: byLevel[level] wins; else a deterministic
@@ -719,16 +710,77 @@ const resolveFrameMap = (template, frameSlots, level) => {
   }
   return map;
 };
-const previewQuestion = (template, answer, alt, letters, difficulty, position = "end", grouping = "grouped", frameSlots = null, level = 1) => {
-  const word = (answer || "____").toUpperCase();
-  let blank;
-  if (difficulty === "advanced" || letters >= word.length) blank = "_".repeat(Math.max(3, word.length));else blank = maskWord(word, letters, position, grouping);
-  const withSlots = resolveSlots(template, frameSlots, level);
-  const sentence = withSlots.replace(/\{blank\}/g, blank);
-  const opts = [answer, alt].filter(Boolean).map(w => w.toUpperCase()).join(" / ");
-  return {
-    sentence,
-    opts
+
+// Build the per-level variants for a question — the SINGLE shared rendering engine used by the
+// editor preview, the question-list rows, Play mode, the export, and (mirrored) the game feed.
+// Each level's hidden_mode decides letters-vs-whole-word; per-level overrides win over the level
+// default, which wins over the question's own placement.
+const buildLevelVariants = (q, levels, overrides = {}) => {
+  return (levels || []).map(lvl => {
+    const ov = overrides[lvl.level] || {};
+    const hasOv = Object.keys(ov).filter(k => !["question_id", "level", "updated_at"].includes(k) && ov[k] != null).length > 0;
+    const template = ov.template ?? q.template;
+    const answer = ov.answer ?? q.answer;
+    const alt = ov.alt_answer ?? q.alt_answer;
+    const word = (answer || "").toUpperCase();
+    const isWord = lvl.hidden_mode === "word";
+    const letters = ov.letters_hidden ?? (isWord ? word.length : Math.min(lvl.letters_hidden_default || 2, Math.max(1, word.length - 1)));
+    const position = ov.letter_position ?? q.letter_position ?? lvl.letter_position ?? "end";
+    const grouping = ov.letter_grouping ?? q.letter_grouping ?? lvl.letter_grouping ?? "grouped";
+    const blank = isWord || letters >= word.length ? "_".repeat(Math.max(3, word.length)) : maskWord(word, letters, position, grouping);
+    const withSlots = resolveSlots(template, q.frame_slots, lvl.level);
+    const sentence = withSlots.replace(/\{blank\}/g, blank);
+    const frames = resolveFrameMap(template, q.frame_slots, lvl.level);
+    return {
+      level: lvl.level,
+      name: lvl.name,
+      color: lvl.color,
+      tier: lvl.tier,
+      sentence,
+      blank,
+      letters,
+      position,
+      grouping,
+      target: {
+        word: (answer || "").toUpperCase(),
+        altWord: (alt || "").toUpperCase(),
+        blankShape: blank,
+        wholeWord: isWord || letters >= word.length,
+        lettersHidden: isWord || letters >= word.length ? word.length : letters,
+        position,
+        grouping
+      },
+      frames,
+      opts: [answer, alt].filter(Boolean).map(w => w.toUpperCase()).join(" / "),
+      isOverride: hasOv,
+      enabled: ov.enabled !== false,
+      override: ov
+    };
+  });
+};
+
+// Preview a question as the child sees it AT A GIVEN LEVEL, using the shared engine above so the
+// list rows / Play mode match the editor and the game exactly. Falls back to a bare level def
+// when the full level list isn't handy.
+const previewAtLevel = (q, levels, packLevel) => {
+  const lvlNum = q?.level ?? packLevel ?? 1;
+  let def = (levels || []).find(l => l.level === lvlNum);
+  if (!def) def = {
+    level: lvlNum,
+    hidden_mode: lvlNum >= 7 ? "word" : "letters",
+    letters_hidden_default: 2,
+    letter_position: "end",
+    letter_grouping: "grouped"
+  };
+  const v = buildLevelVariants(q, [def], {})[0];
+  return v ? {
+    sentence: v.sentence,
+    opts: v.opts,
+    blank: v.blank,
+    letters: v.letters
+  } : {
+    sentence: q?.template || "",
+    opts: ""
   };
 };
 
@@ -2725,15 +2777,20 @@ function QuestionEditor({
   onClose
 }) {
   const isNew = !question?.id;
+  const levelList = levels && levels.length ? levels : Array.from({
+    length: 10
+  }, (_, i) => ({
+    level: i + 1,
+    name: "",
+    hidden_mode: i >= 6 ? "word" : "letters"
+  }));
   const [f, setF] = useState({
     template: question?.template || "I am {blank} when …",
     answer: question?.answer || "",
     alt_answer: question?.alt_answer || "",
-    letters_hidden: question?.letters_hidden ?? 2,
     level: question?.level ?? null,
     letter_position: question?.letter_position ?? null,
     letter_grouping: question?.letter_grouping ?? null,
-    difficulty: question?.difficulty || (packDifficulty === "advanced" ? "advanced" : "basic"),
     status: question?.status || "active",
     notes: question?.notes || "",
     frame_slots: question?.frame_slots || {}
@@ -2745,8 +2802,33 @@ function QuestionEditor({
     [k]: v
   }));
   const hasBlank = f.template.includes("{blank}");
-  const em = effectiveMask(f, packLevel, levels);
-  const pv = previewQuestion(f.template, f.answer, f.alt_answer, f.letters_hidden, f.difficulty, em.position, em.grouping, f.frame_slots, f.level || packLevel || 1);
+
+  // The question's own base level (its override, or the pack's level).
+  const baseLevel = f.level ?? packLevel ?? 1;
+  // Which level to PREVIEW as (defaults to the base level; user can flip through any).
+  const [previewLevel, setPreviewLevel] = useState(baseLevel);
+  // Keep the preview level valid/sensible as the base level changes.
+  useEffect(() => {
+    setPreviewLevel(f.level ?? packLevel ?? 1);
+  }, [f.level, packLevel]);
+  const previewLvlDef = levelList.find(l => l.level === previewLevel) || levelList[0] || {};
+  const previewHidesLetters = previewLvlDef.hidden_mode !== "word";
+
+  // Build the real per-level variant for the previewed level, using the SAME engine the game
+  // uses — so the editor preview matches exactly what the child will see.
+  const previewVariant = useMemo(() => {
+    const qForBuild = {
+      template: f.template,
+      answer: f.answer,
+      alt_answer: f.alt_answer,
+      frame_slots: f.frame_slots,
+      letter_position: f.letter_position,
+      letter_grouping: f.letter_grouping
+    };
+    const variants = buildLevelVariants(qForBuild, [previewLvlDef], {});
+    return variants[0] || null;
+  }, [f.template, f.answer, f.alt_answer, f.frame_slots, f.letter_position, f.letter_grouping, previewLvlDef]);
+
   // Detect frame-word tokens in the template ({token} where token !== blank).
   const frameTokens = [...new Set([...f.template.matchAll(/\{([a-zA-Z][\w-]*)\}/g)].map(m => m[1]).filter(t => t !== "blank"))];
   const submit = async () => {
@@ -2759,11 +2841,20 @@ function QuestionEditor({
     // Only persist slots whose token still appears in the template.
     const cleanedSlots = {};
     for (const t of frameTokens) if (f.frame_slots[t]) cleanedSlots[t] = f.frame_slots[t];
+    // Derive legacy difficulty/letters_hidden from the question's base level so filters, pack
+    // pills and exports stay coherent — these are no longer edited directly (the level drives
+    // how much is hidden). difficulty mirrors the base level's tier; letters_hidden mirrors its
+    // default (0 when the level hides the whole word).
+    const baseDef = levelList.find(l => l.level === baseLevel) || {};
+    const derivedDifficulty = baseDef.tier === "advanced" || baseDef.hidden_mode === "word" ? "advanced" : "basic";
+    const derivedLetters = baseDef.hidden_mode === "word" ? 0 : baseDef.letters_hidden_default ?? 2;
     try {
       await onSave({
         ...f,
         frame_slots: cleanedSlots,
         pack_id: packId,
+        difficulty: derivedDifficulty,
+        letters_hidden: derivedLetters,
         answer: f.answer.toUpperCase().trim(),
         alt_answer: f.alt_answer.toUpperCase().trim()
       }, question?.id);
@@ -2818,53 +2909,107 @@ function QuestionEditor({
     value: f.alt_answer,
     onChange: e => set("alt_answer", e.target.value),
     placeholder: "BOLD"
-  }))), /*#__PURE__*/React.createElement("div", {
-    className: "pm-form-2"
-  }, /*#__PURE__*/React.createElement(Field, {
-    label: "Difficulty"
-  }, /*#__PURE__*/React.createElement(Select, {
-    value: f.difficulty,
-    onChange: e => set("difficulty", e.target.value)
-  }, /*#__PURE__*/React.createElement("option", {
-    value: "basic"
-  }, "Basic (hide letters)"), /*#__PURE__*/React.createElement("option", {
-    value: "advanced"
-  }, "Advanced (hide whole word)"))), /*#__PURE__*/React.createElement(Field, {
-    label: "Letters hidden",
-    hint: f.difficulty === "advanced" ? "Whole word hidden" : "For basic mode"
-  }, /*#__PURE__*/React.createElement(Input, {
-    type: "number",
-    min: 0,
-    value: f.letters_hidden,
-    disabled: f.difficulty === "advanced",
-    onChange: e => set("letters_hidden", parseInt(e.target.value) || 0)
   }))), /*#__PURE__*/React.createElement(Field, {
     label: "Level",
-    hint: "Override this question's level, or inherit the pack's default"
+    hint: "Sets how this question is hidden. Each level controls letters-vs-whole-word; you can override the pack's default here."
   }, /*#__PURE__*/React.createElement(Select, {
     value: f.level ?? "",
     onChange: e => set("level", e.target.value === "" ? null : parseInt(e.target.value))
   }, /*#__PURE__*/React.createElement("option", {
     value: ""
-  }, "Inherit pack", packLevel ? ` (Level ${packLevel})` : ""), (levels && levels.length ? levels : Array.from({
-    length: 10
-  }, (_, i) => ({
-    level: i + 1,
-    name: ""
-  }))).map(l => /*#__PURE__*/React.createElement("option", {
+  }, "Inherit pack", packLevel ? ` (Level ${packLevel})` : ""), levelList.map(l => /*#__PURE__*/React.createElement("option", {
     key: l.level,
     value: l.level
-  }, "Level ", l.level, l.name ? ` — ${l.name}` : "")))), f.difficulty !== "advanced" && /*#__PURE__*/React.createElement("div", {
+  }, "Level ", l.level, l.name ? ` — ${l.name}` : "", l.hidden_mode === "word" ? " (whole word)" : "")))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.brandSoft,
+      borderRadius: R.lg,
+      padding: `${S.lg}px ${S.lg + 2}px`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      marginBottom: 10,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      fontWeight: 800,
+      color: C.brandInk,
+      letterSpacing: 0.5
+    }
+  }, "HOW THE CHILD SEES IT"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      fontWeight: 700,
+      color: C.brandInk,
+      opacity: 0.75
+    }
+  }, "Preview level:"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 4
+    }
+  }, levelList.map(l => {
+    const on = l.level === previewLevel;
+    const isBase = l.level === baseLevel;
+    return /*#__PURE__*/React.createElement("button", {
+      key: l.level,
+      type: "button",
+      onClick: () => setPreviewLevel(l.level),
+      title: `${l.name || "Level " + l.level}${isBase ? " · this question's level" : ""}${l.hidden_mode === "word" ? " · whole word" : ""}`,
+      style: {
+        padding: "3px 8px",
+        borderRadius: R.pill,
+        fontSize: 11.5,
+        fontWeight: 800,
+        cursor: "pointer",
+        position: "relative",
+        border: "1px solid " + (on ? C.brand : isBase ? C.brand + "88" : "transparent"),
+        background: on ? C.brand : "transparent",
+        color: on ? "#fff" : C.brandInk
+      }
+    }, l.level);
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 17,
+      color: C.ink,
+      fontWeight: 500,
+      lineHeight: 1.4
+    }
+  }, previewVariant?.sentence || "…"), previewVariant?.opts && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 14,
+      color: C.brandInk,
+      fontWeight: 800,
+      marginTop: 8
+    }
+  }, "→ ", previewVariant.opts), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: C.brandInk,
+      opacity: 0.7,
+      marginTop: 8
+    }
+  }, previewHidesLetters ? `This level hides ${previewVariant?.letters ?? "some"} letter${(previewVariant?.letters ?? 2) === 1 ? "" : "s"}.` : "This level hides the whole word.", previewLevel === baseLevel ? " (this question's level)" : "")), previewHidesLetters && /*#__PURE__*/React.createElement("div", {
     className: "pm-form-2"
   }, /*#__PURE__*/React.createElement(Field, {
     label: "Missing letters position",
-    hint: "Override, or inherit the level"
+    hint: "Override the level's placement for this question"
   }, /*#__PURE__*/React.createElement(Select, {
     value: f.letter_position ?? "",
     onChange: e => set("letter_position", e.target.value === "" ? null : e.target.value)
   }, /*#__PURE__*/React.createElement("option", {
     value: ""
-  }, "Inherit level"), /*#__PURE__*/React.createElement("option", {
+  }, "Inherit level (", previewLvlDef.letter_position || "end", ")"), /*#__PURE__*/React.createElement("option", {
     value: "start"
   }, "Towards the start"), /*#__PURE__*/React.createElement("option", {
     value: "middle"
@@ -2874,45 +3019,17 @@ function QuestionEditor({
     value: "random"
   }, "Random"))), /*#__PURE__*/React.createElement(Field, {
     label: "When 2+ hidden",
-    hint: "Override, or inherit the level"
+    hint: "Override the level's grouping for this question"
   }, /*#__PURE__*/React.createElement(Select, {
     value: f.letter_grouping ?? "",
     onChange: e => set("letter_grouping", e.target.value === "" ? null : e.target.value)
   }, /*#__PURE__*/React.createElement("option", {
     value: ""
-  }, "Inherit level"), /*#__PURE__*/React.createElement("option", {
+  }, "Inherit level (", previewLvlDef.letter_grouping || "grouped", ")"), /*#__PURE__*/React.createElement("option", {
     value: "grouped"
   }, "Grouped together"), /*#__PURE__*/React.createElement("option", {
     value: "spread"
-  }, "Spread apart")))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      background: C.brandSoft,
-      borderRadius: R.lg,
-      padding: `${S.lg}px ${S.lg + 2}px`
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11,
-      fontWeight: 800,
-      color: C.brandInk,
-      letterSpacing: 0.5,
-      marginBottom: 8
-    }
-  }, "HOW THE CHILD SEES IT"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 17,
-      color: C.ink,
-      fontWeight: 500,
-      lineHeight: 1.4
-    }
-  }, pv.sentence), pv.opts && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 14,
-      color: C.brandInk,
-      fontWeight: 800,
-      marginTop: 8
-    }
-  }, "→ ", pv.opts)), frameTokens.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "Spread apart")))), frameTokens.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       border: "1px solid " + C.line,
       borderRadius: R.lg,
@@ -3560,8 +3677,7 @@ function PlayMode({
     setCorrect(0);
     setDone(false);
   };
-  const em = q ? effectiveMask(q, pack.level, levels) : null;
-  const pv = q ? previewQuestion(q.template, q.answer, q.alt_answer, q.letters_hidden, q.difficulty, em.position, em.grouping) : null;
+  const pv = q ? previewAtLevel(q, levels, pack.level) : null;
   return /*#__PURE__*/React.createElement("div", {
     style: {
       position: "fixed",
@@ -6314,7 +6430,7 @@ config → data layer → design tokens → hooks → primitives → feature vie
   letter_grouping (grouped/spread), color. Packs have a \`level\` (default); questions
   have nullable \`level\`, \`letter_position\`, \`letter_grouping\` (null = inherit).
   The blank SHAPE is computed by maskWord(word, letters, position, grouping) and the
-  effective settings resolve question-override → level-default (effectiveMask helper).
+  effective settings resolve question-override → level-default (via buildLevelVariants).
 - \`pm_question_levels\` — per-question, per-level OVERRIDES. Every question is a single
   "concept" that auto-renders all 10 levels (buildLevelVariants derives each level's blank
   from the question + the level rules). A row exists here ONLY when a specific level's
@@ -6419,6 +6535,22 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Question editor reconciled with the level system (bug fix):** the editor still exposed the
+  OLD model — a per-question "Difficulty" (basic/advanced) toggle and a "Letters hidden" number
+  — but rendering has long been driven by the LEVEL (hidden_mode, letters_hidden_default,
+  position, grouping), so those controls did nothing (you literally couldn't change how many
+  letters were hidden). Removed both. The editor now: sets the question's Level (which controls
+  letters-vs-whole-word), shows position/grouping overrides only when the previewed level hides
+  letters, and — crucially — the "how the child sees it" preview now renders through the SAME
+  engine as the game (buildLevelVariants) with a level picker so you can flip through every
+  level and see exactly what the child sees. On save, difficulty/letters_hidden are DERIVED from
+  the question's level (so filters, pack pills and exports stay coherent) rather than edited.
+- **One shared preview engine:** buildLevelVariants moved to core.jsx (single source), and a new
+  previewAtLevel() helper now powers the editor, the question-list rows, the search-result rows,
+  and Play mode — all previously used a separate previewQuestion() path that could drift from the
+  game. previewQuestion and effectiveMask (both now unused) were removed. buildLevelVariants also
+  now honors the question's own letter_position/grouping at the base level (was ignored before).
+  Verified the editor/rows/game render identically across levels.
 - **Audit pass on the generator/import loop:**
   · Import now sanitizes AI/user-supplied frame_slots before it reaches the DB
     (sanitizeFrameSlots): pool coerced to a clean string array, byLevel keys must be numeric
@@ -6565,7 +6697,7 @@ that network-first caches GETs).
   (letter_position: start/middle/end/random) and whether multiple hidden letters are
   grouped or spread (letter_grouping). maskWord() generates the actual blank; the "how the
   child sees it" preview, the question rows, PlayMode, and search all reflect it.
-  Question-level overrides fall back to the level default (effectiveMask). Defaults were
+  Question-level overrides fall back to the level default (in buildLevelVariants). Defaults were
   seeded to match the concept deck (b__ve style = middle/grouped for the gentle levels).
 - **10-level progression structure:** a \`pm_levels\` table defines levels 1–10, each with
   letter-hiding rules, word-length/complexity, emotional theme, and age hint (grounded in
@@ -6646,9 +6778,10 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
   questions have a nullable \`level\` (null = inherit pack). Effective level = coalesce(
   question.level, pack.level). Levels also define blank SHAPE: letter_position (start/
   middle/end/random) and letter_grouping (grouped/spread), overridable per question.
-  maskWord(word, letters, position, grouping) generates the blank; effectiveMask(q, packLevel,
-  levels) resolves the override→default chain. If you change how blanks render, update
-  maskWord in ONE place — every view (preview, rows, PlayMode) and the search RPC use it.
+  maskWord(word, letters, position, grouping) generates the blank; buildLevelVariants(q, levels,
+  overrides) resolves the override→level→question chain, and previewAtLevel wraps it for single
+  rows. If you change how blanks render, update maskWord/buildLevelVariants in ONE place — every
+  view (editor preview, rows, PlayMode, export) and the game feed mirror it.
 - Multi-level concepts: every question renders all 10 levels via buildLevelVariants (question
   + level rules → per-level blank). Overrides live in pm_question_levels (one row per edited
   level; absent = auto-generated). The question-bank row expands to show all variants. Don't
@@ -7172,53 +7305,7 @@ const db_qlevels = {
 
 // Build all level variants for a question. `overrides` is a map { [level]: overrideRow }.
 // Each variant renders the SAME concept at that level's blank difficulty.
-const buildLevelVariants = (q, levels, overrides = {}) => {
-  return (levels || []).map(lvl => {
-    const ov = overrides[lvl.level] || {};
-    const hasOv = Object.keys(ov).filter(k => !["question_id", "level", "updated_at"].includes(k) && ov[k] != null).length > 0;
-    const template = ov.template ?? q.template;
-    const answer = ov.answer ?? q.answer;
-    const alt = ov.alt_answer ?? q.alt_answer;
-    const word = (answer || "").toUpperCase();
-    const isWord = lvl.hidden_mode === "word";
-    const letters = ov.letters_hidden ?? (isWord ? word.length : Math.min(lvl.letters_hidden_default || 2, Math.max(1, word.length - 1)));
-    const position = ov.letter_position ?? lvl.letter_position ?? "end";
-    const grouping = ov.letter_grouping ?? lvl.letter_grouping ?? "grouped";
-    const blank = isWord || letters >= word.length ? "_".repeat(Math.max(3, word.length)) : maskWord(word, letters, position, grouping);
-    // Resolve frame-word slots first, then substitute the target blank.
-    const withSlots = resolveSlots(template, q.frame_slots, lvl.level);
-    const sentence = withSlots.replace(/\{blank\}/g, blank);
-    // Explicit, structured frame-word substitutions for THIS level (token -> resolved word).
-    const frames = resolveFrameMap(template, q.frame_slots, lvl.level);
-    return {
-      level: lvl.level,
-      name: lvl.name,
-      color: lvl.color,
-      tier: lvl.tier,
-      sentence,
-      blank,
-      letters,
-      position,
-      grouping,
-      // The target word is the word the child guesses — given explicitly so the game
-      // never has to parse the sentence to find it.
-      target: {
-        word: (answer || "").toUpperCase(),
-        altWord: (alt || "").toUpperCase(),
-        blankShape: blank,
-        wholeWord: isWord || letters >= word.length,
-        lettersHidden: isWord || letters >= word.length ? word.length : letters,
-        position,
-        grouping
-      },
-      frames,
-      opts: [answer, alt].filter(Boolean).map(w => w.toUpperCase()).join(" / "),
-      isOverride: hasOv,
-      enabled: ov.enabled !== false,
-      override: ov
-    };
-  });
-};
+// buildLevelVariants moved to core.jsx (shared engine, single source for previews + export).
 
 // Small helper: a colored level chip used across the app.
 function LevelChip({
@@ -9780,8 +9867,7 @@ function PackDetail({
       gap: 10
     }
   }, shown.map(q => {
-    const em = effectiveMask(q, pack.level, levels);
-    const pv = previewQuestion(q.template, q.answer, q.alt_answer, q.letters_hidden, q.difficulty, em.position, em.grouping, q.frame_slots, q.level || pack.level || 1);
+    const pv = previewAtLevel(q, levels, pack.level);
     const selected = sel.has(q.id);
     const isOpen = expanded.has(q.id);
     return /*#__PURE__*/React.createElement("div", {
@@ -10088,7 +10174,7 @@ function AllQuestions({
       gap: 10
     }
   }, rows.map(r => {
-    const pv = previewQuestion(r.template, r.answer, r.alt_answer, r.letters_hidden, r.difficulty, r.letter_position, r.letter_grouping, r.frame_slots, r.level || 1);
+    const pv = previewAtLevel(r, levels, r.pack_level || 1);
     return /*#__PURE__*/React.createElement("div", {
       key: r.id,
       className: "pm-qrow pm-qrow-search",
