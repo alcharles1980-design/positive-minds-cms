@@ -2720,10 +2720,17 @@ const DOC_ARCHITECTURE = `# Positive Minds CMS — Site Architecture & Structure
 
 ## 1. What this is
 A content management system for the **Positive Minds** children's word game
-(CBMT — Cognitive Bias Modification Therapy). The game presents fill-in-the-blank
-sentences (e.g. "I am ____ when I try something new." → BRAVE) where the child chooses
-between two positive words — both kind, but only the primary one actually fits the blank
-(the other is a positive distractor). This CMS is the **authoring source of truth**:
+(CBMT — Cognitive Bias Modification Therapy). The game is a SPELLING puzzle: it shows a
+short, warm first-person sentence with one word partly hidden — some letters revealed, the
+rest shown as blanks (e.g. "I feel PR_UD of the things I do") — and the child chooses between
+two positive words. BOTH words are positive (there is never a negative option — the
+therapeutic core), and the child's job is to pick the one whose SPELLING fits the revealed
+letters + blank shape. The primary word (\`answer\`) spells into the pattern; the alternate
+(\`alt_answer\`) is another genuinely-positive word that does NOT fit that letter pattern
+(easiest to guarantee when it's a different length, so it can never match the fixed blanks).
+It is NOT a meaning/comprehension test — both words can make sense in the sentence; the
+LETTERS decide. How much of the word is hidden is controlled by the question's level. This
+CMS is the **authoring source of truth**:
 content is created, organized, reviewed, and version-tracked here, then published to
 a separate game backend through a customizable, multi-channel sync pipeline.
 
@@ -2945,6 +2952,18 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Game mechanic corrected — it's a SPELLING puzzle, not a meaning test:** earlier docs/prompt
+  said "both words positive but only the primary FITS THE MEANING of the sentence". That was
+  wrong. The real mechanic: the sentence shows a word with some letters revealed and some blank;
+  the child picks the positive word whose SPELLING fits the revealed letters + blank shape. Both
+  words are positive (therapeutic core intact); the primary spells into the pattern, the alternate
+  is another positive word that does NOT — reliably guaranteed by giving it a DIFFERENT LENGTH
+  (a different-length word can never match the fixed blanks at any level). Updated the intros of
+  the Architecture doc + Build Prompt, the Play-mode spec (why the primary is correct), the
+  Content Generator spec, AND the live generator (generator.jsx: MASTER_CONTEXT + the AI prompt
+  lines) so generated questions come out spelling-valid, not meaning-based. First real content
+  (10 Confidence questions) was authored/validated under this rule — every distractor is a
+  different length from its answer, verified against the actual maskWord pattern at every level.
 - **Full audit — several real bugs found & fixed:**
   · **Client/edge PARITY bug (important):** the client buildLevelVariants precedence was changed to
     \`ov ?? q.letter_position ?? lvl ?? default\` during the editor rebuild, but the game-feed edge
@@ -3329,10 +3348,15 @@ project + a GitHub repo) to rebuild the entire app.
 ---
 
 Build a content management web app called "Positive Minds" — a CMS for a children's
-word game based on CBMT (Cognitive Bias Modification Therapy). The game shows
-fill-in-the-blank sentences like "I am ____ when I try something new." with two
-positive word options where only the primary word fits the blank (the other is a
-positive-but-wrong distractor); the child must pick the one that fits. This CMS
+word game based on CBMT (Cognitive Bias Modification Therapy). The game is a SPELLING
+puzzle: it shows a warm first-person sentence with one word partly hidden (some letters
+revealed, the rest blank — e.g. "I feel PR_UD of the things I do") and offers TWO positive
+words. Both words are positive (never a negative option — the therapeutic core); the child
+picks the one whose SPELLING fits the revealed letters + blank shape. The primary word
+(\`answer\`) fits the letter pattern; the alternate (\`alt_answer\`) is another positive word
+that does NOT fit it (make it a DIFFERENT LENGTH so it can never match the fixed blanks). It
+is NOT a meaning test — the letters decide which word is correct. How much is hidden is set by
+the question's level. This CMS
 is the authoring + publishing layer; a separate game backend consumes the content.
 
 ## Architecture requirements
@@ -3390,10 +3414,11 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    duplicate detection); multi-select bulk activate/deactivate/delete; and **Play mode** — an
    author preview that plays the pack like a child: for each active question it renders the
    sentence at the effective level (through the shared engine) and shows the two words shuffled.
-   Only the PRIMARY word (answer) is correct; picking it shows "Correct! ✓" and scores a point,
-   picking the alternate shows "Not quite — the answer is X" and reveals the right word (green/red
-   button states). The done screen shows "X of Y correct". Load ALL active questions (paginate —
-   do NOT cap at 100).
+   The PRIMARY word (answer) is the correct one because its SPELLING fits the revealed letters
+   (the alternate is positive too but doesn't match the blank pattern). Picking the primary shows
+   "Correct! ✓" and scores a point; picking the alternate shows "Not quite — the answer is X" and
+   reveals the right word (green/red button states). The done screen shows "X of Y correct". Load
+   ALL active questions (paginate — do NOT cap at 100).
 4. **All questions:** server-side global search across every pack, paginated, click-through
    to the source pack.
 5. **Content health:** lint flags invalid templates (no {blank}), missing 2nd option,
@@ -3487,7 +3512,13 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    levels to target, describes themes, sets a count, chooses the output format each time (an
    import-ready JSON, a simple pipe format, or a review table), and optionally toggles
    frame-word instructions on. The generated prompt must teach the CBMT philosophy, the
-   {blank}-target rule, the both-words-positive rule, the chosen level context, the frame-word
+   {blank}-target rule, and — critically — the SPELLING-PUZZLE rule for the two words: both must
+   be genuinely positive, but only the primary spells into the revealed letters; the alternate
+   is a positive word that must NOT fit the blank's letter pattern. The reliable way to guarantee
+   that is to make the alternate a DIFFERENT LENGTH from the primary (a different-length word can
+   never match the fixed blank shape at any level). It must NOT be a meaning test and the two
+   words must NOT be near-synonyms that both fit — the letters decide. The prompt also teaches
+   the chosen level context, the frame-word
    {token} system (when toggled), and end with the exact output shape plus a concrete example.
    It live-updates as controls change and offers one-click copy. The bulk importer must accept
    the same JSON shape (including frame_slots) so the generate → paste-into-AI → import loop is
@@ -3936,10 +3967,10 @@ const MASTER_CONTEXT = `# Positive Minds — Background & Authoring Context
 Positive Minds is a word game for children (roughly ages 5–12) built on **Cognitive Bias Modification Therapy (CBMT)**. The premise of CBMT is simple but powerful: the thoughts a child rehearses shape the thoughts that come automatically. By having children repeatedly complete warm, self-affirming sentences, the game gently trains a more positive, resilient internal voice — building the habit of thinking well of themselves and the world.
 
 ## The core mechanic
-Each question is a short, first-person sentence with one missing word — shown as {blank}. The child chooses between **two words. Both are positive** — there is never a negative or "wrong feeling" option — but only **one of them (the primary answer) is the correct word that actually fits this sentence**. The second word is also warm and positive, but it does not fit the blank here; it is a gentle distractor, not a synonym. Example: "I am {blank} when I try something new." → primary **BRAVE** (correct), alternate **KIND** (positive, but not what fits this sentence). Both leave the child thinking a good thought; the challenge is choosing the word that truly belongs.
+Each question is a short, first-person sentence with one word partly hidden — some of its letters are revealed and the rest are shown as blanks (e.g. "I feel PR_UD of the things I do"). The child chooses between **two words. Both are positive** — there is never a negative or "wrong feeling" option — and the child's job is to pick the word whose **spelling fits the revealed letters and the blank shape**. The primary word (the answer) spells into the pattern; the second word is another warm, positive word that does **not** fit those letters. This is a SPELLING / word-recognition puzzle, NOT a meaning test — both words can make sense in the sentence; the LETTERS are what decide which is correct. Example: shown "I feel PR_UD…", the options might be PROUD and GLAD — both lovely, but only PROUD spells into P-R-_-U-D.
 
-## Why both words are positive (but only one is correct)
-This is the therapeutic heart of the design and must never be broken. The child should never be offered a negative, unkind, or "bad feeling" option — every word on screen is something good, so even a wrong guess never rehearses a harmful thought. What makes it a real game (not just tapping) is that only the primary word correctly completes the sentence; the positive alternate simply doesn't fit *here*. So "wrong" only ever means "that lovely word doesn't belong in this sentence" — never "you had a bad feeling" or "you failed as a person." Keep both options constructive, kind, and true-feeling; make the primary clearly the best fit and the alternate a plausible-but-not-right positive word.
+## Why both words are positive (spelling decides, not meaning)
+This is the therapeutic heart of the design and must never be broken. Every word on screen is something good, so even a wrong guess never rehearses a harmful thought. What makes it a real game is the SPELLING: only one word matches the letters revealed in the blank. The reliable way to make the second word clearly wrong is to give it a **different length** from the primary — a different-length word can never fit the fixed blanks at any level. Do NOT rely on meaning to separate them and do NOT use near-synonyms of the same length: if both could spell into the pattern, the puzzle has two answers. So "wrong" only ever means "that positive word isn't spelled the way the blanks are" — never "you had a bad feeling" or "you failed."
 
 ## Who the child is
 Assume a child who may be shy, anxious, still building confidence, or simply learning emotional vocabulary. The tone is warm, safe, and encouraging — like a kind adult who believes in them. Never clinical, never scary, never shaming. Nothing that references the child doing something wrong, being in danger, or failing. Language is simple and concrete; words are ones a child that age would recognise and be able to spell.
@@ -4065,10 +4096,10 @@ function buildGeneratorPrompt({ pack, levels, selectedLevels, themes, count, for
   lines.push(`You are helping author content for "Positive Minds", a Cognitive Bias Modification Therapy (CBMT) word game for children roughly aged 5–12.`);
   lines.push("");
   if (includeContext) {
-    lines.push(`BACKGROUND (why this matters): CBMT works on the principle that the thoughts a child rehearses become the thoughts that come automatically. Every question has the child complete a warm, first-person sentence by choosing between TWO positive words — so even a wrong guess never rehearses a harmful thought. Only ONE of the two words (the primary answer) actually fits the sentence; the other is also positive but is a gentle distractor that does not fit here. The tone is warm, safe and encouraging, never clinical or shaming; a wrong pick only means "that kind word doesn't belong in this sentence", never that the child failed. Words are simple, common, and spellable for the age.`);
+    lines.push(`BACKGROUND (why this matters): CBMT works on the principle that the thoughts a child rehearses become the thoughts that come automatically. Every question shows a warm, first-person sentence with one word partly hidden (some letters shown, the rest blank) and offers TWO positive words — so even a wrong guess never rehearses a harmful thought. It is a SPELLING puzzle: the child picks the word whose letters fit the revealed pattern. Only the primary word spells into the blanks; the other is positive too but does not match the letters. The tone is warm and encouraging, never shaming; a wrong pick just means "that word isn't spelled like the blanks", never that the child failed. Words are simple, common, and spellable for the age.`);
     lines.push("");
   }
-  lines.push(`THE GAME MECHANIC: each question is a short, positive first-person sentence with one missing word. The child fills the blank by choosing between TWO words — BOTH positive, but only the PRIMARY word correctly fits the sentence. The second word is positive too, yet does not fit this blank (a gentle distractor, NOT a synonym). There is never a negative or "wrong feeling" option. The missing word is written as {blank} in the sentence.`);
+  lines.push(`THE GAME MECHANIC: each question is a short, positive first-person sentence with one word partly hidden — some letters revealed, the rest shown as blanks. The child picks, from TWO positive words, the one whose SPELLING fits the revealed letters + blank shape. BOTH words are positive (never a negative option); only the PRIMARY word spells into the pattern. The second word is positive too but must NOT fit the letters. This is a spelling/word-recognition puzzle, NOT a meaning test. Write the target word normally; the {blank} token marks where it goes.`);
   lines.push("");
 
   // Pack context
@@ -4095,7 +4126,7 @@ function buildGeneratorPrompt({ pack, levels, selectedLevels, themes, count, for
   // Rules
   lines.push(`RULES (important):`);
   lines.push(`1. Every sentence must contain exactly one {blank}.`);
-  lines.push(`2. Provide TWO answer words, both genuinely positive and age-appropriate. The FIRST (primary) word is the CORRECT answer — it must fit the sentence naturally and be clearly the right completion. The SECOND word is also positive but must NOT fit this sentence — a plausible, kind distractor that a child could be tempted by, yet is not the right word here (e.g. for "I am {blank} when I try something new" → BRAVE as primary, KIND as the alternate: both lovely, but only BRAVE fits). Do NOT make them synonyms; if both fit equally, the question has no correct answer.`);
+  lines.push(`2. Provide TWO answer words, both genuinely positive and age-appropriate. The FIRST (primary) word is the correct answer — it is the word the sentence is really about. The SECOND word must be another positive word whose SPELLING does NOT fit the primary's blank pattern — the simplest reliable way is to make it a DIFFERENT LENGTH from the primary (a different-length word can never match the fixed blanks at any level). Do NOT make them the same length near-synonyms; if both could spell into the pattern the question has two answers. Example: primary PROUD (5) with alternate GLAD (4) — both positive, different lengths, so only PROUD fits "PR_UD".`);
   lines.push(`3. Answer words are single words, UPPERCASE, no punctuation. Prefer common words a child would know; keep them short enough to spell.`);
   lines.push(`4. Sentences are warm, simple, first-person ("I am…", "I feel…", "Being…"), and self-affirming.`);
   lines.push(`5. Avoid anything scary, negative, clinical, or that references the child doing something wrong.`);
