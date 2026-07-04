@@ -360,6 +360,28 @@ const resolveSlots = (template, frameSlots, level) => {
   });
 };
 
+// Like resolveSlots but returns a structured map { token: resolvedWord } for a given level,
+// instead of the rendered string. Lets the export expose exactly which frame words were used.
+const resolveFrameMap = (template, frameSlots, level) => {
+  const map = {};
+  if (!template) return map;
+  for (const m of template.matchAll(/\{([a-zA-Z][\w-]*)\}/g)) {
+    const token = m[1];
+    if (token === "blank") continue;
+    const slot = frameSlots && frameSlots[token];
+    if (!slot) { map[token] = token; continue; }
+    const byLevel = slot.byLevel || {};
+    if (byLevel[level] != null && byLevel[level] !== "") { map[token] = byLevel[level]; continue; }
+    const pool = Array.isArray(slot.pool) ? slot.pool.filter(Boolean) : [];
+    if (pool.length === 0) { map[token] = token; continue; }
+    if (pool.length === 1) { map[token] = pool[0]; continue; }
+    let seed = level | 0;
+    for (let i = 0; i < token.length; i++) seed = (seed * 31 + token.charCodeAt(i)) >>> 0;
+    map[token] = pool[seed % pool.length];
+  }
+  return map;
+};
+
 const previewQuestion = (template, answer, alt, letters, difficulty, position = "end", grouping = "grouped", frameSlots = null, level = 1) => {
   const word = (answer || "____").toUpperCase();
   let blank;
@@ -835,7 +857,7 @@ const toXml = (obj, rootTag = "gameContent") => {
 const buildOutput = (spec, packs, byPack, keyField = "id") => {
   const vm = spec.value_maps || {};
   const qKey = spec.questions_key || "questions";
-  const projectQ = (q) => { const base = projectRow(q, spec.question_fields, vm); if (spec.expand_levels && q.levels) base.levels = q.levels; return base; };
+  const projectQ = (q) => { const base = projectRow(q, spec.question_fields, vm); if (spec.expand_levels && q.levels) base.levels = q.levels; if (spec.include_frames && q.frame_slots && Object.keys(q.frame_slots).length) base.frameSlots = q.frame_slots; return base; };
   const k = (p) => p[keyField];
 
   if (spec.structure === "flat") {
@@ -860,7 +882,7 @@ const withMeta = (spec, body, counts) => {
 
 // Field names available to map from
 const PACK_SOURCE_FIELDS = ["slug", "name", "emoji", "description", "color", "difficulty", "status", "is_custom", "tags", "level", "purpose", "focus_areas", "style_approach", "example_objectives"];
-const QUESTION_SOURCE_FIELDS = ["template", "answer", "alt_answer", "letters_hidden", "difficulty", "status", "notes", "level", "effective_level", "letter_position", "letter_grouping", "frame_slots"];
+const QUESTION_SOURCE_FIELDS = ["template", "base_sentence", "answer", "alt_answer", "letters_hidden", "difficulty", "status", "notes", "level", "effective_level", "letter_position", "letter_grouping", "frame_slots"];
 
 const emptySpec = () => ({
   structure: "nested", root_key: "packs", questions_key: "questions", key_by: "slug",
@@ -896,7 +918,12 @@ const fetchAllContent = async (filters = {}, opts = {}) => {
   for (const p of packs) packLevelById[p.id] = p.level || 1;
 
   // Attach the effective level to every question (question override → pack default).
-  for (const q of questions) q.effective_level = q.level ?? packLevelById[q.pack_id] ?? 1;
+  // Also add a resolved base sentence (frame words filled at the base level) alongside the
+  // raw template, so a consumer reading the base question sees real words, not {tokens}.
+  for (const q of questions) {
+    q.effective_level = q.level ?? packLevelById[q.pack_id] ?? 1;
+    q.base_sentence = resolveSlots(q.template || "", q.frame_slots, q.effective_level).replace(/\{blank\}/g, (q.answer || "").toUpperCase());
+  }
 
   // If the profile wants per-level variants, fetch level defs + overrides and expand.
   if (opts.expandLevels) {
@@ -907,7 +934,7 @@ const fetchAllContent = async (filters = {}, opts = {}) => {
     for (const q of questions) {
       q.levels = buildLevelVariants(q, levels, ovByQ[q.id] || {})
         .filter(v => v.enabled)
-        .map(v => ({ level: v.level, level_name: v.name, tier: v.tier, sentence: v.sentence, blank: v.blank, answer: q.answer, alt_answer: q.alt_answer, opts: v.opts }));
+        .map(v => ({ level: v.level, level_name: v.name, tier: v.tier, sentence: v.sentence, blank: v.blank, target: v.target, frames: v.frames, opts: v.opts }));
     }
   }
 
@@ -1862,7 +1889,11 @@ function ProfileBuilder({ profile, sampleContent, onSave, onClose }) {
               </label>
               <label style={{ display: "flex", alignItems: "flex-start", gap: 9, marginTop: S.sm + 2, cursor: "pointer" }}>
                 <input type="checkbox" checked={!!spec.expand_levels} onChange={(e) => setSpecField("expand_levels", e.target.checked)} style={{ width: 16, height: 16, accentColor: C.brand, marginTop: 2 }} />
-                <span style={{ fontSize: 13.5, color: C.ink, fontWeight: 600 }}>Expand levels<div style={{ fontSize: 12, color: C.sub, fontWeight: 500, marginTop: 1 }}>Add a <code>levels</code> array to each question with the sentence + blank for all 10 levels, so the game can serve the right difficulty per child.</div></span>
+                <span style={{ fontSize: 13.5, color: C.ink, fontWeight: 600 }}>Expand levels<div style={{ fontSize: 12, color: C.sub, fontWeight: 500, marginTop: 1 }}>Add a <code>levels</code> array to each question with the sentence, blank, and an explicit <code>target</code> (the guess word) + <code>frames</code> map for all 10 levels.</div></span>
+              </label>
+              <label style={{ display: "flex", alignItems: "flex-start", gap: 9, marginTop: S.sm + 2, cursor: "pointer" }}>
+                <input type="checkbox" checked={!!spec.include_frames} onChange={(e) => setSpecField("include_frames", e.target.checked)} style={{ width: 16, height: 16, accentColor: C.brand, marginTop: 2 }} />
+                <span style={{ fontSize: 13.5, color: C.ink, fontWeight: 600 }}>Include frame-word config<div style={{ fontSize: 12, color: C.sub, fontWeight: 500, marginTop: 1 }}>Attach the raw <code>frameSlots</code> (pools + per-level pins) to each question, so the game can vary the swappable words itself instead of using the pre-resolved ones.</div></span>
               </label>
             </div>
 
@@ -2691,6 +2722,16 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Export now carries the target word + frame structure explicitly (self-describing):**
+  each per-level variant gained a \`target\` object (word, altWord, blankShape, wholeWord,
+  lettersHidden, position, grouping) so the game never parses the sentence to find the guess
+  word, plus a \`frames\` map (token -> resolved word) showing exactly which frame words were
+  used. Questions now expose BOTH a raw \`template\` (with {tokens}) and a resolved
+  \`base_sentence\` (real words at the base level). A new optional per-profile flag
+  \`include_frames\` attaches the raw frameSlots config (pools + per-level pins) so the game can
+  vary the swappable words itself. base_sentence is a pickable field; the ProfileBuilder has
+  the new toggle; the Full export profile turns include_frames on. Client engine + game-feed
+  edge fn kept byte-identical (added resolveFrameMap). Verified end-to-end via the feed.
 - **Polymath audit pass:**
   · TRANSFORM ENGINE (xf/mapVal + edge applyTransform/mapValue): guarded against object/array
     values — an accidental upper/lower/trim on frame_slots or tags would have produced
@@ -2879,9 +2920,9 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
   profile sets spec.expand_levels → fetchAllContent({...},{expandLevels:true}) attaches a
   \`levels\` array; the game-feed edge function mirrors this. If you touch buildLevelVariants or
   the expand logic, update BOTH engine.jsx and the edge function (parity invariant). Same for
-  maskWord AND resolveSlots (frame-word slots): the client (core.jsx) and edge fn must stay
-  byte-identical, including the deterministic seeded pool-pick, or the CMS preview won't match
-  what the game renders.
+  maskWord AND resolveSlots AND resolveFrameMap (frame-word slots + the token->word map): the
+  client (core.jsx) and edge fn must stay byte-identical, including the deterministic seeded
+  pool-pick, or the CMS preview and the exported target/frames won't match what the game renders.
   If you add a column to pm_packs, DROP+recreate pm_pack_overview (it uses p.*).
 - RLS: anon read-only, authenticated full write. Never add anon write policies.
 
@@ -3026,12 +3067,16 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    a level to auto. Cloning a pack must copy level data + these overrides.
 12. **Export must carry levels, in JSON and XML:** the transform engine's field mapper must
    expose level, effective_level, letter_position, letter_grouping. A profile flag
-   \`expand_levels\` attaches a \`levels\` array (sentence + blank for all 10 levels) to each
-   exported question so the game can serve the right difficulty per child. Provide a
-   ready-made "Full game export (with levels)" starter profile. Offer BOTH JSON and XML output
-   (a toXml serializer with sane singular tags + escaping); the pull-feed accepts ?format=xml.
-   The client engine and the edge function must stay byte-identical (maskWord, buildLevelVariants,
-   toXml, the expand logic) — this parity is a hard invariant.
+   \`expand_levels\` attaches a \`levels\` array to each question — for every level: the resolved
+   sentence, the blank shape, an explicit \`target\` object (the guess word: word, altWord,
+   blankShape, wholeWord, lettersHidden, position, grouping) so the game never parses the
+   sentence, and a \`frames\` map (token -> resolved word). Questions expose BOTH a raw
+   \`template\` (with {tokens}) and a resolved \`base_sentence\`. An optional flag
+   \`include_frames\` attaches the raw frame config so the game can vary swappable words itself.
+   Provide a ready-made "Full game export (with levels)" starter profile. Offer BOTH JSON and
+   XML output (a toXml serializer with sane singular tags + escaping); the pull-feed accepts
+   ?format=xml. The client engine and the edge function must stay byte-identical (maskWord,
+   resolveSlots, resolveFrameMap, buildLevelVariants, toXml, the expand logic) — hard invariant.
 13. **Structured pack descriptions:** each pack has purpose, focus_areas, style_approach,
    and example_objectives (beyond the short card blurb). Show them as an "About this pack"
    panel on the pack page, edit them in the pack editor, and expose them in the field mapper
@@ -3227,9 +3272,22 @@ const buildLevelVariants = (q, levels, overrides = {}) => {
     // Resolve frame-word slots first, then substitute the target blank.
     const withSlots = resolveSlots(template, q.frame_slots, lvl.level);
     const sentence = withSlots.replace(/\{blank\}/g, blank);
+    // Explicit, structured frame-word substitutions for THIS level (token -> resolved word).
+    const frames = resolveFrameMap(template, q.frame_slots, lvl.level);
     return {
       level: lvl.level, name: lvl.name, color: lvl.color, tier: lvl.tier,
       sentence, blank, letters, position, grouping,
+      // The target word is the word the child guesses — given explicitly so the game
+      // never has to parse the sentence to find it.
+      target: {
+        word: (answer || "").toUpperCase(),
+        altWord: (alt || "").toUpperCase(),
+        blankShape: blank,
+        wholeWord: isWord || letters >= word.length,
+        lettersHidden: (isWord || letters >= word.length) ? word.length : letters,
+        position, grouping,
+      },
+      frames,
       opts: [answer, alt].filter(Boolean).map(w => w.toUpperCase()).join(" / "),
       isOverride: hasOv, enabled: ov.enabled !== false, override: ov,
     };
