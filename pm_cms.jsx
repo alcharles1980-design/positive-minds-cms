@@ -2817,24 +2817,36 @@ config → data layer → design tokens → hooks → primitives → feature vie
 - \`pm_question_levels\` — per-question, per-level OVERRIDES. Every question is a single
   "concept" that auto-renders all 10 levels (buildLevelVariants derives each level's blank
   from the question + the level rules). A row exists here ONLY when a specific level's
-  version was hand-edited (override sentence/word/letters/position/grouping, or disabled).
-  In the question bank, each row has a "Levels" expand toggle showing all 10 variants.
+  version was hand-edited (override template/answer/alt_answer/letters_hidden/letter_position/
+  letter_grouping, or \`enabled=false\` to hide that level). In the question bank, each row has
+  a "Levels" expand toggle showing all 10 variants.
 
 **View:** \`pm_pack_overview\` — packs + active_questions + total_questions +
 has_pending_changes (= content_version > released_version). MUST be created with
 \`security_invoker = true\` so it respects the caller's RLS — otherwise anon can read
-draft/unpublished packs through the public API.
+draft/unpublished packs through the public API. Because it uses \`p.*\`, adding a column to
+pm_packs shifts positions — DROP+recreate, never CREATE OR REPLACE.
+
+**Realtime:** publication \`supabase_realtime\` includes pm_packs, pm_questions, pm_levels,
+pm_question_levels, pm_export_profiles, pm_sync_targets, pm_activity. pm_questions and
+pm_question_levels are set to REPLICA IDENTITY FULL so realtime DELETE events carry the full
+old row (pack_id / question_id) — otherwise the client can't route a delete to the right pack.
 
 **Triggers:** \`pm_touch_updated_at\` (updated_at maintenance); \`pm_bump_pack_version\`
 (bumps pack content_version on any question insert/update/delete).
 
-**Functions (RPC):**
-- \`pm_dashboard_stats()\` — aggregate counts for the Overview.
+**Functions (RPC):** (all SECURITY INVOKER — they respect the caller's RLS; anon EXECUTE
+was revoked on the admin/write ones, so these are authenticated-only in practice)
+- \`pm_dashboard_stats()\` — aggregate counts for the Overview. The basic/advanced split is
+  computed by each question's EFFECTIVE LEVEL's tier (question level → pack level →
+  pm_levels.tier), not the dead difficulty column.
 - \`pm_search_questions(q,pack,stat,lvl,lim,off)\` — global paginated question search.
+  Returns the effective level + resolved letter_position/letter_grouping + frame_slots.
+  (The legacy \`diff\` param was removed.)
 - \`pm_clone_pack(src,new_slug,new_name)\` — duplicate a pack + its questions (as draft).
 - \`pm_lint()\` / \`pm_lint_details()\` — content health checks (invalid templates,
-  missing 2nd option, duplicates, thin packs, revealed answer [basic hides 0 letters],
-  empty answer).
+  missing 2nd option, duplicates, thin packs, revealed answer [the effective LEVEL hides 0
+  letters], empty answer).
 - \`pm_log(...)\` — append an activity row.
 - \`pm_mark_released(pack_ids uuid[])\` — set released_version = content_version
   (null = all published) so "pending changes" clears after a sync.
@@ -2913,9 +2925,24 @@ that network-first caches GETs).
 - **Assembly/hoisting:** cross-file components must be \`function\` declarations; const
   helpers must be defined in a file that loads before consumers.
 - **Session expiry:** refresh the token; don't leave the UI "logged in" on 401.
-- **Client/server engine parity:** any change to buildOutput must be mirrored in game-feed.
+- **Client/server engine parity:** any change to the rendering engine (maskWord, resolveSlots,
+  resolveFrameMap, buildLevelVariants) OR the transform engine (buildOutput/projectRow/toXml)
+  must be mirrored in the game-feed edge function. Watch the position/grouping PRECEDENCE:
+  \`override ?? question.own ?? level.default ?? hard-default\` — must match in both. (A real bug
+  lived here: the client gained the question.own step, the edge fn didn't.)
 - **View column order:** adding a column to pm_packs shifts \`p.*\` in the view — drop &
   recreate pm_pack_overview rather than CREATE OR REPLACE.
+- **PWA service-worker caching:** the deployed app registers an aggressive service worker, so
+  after a deploy the browser can keep serving the OLD build — a new feature (e.g. the editor
+  preview) looks "missing" when it's actually live. Confirm a change shipped by grepping the
+  deployed index.html; tell the user to hard-refresh / clear site data / use incognito. It is
+  almost never a code bug when "the thing I just deployed isn't showing".
+- **npm prune breaks the build toolchain:** /home/claude/bt has NO lockfile, so a bare
+  \`npm install <pkg> --no-save\` PRUNES the "extraneous" @babel packages and silently breaks
+  assemble.cjs (which needs @babel/core + @babel/preset-react). Keep a package.json in
+  /home/claude/bt pinning @babel/core, @babel/preset-react, react@18.3.1, react-dom@18.3.1 and
+  run \`npm install\` (no args) so nothing gets pruned. This package.json lives in the build
+  workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
 - **Full audit — several real bugs found & fixed:**
@@ -3198,9 +3225,17 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
 3. **Assembly order + hoisting.** The app is concatenated from /v2/*.jsx in a fixed order
    (see assemble.cjs). Cross-file COMPONENTS must be \`function\` declarations (hoisted).
    Cross-file \`const\` helpers must be defined in a file that loads BEFORE their consumers.
-4. **Client/server engine parity.** The transformation engine (buildOutput/projectRow)
-   exists in engine.jsx AND in the game-feed edge function. Any change to one MUST be
-   mirrored in the other or the feed and the in-app export will diverge.
+4. **Client/server engine parity.** TWO engines must stay byte-identical: the one in the
+   client (core.jsx + engine.jsx) and the one in the game-feed edge function. This covers the
+   RENDERING engine — \`maskWord\`, \`resolveSlots\`, \`resolveFrameMap\`, \`buildLevelVariants\` — AND
+   the TRANSFORM engine — \`buildOutput\`/\`projectRow\`/\`applyTransform\`/\`mapValue\`/\`toXml\`. Any
+   change to one MUST be mirrored in the other or the feed diverges from what the CMS shows.
+   Watch the PRECEDENCE CHAIN specifically: buildLevelVariants resolves position/grouping as
+   \`override(pm_question_levels) ?? question.own ?? level.default ?? hard-default\` — this exact
+   order must match in both files. (A past bug: the client gained the \`question.own\` step but
+   the edge function didn't, so a question with its own letter_position rendered differently
+   in-game than in the CMS.) After any engine edit, diff the two by fetching the deployed edge
+   function and comparing, or run a parity test with a question that has its own overrides.
 5. **View column order.** pm_pack_overview uses \`p.*\`. Adding a column to pm_packs shifts
    positions and CREATE OR REPLACE VIEW will error — DROP and recreate the view instead.
 6. **Auth/session.** Access tokens expire ~1hr. rest()/rpc() auto-refresh + retry once on
@@ -3223,9 +3258,10 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
   question.level, pack.level). Levels also define blank SHAPE: letter_position (start/
   middle/end/random) and letter_grouping (grouped/spread), overridable per question.
   maskWord(word, letters, position, grouping) generates the blank; buildLevelVariants(q, levels,
-  overrides) resolves the override→level→question chain, and previewAtLevel wraps it for single
-  rows. If you change how blanks render, update maskWord/buildLevelVariants in ONE place — every
-  view (editor preview, rows, PlayMode, export) and the game feed mirror it.
+  overrides) resolves the chain override(pm_question_levels) → question's own → level default →
+  hard-default, and previewAtLevel wraps it for single rows. If you change how blanks render,
+  update maskWord/buildLevelVariants in ONE place — every view (editor preview, rows, PlayMode,
+  export) and the game feed mirror it.
 - Multi-level concepts: every question renders all 10 levels via buildLevelVariants (question
   + level rules → per-level blank). Overrides live in pm_question_levels (one row per edited
   level; absent = auto-generated). The question-bank row expands to show all variants. Don't
@@ -3258,14 +3294,30 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
 - Keep responses/docs truthful to the actual schema (query pg_proc / pg_tables to confirm).
 
 ## Testing capabilities
-This environment cannot reach *.supabase.co / *.workers.dev / Firebase hosts. So:
-DB work goes through the Supabase tools; HTTP round-trips (feed, push) must be tested by
-the user; the app can't be rendered headless (needs unpkg). Verify everything else
-deterministically (node --check, reference resolution, running engine logic in Node with
-real data pulled via SQL).
+This environment cannot reach *.supabase.co / *.workers.dev / *.pages.dev / Firebase hosts
+directly from bash. Work around it:
+- **DB / SQL:** use the Supabase tools (execute_sql, apply_migration, etc.).
+- **HTTP round-trips (game feed, push, any endpoint):** trigger them FROM the database with
+  pg_net — \`select net.http_get('https://…/functions/v1/game-feed?health=1')\` then, after a
+  few seconds, read \`select status_code, content from net._http_response where id = <n>\`. This
+  lets you verify the live edge function / REST endpoints without the user. Also good for
+  confirming an RPC through the real PostgREST \`/rpc\` path with the client's exact payload.
+- **Rendering the app headless (yes, this works):** install react@18.3.1 + react-dom@18.3.1 +
+  @babel/core + @babel/preset-react locally (KEEP a package.json in /home/claude/bt pinning
+  them — a bare \`npm install X\` with no lockfile PRUNES the others and breaks the build), then
+  compile the .jsx with preset-react {runtime:'classic'} and render a component with
+  react-dom/server \`renderToString\` inside a vm sandbox (stub window/document/fetch/localStorage).
+  This catches real runtime crashes and lets you assert on the output HTML — it found several
+  bugs a grep never would.
+- Everything else: verify deterministically (node --check, component/db/rpc reference
+  resolution, running engine logic in Node against real data pulled via SQL, parse each inline
+  script via vm.Script, babel-parse the doc template literals to confirm they're balanced).
 
 ## Known-safe "do not touch"
-- The three seeded builtin export profiles (is_builtin=true) unless explicitly asked.
+- The four seeded builtin export profiles (is_builtin=true) unless explicitly asked: "Flat API
+  (question list)", "Firebase (nested)", "Unity (keyed dictionary)" — the three simple ones that
+  key off level/effective_level — plus "Full game export (with levels)", the reference profile
+  (expand_levels + include_frames; exports template + base_sentence + per-level target + frames).
 - pm_dev_notes is a singleton (id=1) — don't insert extra rows.
 `;
 
@@ -3335,7 +3387,13 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    word), position/grouping overrides that appear only when the previewed level hides letters,
    and a "how the child sees it" preview that renders through the real level engine with a
    level-chip picker so you can flip through every level. Also: bulk import (pipe OR JSON, with
-   duplicate detection); multi-select bulk activate/deactivate/delete; Play mode.
+   duplicate detection); multi-select bulk activate/deactivate/delete; and **Play mode** — an
+   author preview that plays the pack like a child: for each active question it renders the
+   sentence at the effective level (through the shared engine) and shows the two words shuffled.
+   Only the PRIMARY word (answer) is correct; picking it shows "Correct! ✓" and scores a point,
+   picking the alternate shows "Not quite — the answer is X" and reveals the right word (green/red
+   button states). The done screen shows "X of Y correct". Load ALL active questions (paginate —
+   do NOT cap at 100).
 4. **All questions:** server-side global search across every pack, paginated, click-through
    to the source pack.
 5. **Content health:** lint flags invalid templates (no {blank}), missing 2nd option,
