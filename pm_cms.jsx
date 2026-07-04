@@ -21,6 +21,7 @@ const CFG = {
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
   sessionStore: "pm_admin_session_v2",
+  sessionMaxAgeMs: 7 * 24 * 60 * 60 * 1000, // keep users logged in for 7 days
   pageSize: 40,
 };
 
@@ -28,13 +29,32 @@ const CFG = {
 // Session + Auth
 // ============================================================
 const session = {
-  token: null, refresh: null,
+  token: null, refresh: null, savedAt: 0,
+  // Persist across tab/browser restarts (localStorage, not sessionStorage) and keep the
+  // session for a week. We store when it was saved so we can enforce the 7-day window and
+  // proactively refresh the short-lived access token in the background.
   load() {
-    try { const r = sessionStorage.getItem(CFG.sessionStore); if (r) { const s = JSON.parse(r); this.token = s.access_token; this.refresh = s.refresh_token; } } catch {}
+    try {
+      // Read from localStorage; migrate any legacy sessionStorage entry.
+      let r = localStorage.getItem(CFG.sessionStore);
+      if (!r) { const legacy = sessionStorage.getItem(CFG.sessionStore); if (legacy) { r = legacy; localStorage.setItem(CFG.sessionStore, legacy); sessionStorage.removeItem(CFG.sessionStore); } }
+      if (r) {
+        const s = JSON.parse(r);
+        // Enforce the 7-day window from first login.
+        if (s.savedAt && Date.now() - s.savedAt > CFG.sessionMaxAgeMs) { this.clear(); return null; }
+        this.token = s.access_token; this.refresh = s.refresh_token; this.savedAt = s.savedAt || Date.now();
+      }
+    } catch {}
     return this.token;
   },
-  save(a, r) { this.token = a; this.refresh = r; try { sessionStorage.setItem(CFG.sessionStore, JSON.stringify({ access_token: a, refresh_token: r })); } catch {} },
-  clear() { this.token = null; this.refresh = null; try { sessionStorage.removeItem(CFG.sessionStore); } catch {} },
+  // On a fresh login, reset the 7-day clock. On a background token refresh, keep the original
+  // login time (so the week is measured from login, not from each refresh).
+  save(a, r, resetClock = false) {
+    this.token = a; this.refresh = r;
+    if (resetClock || !this.savedAt) this.savedAt = Date.now();
+    try { localStorage.setItem(CFG.sessionStore, JSON.stringify({ access_token: a, refresh_token: r, savedAt: this.savedAt })); } catch {}
+  },
+  clear() { this.token = null; this.refresh = null; this.savedAt = 0; try { localStorage.removeItem(CFG.sessionStore); sessionStorage.removeItem(CFG.sessionStore); } catch {} },
 };
 
 const auth = {
@@ -45,7 +65,7 @@ const auth = {
     });
     const d = await res.json();
     if (!res.ok) throw new Error(d.error_description || d.msg || "Incorrect password");
-    session.save(d.access_token, d.refresh_token); return true;
+    session.save(d.access_token, d.refresh_token, true); return true;
   },
   // Exchange the refresh token for a fresh access token. Returns true on success.
   async refresh() {
@@ -2486,7 +2506,10 @@ authenticated = full write. Anon write policies were dropped and the lockdown ve
 
 ## 6. Auth
 Single shared admin password. Auth user \`admin@positiveminds.app\` in Supabase Auth.
-Login uses the password grant → access + refresh tokens stored in sessionStorage.
+Login uses the password grant → access + refresh tokens stored in localStorage (persists
+across tab/browser restarts) with a 7-day window from login. The access token is refreshed
+proactively in the background (timer + on tab refocus) and reactively on a 401, so the user
+stays signed in until they log out or the 7 days elapse.
 Writes send the access token as Bearer. Tokens expire ~1hr; the data layer refreshes
 transparently. Sign-out + change-password built in. Anon (publishable) key is safe to
 embed publicly and authorizes only reads.
@@ -2557,6 +2580,12 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Stay logged in for 7 days:** the session was being lost on tab/browser close (it used
+  sessionStorage) and the access token was only refreshed reactively. Fixed: the session now
+  persists in localStorage with a 7-day window measured from login, the short-lived access
+  token is refreshed proactively in the background (every 45 min and on tab refocus, plus the
+  existing on-401 retry), and a legacy sessionStorage entry is migrated on load. Users now
+  stay signed in across restarts until they log out or the 7 days elapse.
 - **Live sync (realtime):** open sessions now update automatically when anyone edits data,
   so multiple people on multiple devices don't work off stale views. A lean websocket client
   (realtime.jsx, no Supabase SDK) connects to Supabase Realtime and subscribes to
@@ -2770,8 +2799,10 @@ is the authoring + publishing layer; a separate game backend consumes the conten
 
 ## Auth
 Single shared admin password (Supabase Auth user). Password grant → access+refresh tokens
-in sessionStorage; Bearer on writes; auto-refresh + retry on 401, fall back to login.
-Anon publishable key authorizes reads only.
+persisted in localStorage (survives tab/browser restarts) with a 7-day window from login;
+Bearer on writes; refresh the access token proactively in the background (timer + on tab
+refocus) AND reactively on a 401 with one retry, falling back to login only if the refresh
+token is genuinely dead or the 7 days elapse. Anon publishable key authorizes reads only.
 
 ## Features to build
 1. **Dashboard/Overview:** aggregate stats (packs, questions, basic/advanced, empty packs,
@@ -4039,6 +4070,20 @@ function App() {
   useEffect(() => {
     authEvents.onExpire(() => { setAuthed(false); setActive(null); notify("Your session expired — please sign in again", { kind: "error" }); });
   }, []);
+
+  // Keep the session warm: proactively refresh the short-lived access token in the
+  // background (well before its ~1h expiry) and whenever the tab regains focus, so the
+  // user stays logged in for the full 7-day window without ever hitting an expired token.
+  useEffect(() => {
+    if (!authed) return;
+    let cancelled = false;
+    const refreshNow = async () => { if (!cancelled && session.refresh) { const ok = await auth.refresh(); if (!ok && !cancelled) { /* refresh token invalid — expire handler will fire on next call */ } } };
+    refreshNow(); // refresh once on load in case the stored token is already near expiry
+    const timer = setInterval(refreshNow, 45 * 60 * 1000); // every 45 min (< 60 min token life)
+    const onVis = () => { if (document.visibilityState === "visible") refreshNow(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { cancelled = true; clearInterval(timer); document.removeEventListener("visibilitychange", onVis); };
+  }, [authed]);
 
   // hotkeys
   useHotkey("mod+k", (e) => { e.preventDefault(); setPaletteOpen(true); }, authed);
