@@ -1355,7 +1355,7 @@ function QuestionEditor({ question, packId, packLevel, levels, onSave, onClose }
 
   return (
     <>
-      <ModalHead title={isNew ? "New question" : "Edit question"} subtitle="A fill-in-the-blank affirming sentence" id="pm-q-title" />
+      <ModalHead title={isNew ? "New question" : "Edit question"} subtitle="A fill-in-the-blank sentence with a positive answer" id="pm-q-title" />
       <div style={{ padding: S.xl + 2, display: "grid", gap: S.lg + 2, maxHeight: "64vh", overflowY: "auto" }}>
         <Field label="Sentence template" hint="Use {blank} for the word to guess. Add other {words} to make them swappable (e.g. …when things get {hard})." error={errs.template}>
           <Textarea value={f.template} onChange={(e) => set("template", e.target.value)} rows={2} placeholder="I am {blank} when I try something new." autoFocus
@@ -1720,17 +1720,22 @@ function PlayMode({ pack, levels, onClose }) {
   const options = useMemo(() => {
     if (!q) return [];
     const opts = [q.answer, q.alt_answer].filter(Boolean);
-    return opts.sort(() => Math.random() - 0.5); // both are "correct"; order shuffled
+    return opts.slice().sort(() => Math.random() - 0.5); // shuffle display order
   }, [q]);
+
+  // The primary answer is the correct fill for the sentence; the second word is a valid
+  // positive word but not the right answer here.
+  const correctAnswer = (q?.answer || "").toUpperCase();
+  const isRight = picked != null && picked.toUpperCase() === correctAnswer;
 
   const pick = (opt) => {
     if (picked) return;
     setPicked(opt);
-    setCorrect(c => c + 1); // any positive word is a valid choice
+    if ((opt || "").toUpperCase() === correctAnswer) setCorrect(c => c + 1);
     setTimeout(() => {
       if (i + 1 >= questions.length) setDone(true);
       else { setI(i + 1); setPicked(null); }
-    }, 900);
+    }, 1100);
   };
 
   const restart = () => { setI(0); setPicked(null); setCorrect(0); setDone(false); };
@@ -1763,7 +1768,7 @@ function PlayMode({ pack, levels, onClose }) {
             <div style={{ textAlign: "center", maxWidth: 420 }}>
               <div style={{ fontSize: 56, marginBottom: 10 }}>🌟</div>
               <div style={{ fontSize: 26, fontWeight: 800, color: C.ink }}>All done!</div>
-              <div style={{ fontSize: 15, color: C.sub, margin: "8px 0 24px" }}>You completed all {questions.length} affirmations in “{pack.name}”. Every answer is a positive choice.</div>
+              <div style={{ fontSize: 15, color: C.sub, margin: "8px 0 24px" }}>You got {correct} of {questions.length} correct in “{pack.name}”.</div>
               <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
                 <Btn variant="soft" onClick={restart} icon="↻">Play again</Btn>
                 <Btn onClick={onClose}>Back to editing</Btn>
@@ -1777,20 +1782,31 @@ function PlayMode({ pack, levels, onClose }) {
                 <div style={{ display: "grid", gap: 12 }}>
                   {options.map(opt => {
                     const isPicked = picked === opt;
+                    const optIsCorrect = opt.toUpperCase() === correctAnswer;
+                    // Once answered: picked-correct = green, picked-wrong = red, and also
+                    // highlight the correct answer in green so the child learns it.
+                    const showGreen = picked && (isPicked ? optIsCorrect : optIsCorrect);
+                    const showRed = picked && isPicked && !optIsCorrect;
+                    const bg = showGreen ? C.good : showRed ? C.danger : (picked ? C.lineSoft : C.panel);
+                    const bd = showGreen ? C.good : showRed ? C.danger : (isPicked ? pack.color : C.line);
                     return (
                       <button key={opt} onClick={() => pick(opt)} disabled={!!picked}
                         style={{ padding: "16px 20px", fontSize: 19, fontWeight: 800, borderRadius: R.lg, cursor: picked ? "default" : "pointer", fontFamily: "inherit",
-                          border: "2px solid " + (isPicked ? pack.color : C.line),
-                          background: isPicked ? pack.color : (picked ? C.lineSoft : C.panel),
-                          color: isPicked ? "#fff" : C.ink, transition: "all .2s", transform: isPicked ? "scale(1.02)" : "scale(1)" }}>
-                        {opt}{isPicked && " ✓"}
+                          border: "2px solid " + bd,
+                          background: bg,
+                          color: (showGreen || showRed || isPicked) ? "#fff" : C.ink, transition: "all .2s", transform: isPicked ? "scale(1.02)" : "scale(1)" }}>
+                        {opt}{picked && optIsCorrect && " ✓"}{showRed && " ✗"}
                       </button>
                     );
                   })}
                 </div>
-                {picked && <div style={{ marginTop: 20, fontSize: 15, fontWeight: 700, color: C.good }}>Great choice! 💚</div>}
+                {picked && (
+                  isRight
+                    ? <div style={{ marginTop: 20, fontSize: 16, fontWeight: 800, color: C.good }}>Correct! ✓</div>
+                    : <div style={{ marginTop: 20, fontSize: 16, fontWeight: 800, color: C.danger }}>Not quite — the answer is {correctAnswer}.</div>
+                )}
               </div>
-              <div style={{ fontSize: 12.5, color: C.faint, marginTop: 16 }}>Tip: in the real game, both words are positive — the child picks whichever feels most like them.</div>
+              <div style={{ fontSize: 12.5, color: C.faint, marginTop: 16 }}>Tip: both words are positive, but only the primary word is the correct fill for this sentence.</div>
             </div>
           )}
       </div>
@@ -2705,8 +2721,9 @@ const DOC_ARCHITECTURE = `# Positive Minds CMS — Site Architecture & Structure
 ## 1. What this is
 A content management system for the **Positive Minds** children's word game
 (CBMT — Cognitive Bias Modification Therapy). The game presents fill-in-the-blank
-affirmation sentences (e.g. "I am ____ when I try something new." → BRAVE / BOLD)
-where both word options are positive. This CMS is the **authoring source of truth**:
+sentences (e.g. "I am ____ when I try something new." → BRAVE) where the child chooses
+between two positive words — both kind, but only the primary one actually fits the blank
+(the other is a positive distractor). This CMS is the **authoring source of truth**:
 content is created, organized, reviewed, and version-tracked here, then published to
 a separate game backend through a customizable, multi-channel sync pipeline.
 
@@ -2901,6 +2918,17 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Play mode scoring fixed + game rule clarified:** Play mode treated BOTH answer words as
+  correct (picking either said "Great choice!" and scored a point), so a wrong pick was reported
+  as correct. Clarified rule: both words are positive, but only the PRIMARY word (\`answer\`) is
+  the correct fill for the sentence; the alternate is positive-but-wrong-here (a distractor, not
+  a synonym). Play mode now checks the pick against the primary answer, shows "Correct! ✓" vs
+  "Not quite — the answer is X", colours the buttons green/red and reveals the right answer, and
+  scores only correct picks (done screen shows "X of Y correct"). The MASTER_CONTEXT doc and the
+  generator PROMPT were rewritten to teach this (the alternate must be a plausible positive word
+  that does NOT fit the blank — never a synonym). Also purged the word "affirmation(s)" as a name
+  for the items across the UI (editor subtitle, empty state, levels caption, Play mode) — they're
+  "questions"; only genuine CBMT adjective usage ("self-affirming") remains in the therapy blurb.
 - **Dashboard stats fixed to use level tiers (was counting dead difficulty):** pm_dashboard_stats
   computed its basic/advanced question split from the derived-legacy difficulty column. It now
   counts by the effective LEVEL's tier (question level → pack level → pm_levels.tier), which is
@@ -3227,8 +3255,9 @@ project + a GitHub repo) to rebuild the entire app.
 
 Build a content management web app called "Positive Minds" — a CMS for a children's
 word game based on CBMT (Cognitive Bias Modification Therapy). The game shows
-fill-in-the-blank affirmation sentences like "I am ____ when I try something new."
-with two positive word options (e.g. BRAVE / BOLD); the child picks either. This CMS
+fill-in-the-blank sentences like "I am ____ when I try something new." with two
+positive word options where only the primary word fits the blank (the other is a
+positive-but-wrong distractor); the child must pick the one that fits. This CMS
 is the authoring + publishing layer; a separate game backend consumes the content.
 
 ## Architecture requirements
@@ -3329,7 +3358,7 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    word) so it's stable across renders and matches the game. Every preview ("how the child
    sees it") reflects the real shape.
 11. **Questions are multi-level concepts:** every question auto-renders all 10 levels — the
-   same affirmation at each level's blank difficulty (buildLevelVariants derives them from the
+   same question at each level's blank difficulty (buildLevelVariants derives them from the
    question + level rules; no row duplication). The question bank keeps flat rows with a
    "Levels" expand toggle revealing all 10 variants. Any individual level can be edited
    (override sentence/word/letters/position/grouping, or disabled for that concept), stored in
@@ -3718,7 +3747,7 @@ function QuestionLevelsPanel({ question, packLevel, levels }) {
   return (
     <div style={{ padding: "4px 2px 2px", display: "grid", gap: 6 }}>
       <div style={{ fontSize: 11.5, color: C.faint, fontWeight: 700, padding: "2px 4px 6px" }}>
-        The same affirmation at every level. Auto-generated from the level rules; edit any to customize.
+        The same question at every level. Auto-generated from the level rules; edit any to customize.
       </div>
       {variants.map(v => (
         <div key={v.level} style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 12px", background: v.enabled ? C.bg : C.lineSoft, borderRadius: R.sm, border: "1px solid " + C.lineSoft, borderLeft: `3px solid ${v.color}`, opacity: v.enabled ? 1 : 0.5 }}>
@@ -3826,10 +3855,10 @@ const MASTER_CONTEXT = `# Positive Minds — Background & Authoring Context
 Positive Minds is a word game for children (roughly ages 5–12) built on **Cognitive Bias Modification Therapy (CBMT)**. The premise of CBMT is simple but powerful: the thoughts a child rehearses shape the thoughts that come automatically. By having children repeatedly complete warm, self-affirming sentences, the game gently trains a more positive, resilient internal voice — building the habit of thinking well of themselves and the world.
 
 ## The core mechanic
-Each question is a short, first-person sentence with one missing word — shown as {blank}. The child completes it by choosing between **two words, and both are positive**. There is never a negative or "wrong feeling" option. Whichever the child picks, they affirm something good: "I am BRAVE / BOLD when I try new things." The two words are near-synonyms or equally valid positive choices, so the child is choosing *how* to feel good, never *whether* to.
+Each question is a short, first-person sentence with one missing word — shown as {blank}. The child chooses between **two words. Both are positive** — there is never a negative or "wrong feeling" option — but only **one of them (the primary answer) is the correct word that actually fits this sentence**. The second word is also warm and positive, but it does not fit the blank here; it is a gentle distractor, not a synonym. Example: "I am {blank} when I try something new." → primary **BRAVE** (correct), alternate **KIND** (positive, but not what fits this sentence). Both leave the child thinking a good thought; the challenge is choosing the word that truly belongs.
 
-## Why both words are positive
-This is the therapeutic heart of the design and must never be broken. In ordinary quizzes a child can pick the "wrong" answer and feel bad. Here, the act of answering is itself the intervention: the child's mind rehearses an affirming completion every single time. Offering a negative option would rehearse the exact bias we're trying to soften. So both options are always constructive, kind, and true-feeling.
+## Why both words are positive (but only one is correct)
+This is the therapeutic heart of the design and must never be broken. The child should never be offered a negative, unkind, or "bad feeling" option — every word on screen is something good, so even a wrong guess never rehearses a harmful thought. What makes it a real game (not just tapping) is that only the primary word correctly completes the sentence; the positive alternate simply doesn't fit *here*. So "wrong" only ever means "that lovely word doesn't belong in this sentence" — never "you had a bad feeling" or "you failed as a person." Keep both options constructive, kind, and true-feeling; make the primary clearly the best fit and the alternate a plausible-but-not-right positive word.
 
 ## Who the child is
 Assume a child who may be shy, anxious, still building confidence, or simply learning emotional vocabulary. The tone is warm, safe, and encouraging — like a kind adult who believes in them. Never clinical, never scary, never shaming. Nothing that references the child doing something wrong, being in danger, or failing. Language is simple and concrete; words are ones a child that age would recognise and be able to spell.
@@ -3852,7 +3881,7 @@ Confidence and self-worth · kindness and caring for others · courage and tryin
 - Any implication the child did something wrong or is at fault.
 - Obscure or hard-to-spell words; multi-word answers.
 - Two words where one is clearly better than the other (both should be valid).
-- Repeating an affirmation the pack already covers (see the "already covered" list when provided).
+- Repeating a question the pack already covers (see the "already covered" list when provided).
 
 ## Optional: frame words
 Some sentences include a second braced word besides {blank} — e.g. "…when things are {hard}". These "frame words" are NOT guessed; they exist so the sentence can be varied for freshness or made gently more advanced at higher levels (hard → difficult → challenging). They are always neutral-to-mild and never undo the positivity of the sentence.
@@ -3955,10 +3984,10 @@ function buildGeneratorPrompt({ pack, levels, selectedLevels, themes, count, for
   lines.push(`You are helping author content for "Positive Minds", a Cognitive Bias Modification Therapy (CBMT) word game for children roughly aged 5–12.`);
   lines.push("");
   if (includeContext) {
-    lines.push(`BACKGROUND (why this matters): CBMT works on the principle that the thoughts a child rehearses become the thoughts that come automatically. Every question has the child complete a warm, first-person sentence by choosing between TWO positive words — so the act of answering always rehearses an affirming thought. There is never a negative option. The tone is warm, safe and encouraging, never clinical or shaming, and never implies the child did anything wrong. Words are simple, common, and spellable for the age. The aim is small, repeated moments that leave a child feeling a little braver, kinder, and more capable.`);
+    lines.push(`BACKGROUND (why this matters): CBMT works on the principle that the thoughts a child rehearses become the thoughts that come automatically. Every question has the child complete a warm, first-person sentence by choosing between TWO positive words — so even a wrong guess never rehearses a harmful thought. Only ONE of the two words (the primary answer) actually fits the sentence; the other is also positive but is a gentle distractor that does not fit here. The tone is warm, safe and encouraging, never clinical or shaming; a wrong pick only means "that kind word doesn't belong in this sentence", never that the child failed. Words are simple, common, and spellable for the age.`);
     lines.push("");
   }
-  lines.push(`THE GAME MECHANIC: each question is a short, affirming sentence with one missing word. The child fills in the blank by choosing between TWO words — and BOTH words are positive. There is never a "wrong feeling" option; the child always affirms something good about themselves. The missing word is written as {blank} in the sentence.`);
+  lines.push(`THE GAME MECHANIC: each question is a short, positive first-person sentence with one missing word. The child fills the blank by choosing between TWO words — BOTH positive, but only the PRIMARY word correctly fits the sentence. The second word is positive too, yet does not fit this blank (a gentle distractor, NOT a synonym). There is never a negative or "wrong feeling" option. The missing word is written as {blank} in the sentence.`);
   lines.push("");
 
   // Pack context
@@ -3978,14 +4007,14 @@ function buildGeneratorPrompt({ pack, levels, selectedLevels, themes, count, for
       if (l.age_hint) bits.push(`ages ${l.age_hint}`);
       lines.push(`- ${bits.join(" — ")}`);
     }
-    lines.push(`The same affirmation works across levels; the game itself controls how much of the word is hidden per level, so you do NOT need to vary the blank difficulty — just write good, level-appropriate sentences and words.`);
+    lines.push(`The same question works across levels; the game itself controls how much of the word is hidden per level, so you do NOT need to vary the blank difficulty — just write good, level-appropriate sentences and words.`);
     lines.push("");
   }
 
   // Rules
   lines.push(`RULES (important):`);
   lines.push(`1. Every sentence must contain exactly one {blank}.`);
-  lines.push(`2. Provide TWO answer words. Both must be genuinely positive, age-appropriate, and both must fit the sentence naturally. They should be near-synonyms or equally-valid positive choices (e.g. BRAVE / BOLD, KIND / CARING).`);
+  lines.push(`2. Provide TWO answer words, both genuinely positive and age-appropriate. The FIRST (primary) word is the CORRECT answer — it must fit the sentence naturally and be clearly the right completion. The SECOND word is also positive but must NOT fit this sentence — a plausible, kind distractor that a child could be tempted by, yet is not the right word here (e.g. for "I am {blank} when I try something new" → BRAVE as primary, KIND as the alternate: both lovely, but only BRAVE fits). Do NOT make them synonyms; if both fit equally, the question has no correct answer.`);
   lines.push(`3. Answer words are single words, UPPERCASE, no punctuation. Prefer common words a child would know; keep them short enough to spell.`);
   lines.push(`4. Sentences are warm, simple, first-person ("I am…", "I feel…", "Being…"), and self-affirming.`);
   lines.push(`5. Avoid anything scary, negative, clinical, or that references the child doing something wrong.`);
@@ -4545,7 +4574,7 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
       {err ? <ErrorState error={err} onRetry={load} />
         : rows === null ? <div style={{ display: "grid", gap: 10 }}>{[0,1,2,3].map(i => <Skeleton key={i} h={62} r={12} />)}</div>
         : shown.length === 0 ? (
-          <EmptyState icon="✍️" title={total === 0 ? "No questions yet" : "Nothing matches"} body={total === 0 ? "Add your first affirming sentence to this pack." : "Try a different search or filter."} action={total === 0 ? <Btn onClick={() => setQEdit({})} icon="＋">Add first question</Btn> : null} />
+          <EmptyState icon="✍️" title={total === 0 ? "No questions yet" : "Nothing matches"} body={total === 0 ? "Add your first question to this pack." : "Try a different search or filter."} action={total === 0 ? <Btn onClick={() => setQEdit({})} icon="＋">Add first question</Btn> : null} />
         ) : (
           <>
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "0 4px 10px" }}>

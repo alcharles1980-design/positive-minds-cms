@@ -59,6 +59,7 @@ window.addEventListener('load',function(){setTimeout(function(){
 },4000);});
 </script>
 <script>
+function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
 const {
   useState,
   useEffect,
@@ -1136,8 +1137,7 @@ const focusOff = e => {
   e.target.style.borderColor = C.line;
   e.target.style.boxShadow = "none";
 };
-const Input = p => /*#__PURE__*/React.createElement("input", {
-  ...p,
+const Input = p => /*#__PURE__*/React.createElement("input", _extends({}, p, {
   className: cx("pm-input", p.className),
   style: {
     ...inputBase,
@@ -1151,9 +1151,8 @@ const Input = p => /*#__PURE__*/React.createElement("input", {
     focusOff(e);
     p.onBlur?.(e);
   }
-});
-const Textarea = p => /*#__PURE__*/React.createElement("textarea", {
-  ...p,
+}));
+const Textarea = p => /*#__PURE__*/React.createElement("textarea", _extends({}, p, {
   className: cx("pm-input", p.className),
   style: {
     ...inputBase,
@@ -1163,9 +1162,8 @@ const Textarea = p => /*#__PURE__*/React.createElement("textarea", {
   },
   onFocus: focusOn,
   onBlur: focusOff
-});
-const Select = p => /*#__PURE__*/React.createElement("select", {
-  ...p,
+}));
+const Select = p => /*#__PURE__*/React.createElement("select", _extends({}, p, {
   className: cx("pm-input", p.className),
   style: {
     ...inputBase,
@@ -1179,7 +1177,7 @@ const Select = p => /*#__PURE__*/React.createElement("select", {
   },
   onFocus: focusOn,
   onBlur: focusOff
-}, p.children);
+}), p.children);
 const SearchBox = ({
   value,
   onChange,
@@ -1201,7 +1199,7 @@ const SearchBox = ({
     color: C.faint,
     pointerEvents: "none"
   }
-}, "⌕"), /*#__PURE__*/React.createElement(Input, {
+}, "\u2315"), /*#__PURE__*/React.createElement(Input, {
   value: value,
   onChange: e => onChange(e.target.value),
   placeholder: placeholder,
@@ -1228,7 +1226,7 @@ const SearchBox = ({
     fontSize: 12,
     lineHeight: 1
   }
-}, "×"));
+}, "\xD7"));
 
 // Modal with focus trap + Escape; bottom-sheet on phones (via CSS)
 const Modal = ({
@@ -1551,7 +1549,7 @@ const ErrorState = ({
   variant: "ghost",
   size: "sm",
   onClick: onRetry
-}, "↻ Try again")));
+}, "\u21BB Try again")));
 const Spinner = ({
   label = "Loading…"
 }) => /*#__PURE__*/React.createElement("div", {
@@ -2507,7 +2505,7 @@ function PackEditor({
       fontSize: 12,
       color: C.sub
     }
-  }, "· purpose, focus, approach & objectives"), /*#__PURE__*/React.createElement("div", {
+  }, "\xB7 purpose, focus, approach & objectives"), /*#__PURE__*/React.createElement("div", {
     style: {
       flex: 1
     }
@@ -2516,7 +2514,7 @@ function PackEditor({
     size: "sm",
     disabled: aiBusy || !f.name,
     onClick: suggestDetails,
-    icon: "✦"
+    icon: "\u2726"
   }, aiBusy ? "Drafting…" : "AI draft")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
@@ -2524,12 +2522,12 @@ function PackEditor({
     }
   }, /*#__PURE__*/React.createElement(Field, {
     label: "Purpose",
-    hint: "What this pack is for — its objective"
+    hint: "What this pack is for \u2014 its objective"
   }, /*#__PURE__*/React.createElement(Textarea, {
     value: f.purpose,
     onChange: e => set("purpose", e.target.value),
     rows: 2,
-    placeholder: "Help children build a stable sense of self-belief…"
+    placeholder: "Help children build a stable sense of self-belief\u2026"
   })), /*#__PURE__*/React.createElement(Field, {
     label: "Focus areas",
     hint: "Key themes and skills it covers"
@@ -2545,7 +2543,7 @@ function PackEditor({
     value: f.style_approach,
     onChange: e => set("style_approach", e.target.value),
     rows: 2,
-    placeholder: "Warm and encouraging; every word choice is a positive trait…"
+    placeholder: "Warm and encouraging; every word choice is a positive trait\u2026"
   })), /*#__PURE__*/React.createElement(Field, {
     label: "Example objectives",
     hint: "Concrete goals a child works toward"
@@ -2553,10 +2551,10 @@ function PackEditor({
     value: f.example_objectives,
     onChange: e => set("example_objectives", e.target.value),
     rows: 2,
-    placeholder: "A child can name two of their own strengths; feels able to try something new…"
+    placeholder: "A child can name two of their own strengths; feels able to try something new\u2026"
   })))), /*#__PURE__*/React.createElement(Field, {
     label: "Tags",
-    hint: "Enter or comma to add — for cross-cutting organization"
+    hint: "Enter or comma to add \u2014 for cross-cutting organization"
   }, /*#__PURE__*/React.createElement(TagInput, {
     tags: f.tags,
     onChange: t => set("tags", t),
@@ -2868,7 +2866,7 @@ function QuestionEditor({
   useHotkey("mod+enter", submit, true);
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(ModalHead, {
     title: isNew ? "New question" : "Edit question",
-    subtitle: "A fill-in-the-blank affirming sentence",
+    subtitle: "A fill-in-the-blank sentence with a positive answer",
     id: "pm-q-title"
   }), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -2880,7 +2878,7 @@ function QuestionEditor({
     }
   }, /*#__PURE__*/React.createElement(Field, {
     label: "Sentence template",
-    hint: "Use {blank} for the word to guess. Add other {words} to make them swappable (e.g. …when things get {hard}).",
+    hint: "Use {blank} for the word to guess. Add other {words} to make them swappable (e.g. \u2026when things get {hard}).",
     error: errs.template
   }, /*#__PURE__*/React.createElement(Textarea, {
     value: f.template,
@@ -2991,7 +2989,7 @@ function QuestionEditor({
       fontWeight: 800,
       marginTop: 8
     }
-  }, "→ ", previewVariant.opts), /*#__PURE__*/React.createElement("div", {
+  }, "\u2192 ", previewVariant.opts), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 11.5,
       color: C.brandInk,
@@ -3049,7 +3047,7 @@ function QuestionEditor({
       marginTop: 2,
       lineHeight: 1.45
     }
-  }, "These are swappable words in the sentence — ", /*#__PURE__*/React.createElement("b", null, "not"), " the word the child guesses. Give each a pool of alternatives, and optionally pin a specific one per level (useful for levels 7–10 where the blank stops changing).")), frameTokens.map(token => {
+  }, "These are swappable words in the sentence \u2014 ", /*#__PURE__*/React.createElement("b", null, "not"), " the word the child guesses. Give each a pool of alternatives, and optionally pin a specific one per level (useful for levels 7\u201310 where the blank stops changing).")), frameTokens.map(token => {
     const slot = f.frame_slots[token] || {
       pool: [],
       byLevel: {}
@@ -3071,7 +3069,7 @@ function QuestionEditor({
     });
   })), /*#__PURE__*/React.createElement(Field, {
     label: "Internal notes",
-    hint: "Optional — not shown to players"
+    hint: "Optional \u2014 not shown to players"
   }, /*#__PURE__*/React.createElement(Input, {
     value: f.notes,
     onChange: e => set("notes", e.target.value)
@@ -3353,19 +3351,19 @@ function BulkImport({
       flexWrap: "wrap",
       alignItems: "center"
     }
-  }, /*#__PURE__*/React.createElement("span", null, toImport.length, " to import · ", valid.length - toImport.length, " skipped · ", parsed.length - valid.length, " invalid"), loadingExisting ? /*#__PURE__*/React.createElement("span", {
+  }, /*#__PURE__*/React.createElement("span", null, toImport.length, " to import \xB7 ", valid.length - toImport.length, " skipped \xB7 ", parsed.length - valid.length, " invalid"), loadingExisting ? /*#__PURE__*/React.createElement("span", {
     style: {
       color: C.faint
     }
-  }, "● checking for duplicates…") : /*#__PURE__*/React.createElement(React.Fragment, null, exactCount > 0 && /*#__PURE__*/React.createElement("span", {
+  }, "\u25CF checking for duplicates\u2026") : /*#__PURE__*/React.createElement(React.Fragment, null, exactCount > 0 && /*#__PURE__*/React.createElement("span", {
     style: {
       color: C.danger
     }
-  }, "● ", exactCount, " duplicate", exactCount === 1 ? "" : "s"), nearCount > 0 && /*#__PURE__*/React.createElement("span", {
+  }, "\u25CF ", exactCount, " duplicate", exactCount === 1 ? "" : "s"), nearCount > 0 && /*#__PURE__*/React.createElement("span", {
     style: {
       color: C.warn
     }
-  }, "● ", nearCount, " similar"))), parsed.map((p, i) => {
+  }, "\u25CF ", nearCount, " similar"))), parsed.map((p, i) => {
     const ds = dupStyle[p.dup];
     const skipped = skipIds.has(i);
     return /*#__PURE__*/React.createElement("div", {
@@ -3535,12 +3533,12 @@ function CommandPalette({
       fontSize: 18,
       color: C.faint
     }
-  }, "⌕"), /*#__PURE__*/React.createElement("input", {
+  }, "\u2315"), /*#__PURE__*/React.createElement("input", {
     autoFocus: true,
     value: q,
     onChange: e => setQ(e.target.value),
     onKeyDown: onKey,
-    placeholder: "Type a command or search…",
+    placeholder: "Type a command or search\u2026",
     className: "pm-input",
     style: {
       flex: 1,
@@ -3567,7 +3565,7 @@ function CommandPalette({
       color: C.faint,
       fontSize: 14
     }
-  }, "No commands match “", q, "”.") : results.map((c, i) => /*#__PURE__*/React.createElement("button", {
+  }, "No commands match \u201C", q, "\u201D.") : results.map((c, i) => /*#__PURE__*/React.createElement("button", {
     key: c.id,
     onClick: () => run(c),
     onMouseEnter: () => setSel(i),
@@ -3657,18 +3655,23 @@ function PlayMode({
   const options = useMemo(() => {
     if (!q) return [];
     const opts = [q.answer, q.alt_answer].filter(Boolean);
-    return opts.sort(() => Math.random() - 0.5); // both are "correct"; order shuffled
+    return opts.slice().sort(() => Math.random() - 0.5); // shuffle display order
   }, [q]);
+
+  // The primary answer is the correct fill for the sentence; the second word is a valid
+  // positive word but not the right answer here.
+  const correctAnswer = (q?.answer || "").toUpperCase();
+  const isRight = picked != null && picked.toUpperCase() === correctAnswer;
   const pick = opt => {
     if (picked) return;
     setPicked(opt);
-    setCorrect(c => c + 1); // any positive word is a valid choice
+    if ((opt || "").toUpperCase() === correctAnswer) setCorrect(c => c + 1);
     setTimeout(() => {
       if (i + 1 >= questions.length) setDone(true);else {
         setI(i + 1);
         setPicked(null);
       }
-    }, 900);
+    }, 1100);
   };
   const restart = () => {
     setI(0);
@@ -3720,7 +3723,7 @@ function PlayMode({
     variant: "ghost",
     size: "sm",
     onClick: onClose
-  }, "✕ Exit")), questions && questions.length > 0 && !done && /*#__PURE__*/React.createElement("div", {
+  }, "\u2715 Exit")), questions && questions.length > 0 && !done && /*#__PURE__*/React.createElement("div", {
     style: {
       height: 5,
       background: C.line
@@ -3742,9 +3745,9 @@ function PlayMode({
       overflowY: "auto"
     }
   }, questions === null ? /*#__PURE__*/React.createElement(Spinner, {
-    label: "Loading pack…"
+    label: "Loading pack\u2026"
   }) : questions.length === 0 ? /*#__PURE__*/React.createElement(EmptyState, {
-    icon: "🫙",
+    icon: "\uD83E\uDED9",
     title: "No active questions",
     body: "This pack has no active questions to play. Add some or activate existing ones.",
     action: /*#__PURE__*/React.createElement(Btn, {
@@ -3760,7 +3763,7 @@ function PlayMode({
       fontSize: 56,
       marginBottom: 10
     }
-  }, "🌟"), /*#__PURE__*/React.createElement("div", {
+  }, "\uD83C\uDF1F"), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 26,
       fontWeight: 800,
@@ -3772,7 +3775,7 @@ function PlayMode({
       color: C.sub,
       margin: "8px 0 24px"
     }
-  }, "You completed all ", questions.length, " affirmations in “", pack.name, "”. Every answer is a positive choice."), /*#__PURE__*/React.createElement("div", {
+  }, "You got ", correct, " of ", questions.length, " correct in \u201C", pack.name, "\u201D."), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
@@ -3781,7 +3784,7 @@ function PlayMode({
   }, /*#__PURE__*/React.createElement(Btn, {
     variant: "soft",
     onClick: restart,
-    icon: "↻"
+    icon: "\u21BB"
   }, "Play again"), /*#__PURE__*/React.createElement(Btn, {
     onClick: onClose
   }, "Back to editing"))) : /*#__PURE__*/React.createElement("div", {
@@ -3821,6 +3824,13 @@ function PlayMode({
     }
   }, options.map(opt => {
     const isPicked = picked === opt;
+    const optIsCorrect = opt.toUpperCase() === correctAnswer;
+    // Once answered: picked-correct = green, picked-wrong = red, and also
+    // highlight the correct answer in green so the child learns it.
+    const showGreen = picked && (isPicked ? optIsCorrect : optIsCorrect);
+    const showRed = picked && isPicked && !optIsCorrect;
+    const bg = showGreen ? C.good : showRed ? C.danger : picked ? C.lineSoft : C.panel;
+    const bd = showGreen ? C.good : showRed ? C.danger : isPicked ? pack.color : C.line;
     return /*#__PURE__*/React.createElement("button", {
       key: opt,
       onClick: () => pick(opt),
@@ -3832,27 +3842,34 @@ function PlayMode({
         borderRadius: R.lg,
         cursor: picked ? "default" : "pointer",
         fontFamily: "inherit",
-        border: "2px solid " + (isPicked ? pack.color : C.line),
-        background: isPicked ? pack.color : picked ? C.lineSoft : C.panel,
-        color: isPicked ? "#fff" : C.ink,
+        border: "2px solid " + bd,
+        background: bg,
+        color: showGreen || showRed || isPicked ? "#fff" : C.ink,
         transition: "all .2s",
         transform: isPicked ? "scale(1.02)" : "scale(1)"
       }
-    }, opt, isPicked && " ✓");
-  })), picked && /*#__PURE__*/React.createElement("div", {
+    }, opt, picked && optIsCorrect && " ✓", showRed && " ✗");
+  })), picked && (isRight ? /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 20,
-      fontSize: 15,
-      fontWeight: 700,
+      fontSize: 16,
+      fontWeight: 800,
       color: C.good
     }
-  }, "Great choice! 💚")), /*#__PURE__*/React.createElement("div", {
+  }, "Correct! \u2713") : /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 20,
+      fontSize: 16,
+      fontWeight: 800,
+      color: C.danger
+    }
+  }, "Not quite \u2014 the answer is ", correctAnswer, "."))), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12.5,
       color: C.faint,
       marginTop: 16
     }
-  }, "Tip: in the real game, both words are positive — the child picks whichever feels most like them."))));
+  }, "Tip: both words are positive, but only the primary word is the correct fill for this sentence."))));
 }
 
 // ============================================================
@@ -3950,7 +3967,7 @@ function HealthView({
     h: 56,
     r: 12
   }))) : totalIssues === 0 ? /*#__PURE__*/React.createElement(EmptyState, {
-    icon: "✅",
+    icon: "\u2705",
     title: "Everything looks healthy",
     body: "No invalid templates, missing options, or duplicates found. Nice work."
   }) : /*#__PURE__*/React.createElement("div", {
@@ -4020,7 +4037,7 @@ function HealthView({
       fontSize: 13.5,
       color: C.ink2
     }
-  }, /*#__PURE__*/React.createElement("b", null, s.thin_packs), " pack", s.thin_packs === 1 ? " has" : "s have", " only 1–2 questions. Consider adding more so they're satisfying to play."));
+  }, /*#__PURE__*/React.createElement("b", null, s.thin_packs), " pack", s.thin_packs === 1 ? " has" : "s have", " only 1\u20132 questions. Consider adding more so they're satisfying to play."));
 }
 const HealthStat = ({
   n,
@@ -4108,9 +4125,9 @@ function ActivityView() {
     h: 48,
     r: 10
   }))) : rows.length === 0 ? /*#__PURE__*/React.createElement(EmptyState, {
-    icon: "📋",
+    icon: "\uD83D\uDCCB",
     title: "No activity yet",
-    body: "Changes you make — creating packs, editing questions, imports — will appear here."
+    body: "Changes you make \u2014 creating packs, editing questions, imports \u2014 will appear here."
   }) : /*#__PURE__*/React.createElement("div", {
     style: {
       background: C.panel,
@@ -4226,7 +4243,7 @@ function TagInput({
       fontSize: 14,
       lineHeight: 1
     }
-  }, "×"))), /*#__PURE__*/React.createElement("input", {
+  }, "\xD7"))), /*#__PURE__*/React.createElement("input", {
     value: input,
     onChange: e => setInput(e.target.value),
     onKeyDown: e => {
@@ -4381,7 +4398,7 @@ function FieldMapRow({
       color: C.faint,
       fontSize: 14
     }
-  }, "→"), /*#__PURE__*/React.createElement(Input, {
+  }, "\u2192"), /*#__PURE__*/React.createElement(Input, {
     value: map.to,
     onChange: e => onChange({
       ...map,
@@ -4417,7 +4434,7 @@ function FieldMapRow({
       fontSize: 16,
       padding: 4
     }
-  }, "×"));
+  }, "\xD7"));
 }
 
 // ============================================================
@@ -4573,11 +4590,11 @@ function ProfileBuilder({
     onChange: e => setSpecField("structure", e.target.value)
   }, /*#__PURE__*/React.createElement("option", {
     value: "nested"
-  }, "Nested — packs with questions inside"), /*#__PURE__*/React.createElement("option", {
+  }, "Nested \u2014 packs with questions inside"), /*#__PURE__*/React.createElement("option", {
     value: "flat"
-  }, "Flat — one array of questions"), /*#__PURE__*/React.createElement("option", {
+  }, "Flat \u2014 one array of questions"), /*#__PURE__*/React.createElement("option", {
     value: "keyed"
-  }, "Keyed — dictionary by slug"))), /*#__PURE__*/React.createElement(Field, {
+  }, "Keyed \u2014 dictionary by slug"))), /*#__PURE__*/React.createElement(Field, {
     label: "Root key",
     hint: "Top-level wrapper (blank = bare)"
   }, /*#__PURE__*/React.createElement(Input, {
@@ -4718,7 +4735,7 @@ function ProfileBuilder({
       fontWeight: 500,
       color: C.faint
     }
-  }, "· source → output")), /*#__PURE__*/React.createElement("div", {
+  }, "\xB7 source \u2192 output")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
       gap: 8
@@ -4745,7 +4762,7 @@ function ProfileBuilder({
       fontWeight: 500,
       color: C.faint
     }
-  }, "· source → output")), /*#__PURE__*/React.createElement("div", {
+  }, "\xB7 source \u2192 output")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
       gap: 8
@@ -4772,7 +4789,7 @@ function ProfileBuilder({
       fontWeight: 500,
       color: C.faint
     }
-  }, "· remap specific values")), /*#__PURE__*/React.createElement(ValueMapEditor, {
+  }, "\xB7 remap specific values")), /*#__PURE__*/React.createElement(ValueMapEditor, {
     maps: spec.value_maps || {},
     onChange: vm => setSpecField("value_maps", vm)
   }))), tab === "json" && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
@@ -4925,7 +4942,7 @@ function ValueMapEditor({
     style: {
       color: C.faint
     }
-  }, "→"), /*#__PURE__*/React.createElement(Input, {
+  }, "\u2192"), /*#__PURE__*/React.createElement(Input, {
     value: String(v),
     onChange: e => {
       let nv = e.target.value;
@@ -4960,7 +4977,7 @@ function ValueMapEditor({
       color: C.faint,
       fontSize: 14
     }
-  }, "×"))), /*#__PURE__*/React.createElement("button", {
+  }, "\xD7"))), /*#__PURE__*/React.createElement("button", {
     onClick: () => onChange({
       ...maps,
       [field]: {
@@ -5109,7 +5126,7 @@ function FirebaseTargetEditor({
     }
   };
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(ModalHead, {
-    emoji: "🔥",
+    emoji: "\uD83D\uDD25",
     title: isNew ? "New Firebase target" : "Edit Firebase target",
     subtitle: "Configure how content writes into Firebase"
   }), /*#__PURE__*/React.createElement("div", {
@@ -5183,7 +5200,7 @@ function FirebaseTargetEditor({
     }
   }, /*#__PURE__*/React.createElement(Field, {
     label: "Realtime Database URL",
-    hint: "From Firebase console → Realtime Database"
+    hint: "From Firebase console \u2192 Realtime Database"
   }, /*#__PURE__*/React.createElement(Input, {
     value: cfg.rtdbUrl || "",
     onChange: e => set("rtdbUrl", e.target.value),
@@ -5215,7 +5232,7 @@ function FirebaseTargetEditor({
   }, /*#__PURE__*/React.createElement(Input, {
     value: cfg.apiKey || "",
     onChange: e => set("apiKey", e.target.value),
-    placeholder: "AIza…"
+    placeholder: "AIza\u2026"
   })), /*#__PURE__*/React.createElement(Field, {
     label: "Bearer token",
     hint: "Optional OAuth/ID token"
@@ -5223,7 +5240,7 @@ function FirebaseTargetEditor({
     type: "password",
     value: cfg.bearer || "",
     onChange: e => set("bearer", e.target.value),
-    placeholder: "ya29.…"
+    placeholder: "ya29.\u2026"
   })))), cfg.mode === "cloudfn" && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
@@ -5251,7 +5268,7 @@ function FirebaseTargetEditor({
     type: "password",
     value: cfg.secret || "",
     onChange: e => set("secret", e.target.value),
-    placeholder: "Bearer …"
+    placeholder: "Bearer \u2026"
   }))), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
@@ -5340,7 +5357,7 @@ function FirebaseTargetEditor({
       color: C.faint,
       marginTop: 4
     }
-  }, "…one write per ", cfg.layout === "single-doc" ? "everything" : cfg.layout === "per-question" ? "question" : "pack", "."))), testMsg && /*#__PURE__*/React.createElement("div", {
+  }, "\u2026one write per ", cfg.layout === "single-doc" ? "everything" : cfg.layout === "per-question" ? "question" : "pack", "."))), testMsg && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 13,
       fontWeight: 600,
@@ -5394,7 +5411,7 @@ exports.ingestContent = functions.https.onRequest(async (req, res) => {
 });`;
   const copy = () => navigator.clipboard?.writeText(code);
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(ModalHead, {
-    emoji: "⚡",
+    emoji: "\u26A1",
     title: "Sample Firebase Cloud Function",
     subtitle: "Deploy this, then point the target's URL at it"
   }), /*#__PURE__*/React.createElement("div", {
@@ -5419,7 +5436,7 @@ exports.ingestContent = functions.https.onRequest(async (req, res) => {
     onClick: onClose
   }, "Close"), /*#__PURE__*/React.createElement(Btn, {
     onClick: copy,
-    icon: "⧉"
+    icon: "\u29C9"
   }, "Copy code")));
 }
 
@@ -5697,7 +5714,7 @@ function PublishHub({
     style: {
       fontSize: 16
     }
-  }, "⚡"), /*#__PURE__*/React.createElement("b", null, pendingCount), " published pack", pendingCount === 1 ? " has" : "s have", " changes not yet synced to the game."), /*#__PURE__*/React.createElement("div", {
+  }, "\u26A1"), /*#__PURE__*/React.createElement("b", null, pendingCount), " published pack", pendingCount === 1 ? " has" : "s have", " changes not yet synced to the game."), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 4,
@@ -5730,12 +5747,12 @@ function PublishHub({
       fontSize: 13.5,
       color: C.sub
     }
-  }, profiles.length, " profile", profiles.length === 1 ? "" : "s", " — each defines a target format"), /*#__PURE__*/React.createElement("div", {
+  }, profiles.length, " profile", profiles.length === 1 ? "" : "s", " \u2014 each defines a target format"), /*#__PURE__*/React.createElement("div", {
     className: "pm-grow"
   }), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     onClick: () => setEditProfile({}),
-    icon: "＋"
+    icon: "\uFF0B"
   }, "New profile")), profilesState.loading ? /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
@@ -5746,12 +5763,12 @@ function PublishHub({
     h: 72,
     r: 12
   }))) : profiles.length === 0 ? /*#__PURE__*/React.createElement(EmptyState, {
-    icon: "🧩",
+    icon: "\uD83E\uDDE9",
     title: "No profiles yet",
     body: "Create a profile to define how your content maps to a game backend's format.",
     action: /*#__PURE__*/React.createElement(Btn, {
       onClick: () => setEditProfile({}),
-      icon: "＋"
+      icon: "\uFF0B"
     }, "Create profile")
   }) : /*#__PURE__*/React.createElement("div", {
     style: {
@@ -5806,7 +5823,7 @@ function PublishHub({
       color: C.faint,
       marginTop: 6
     }
-  }, p.spec?.pack_fields?.length || 0, " pack fields · ", p.spec?.question_fields?.length || 0, " question fields · ", p.spec?.filters?.status || "all", " packs")), /*#__PURE__*/React.createElement("div", {
+  }, p.spec?.pack_fields?.length || 0, " pack fields \xB7 ", p.spec?.question_fields?.length || 0, " question fields \xB7 ", p.spec?.filters?.status || "all", " packs")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 6,
@@ -5821,19 +5838,19 @@ function PublishHub({
     size: "sm",
     disabled: busyId === p.id,
     onClick: () => exportFile(p, "json"),
-    icon: "⭱"
+    icon: "\u2B71"
   }, "JSON"), /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     size: "sm",
     disabled: busyId === p.id,
     onClick: () => exportFile(p, "xml"),
-    icon: "⭱"
+    icon: "\u2B71"
   }, "XML"), /*#__PURE__*/React.createElement(Btn, {
     variant: "soft",
     size: "sm",
     disabled: busyId === p.id,
     onClick: () => pushToGame(p),
-    icon: "⇧"
+    icon: "\u21E7"
   }, busyId === p.id ? "…" : "Push"), !p.is_builtin && /*#__PURE__*/React.createElement(Btn, {
     variant: "danger",
     size: "sm",
@@ -5852,17 +5869,17 @@ function PublishHub({
       fontSize: 13.5,
       color: C.sub
     }
-  }, "Saved Firebase destinations — each pairs a profile with a database + layout"), /*#__PURE__*/React.createElement("div", {
+  }, "Saved Firebase destinations \u2014 each pairs a profile with a database + layout"), /*#__PURE__*/React.createElement("div", {
     className: "pm-grow"
   }), /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     size: "sm",
     onClick: () => setShowFnDocs(true),
-    icon: "⚡"
+    icon: "\u26A1"
   }, "Function sample"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     onClick: () => setEditTarget({}),
-    icon: "＋"
+    icon: "\uFF0B"
   }, "New target")), targetsState.loading ? /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
@@ -5873,12 +5890,12 @@ function PublishHub({
     h: 80,
     r: 12
   }))) : targets.length === 0 ? /*#__PURE__*/React.createElement(EmptyState, {
-    icon: "🔥",
+    icon: "\uD83D\uDD25",
     title: "No Firebase targets yet",
-    body: "Add a target to write content into Firestore or Realtime Database — directly or via a Cloud Function.",
+    body: "Add a target to write content into Firestore or Realtime Database \u2014 directly or via a Cloud Function.",
     action: /*#__PURE__*/React.createElement(Btn, {
       onClick: () => setEditTarget({}),
-      icon: "＋"
+      icon: "\uFF0B"
     }, "Add Firebase target")
   }) : /*#__PURE__*/React.createElement("div", {
     style: {
@@ -5911,7 +5928,7 @@ function PublishHub({
       style: {
         fontSize: 26
       }
-    }, "🔥"), /*#__PURE__*/React.createElement("div", {
+    }, "\uD83D\uDD25"), /*#__PURE__*/React.createElement("div", {
       style: {
         flex: 1,
         minWidth: 180
@@ -5935,7 +5952,7 @@ function PublishHub({
       tone: "muted"
     }, prof.name) : /*#__PURE__*/React.createElement(Pill, {
       tone: "muted"
-    }, "⚠ no profile")), /*#__PURE__*/React.createElement("div", {
+    }, "\u26A0 no profile")), /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: 12.5,
         color: C.sub,
@@ -5956,7 +5973,7 @@ function PublishHub({
       size: "sm",
       disabled: busyId === t.id || !prof,
       onClick: () => syncTarget(t),
-      icon: "🔥"
+      icon: "\uD83D\uDD25"
     }, busyId === t.id ? "Syncing…" : "Sync now"), /*#__PURE__*/React.createElement(Btn, {
       variant: "danger",
       size: "sm",
@@ -6053,9 +6070,9 @@ function ChannelsPanel({
       gap: S.lg
     }
   }, /*#__PURE__*/React.createElement(Channel, {
-    icon: "🔗",
+    icon: "\uD83D\uDD17",
     title: "Pull feed (game fetches on its own)",
-    desc: "A stable public URL that returns transformed content. The game backend polls this on its schedule. Most robust — works with any backend."
+    desc: "A stable public URL that returns transformed content. The game backend polls this on its schedule. Most robust \u2014 works with any backend."
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12.5,
@@ -6079,7 +6096,7 @@ function ChannelsPanel({
       marginTop: 8
     }
   }, "Add ", /*#__PURE__*/React.createElement("code", null, "?list=1"), " to enumerate profiles. Content is cached ~60s. Uses each profile's filters (published/active).")), /*#__PURE__*/React.createElement(Channel, {
-    icon: "⇧",
+    icon: "\u21E7",
     title: "Push (CMS sends to game on publish)",
     desc: "The CMS POSTs the transformed payload to your game backend endpoint. Configure the target below."
   }, /*#__PURE__*/React.createElement("div", {
@@ -6116,14 +6133,14 @@ function ChannelsPanel({
     placeholder: "Authorization"
   }))), /*#__PURE__*/React.createElement(Field, {
     label: "Auth header value / secret",
-    hint: "Optional — sent with each push"
+    hint: "Optional \u2014 sent with each push"
   }, /*#__PURE__*/React.createElement(Input, {
     type: "password",
     value: cfg.secret || "",
     onChange: e => save({
       secret: e.target.value
     }),
-    placeholder: "Bearer …"
+    placeholder: "Bearer \u2026"
   })), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
@@ -6133,7 +6150,7 @@ function ChannelsPanel({
       borderRadius: R.sm
     }
   }, "Note: the target must allow browser (CORS) requests, or run pushes from a server. Since the game backend isn't finalized, this is ready to point at it once decided."))), /*#__PURE__*/React.createElement(Channel, {
-    icon: "⚙",
+    icon: "\u2699",
     title: "Sync control",
     desc: "How and when content flows to the game."
   }, /*#__PURE__*/React.createElement("div", {
@@ -6262,7 +6279,7 @@ function SyncHistory() {
     h: 52,
     r: 10
   }))) : rows.length === 0 ? /*#__PURE__*/React.createElement(EmptyState, {
-    icon: "🕓",
+    icon: "\uD83D\uDD53",
     title: "No syncs yet",
     body: "Every file export, feed pull, and push to the game will be logged here."
   }) : /*#__PURE__*/React.createElement("div", {
@@ -6309,18 +6326,18 @@ function SyncHistory() {
       fontWeight: 700,
       textTransform: "capitalize"
     }
-  }, r.channel), " · ", r.profile_name || "—", " ", r.status === "error" && /*#__PURE__*/React.createElement("span", {
+  }, r.channel), " \xB7 ", r.profile_name || "—", " ", r.status === "error" && /*#__PURE__*/React.createElement("span", {
     style: {
       color: C.danger,
       fontWeight: 700
     }
-  }, "· failed")), /*#__PURE__*/React.createElement("div", {
+  }, "\xB7 failed")), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: C.sub,
       marginTop: 1
     }
-  }, r.pack_count, " packs · ", r.question_count, " questions", r.detail ? ` · ${r.detail}` : "")), /*#__PURE__*/React.createElement("div", {
+  }, r.pack_count, " packs \xB7 ", r.question_count, " questions", r.detail ? ` · ${r.detail}` : "")), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: C.faint,
@@ -6340,8 +6357,9 @@ const DOC_ARCHITECTURE = `# Positive Minds CMS — Site Architecture & Structure
 ## 1. What this is
 A content management system for the **Positive Minds** children's word game
 (CBMT — Cognitive Bias Modification Therapy). The game presents fill-in-the-blank
-affirmation sentences (e.g. "I am ____ when I try something new." → BRAVE / BOLD)
-where both word options are positive. This CMS is the **authoring source of truth**:
+sentences (e.g. "I am ____ when I try something new." → BRAVE) where the child chooses
+between two positive words — both kind, but only the primary one actually fits the blank
+(the other is a positive distractor). This CMS is the **authoring source of truth**:
 content is created, organized, reviewed, and version-tracked here, then published to
 a separate game backend through a customizable, multi-channel sync pipeline.
 
@@ -6536,6 +6554,17 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Play mode scoring fixed + game rule clarified:** Play mode treated BOTH answer words as
+  correct (picking either said "Great choice!" and scored a point), so a wrong pick was reported
+  as correct. Clarified rule: both words are positive, but only the PRIMARY word (\`answer\`) is
+  the correct fill for the sentence; the alternate is positive-but-wrong-here (a distractor, not
+  a synonym). Play mode now checks the pick against the primary answer, shows "Correct! ✓" vs
+  "Not quite — the answer is X", colours the buttons green/red and reveals the right answer, and
+  scores only correct picks (done screen shows "X of Y correct"). The MASTER_CONTEXT doc and the
+  generator PROMPT were rewritten to teach this (the alternate must be a plausible positive word
+  that does NOT fit the blank — never a synonym). Also purged the word "affirmation(s)" as a name
+  for the items across the UI (editor subtitle, empty state, levels caption, Play mode) — they're
+  "questions"; only genuine CBMT adjective usage ("self-affirming") remains in the therapy blurb.
 - **Dashboard stats fixed to use level tiers (was counting dead difficulty):** pm_dashboard_stats
   computed its basic/advanced question split from the derived-legacy difficulty column. It now
   counts by the effective LEVEL's tier (question level → pack level → pm_levels.tier), which is
@@ -6860,8 +6889,9 @@ project + a GitHub repo) to rebuild the entire app.
 
 Build a content management web app called "Positive Minds" — a CMS for a children's
 word game based on CBMT (Cognitive Bias Modification Therapy). The game shows
-fill-in-the-blank affirmation sentences like "I am ____ when I try something new."
-with two positive word options (e.g. BRAVE / BOLD); the child picks either. This CMS
+fill-in-the-blank sentences like "I am ____ when I try something new." with two
+positive word options where only the primary word fits the blank (the other is a
+positive-but-wrong distractor); the child must pick the one that fits. This CMS
 is the authoring + publishing layer; a separate game backend consumes the content.
 
 ## Architecture requirements
@@ -6962,7 +6992,7 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    word) so it's stable across renders and matches the game. Every preview ("how the child
    sees it") reflects the real shape.
 11. **Questions are multi-level concepts:** every question auto-renders all 10 levels — the
-   same affirmation at each level's blank difficulty (buildLevelVariants derives them from the
+   same question at each level's blank difficulty (buildLevelVariants derives them from the
    question + level rules; no row duplication). The question bank keeps flat rows with a
    "Levels" expand toggle revealing all 10 variants. Any individual level can be edited
    (override sentence/word/letters/position/grouping, or disabled for that concept), stored in
@@ -7170,7 +7200,7 @@ function DeveloperNotes() {
     style: {
       fontSize: 16
     }
-  }, "✎"), "Scratchpad")), doc ? /*#__PURE__*/React.createElement("div", {
+  }, "\u270E"), "Scratchpad")), doc ? /*#__PURE__*/React.createElement("div", {
     style: {
       background: C.panel,
       border: "1px solid " + C.line,
@@ -7211,7 +7241,7 @@ function DeveloperNotes() {
     variant: "soft",
     size: "sm",
     onClick: () => downloadText(doc.file, doc.body)
-  }, "⭳ Download")), /*#__PURE__*/React.createElement("pre", {
+  }, "\u2B73 Download")), /*#__PURE__*/React.createElement("pre", {
     style: {
       margin: 0,
       padding: S.lg,
@@ -7266,12 +7296,12 @@ function DeveloperNotes() {
       padding: S.xl
     }
   }, /*#__PURE__*/React.createElement(Spinner, {
-    label: "Loading notes…"
+    label: "Loading notes\u2026"
   })) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Textarea, {
     value: notes,
     onChange: e => onNotesChange(e.target.value),
     rows: 16,
-    placeholder: "Jot down TODOs, decisions, credentials to rotate, ideas…",
+    placeholder: "Jot down TODOs, decisions, credentials to rotate, ideas\u2026",
     style: {
       border: "none",
       borderRadius: 0,
@@ -7500,7 +7530,7 @@ function LevelsView() {
       marginTop: 3,
       fontStyle: "italic"
     }
-  }, "“", l.tagline, "”"), /*#__PURE__*/React.createElement("div", {
+  }, "\u201C", l.tagline, "\u201D"), /*#__PURE__*/React.createElement("div", {
     className: "pm-level-rules",
     style: {
       display: "grid",
@@ -7810,7 +7840,7 @@ function QuestionLevelsPanel({
       padding: S.md
     }
   }, /*#__PURE__*/React.createElement(Spinner, {
-    label: "Loading levels…"
+    label: "Loading levels\u2026"
   }));
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -7825,7 +7855,7 @@ function QuestionLevelsPanel({
       fontWeight: 700,
       padding: "2px 4px 6px"
     }
-  }, "The same affirmation at every level. Auto-generated from the level rules; edit any to customize."), variants.map(v => /*#__PURE__*/React.createElement("div", {
+  }, "The same question at every level. Auto-generated from the level rules; edit any to customize."), variants.map(v => /*#__PURE__*/React.createElement("div", {
     key: v.level,
     style: {
       display: "flex",
@@ -7871,7 +7901,7 @@ function QuestionLevelsPanel({
       color: C.brandInk,
       fontWeight: 700
     }
-  }, " · edited"))), /*#__PURE__*/React.createElement("span", {
+  }, " \xB7 edited"))), /*#__PURE__*/React.createElement("span", {
     style: {
       fontFamily: "ui-monospace, monospace",
       fontSize: 13,
@@ -7894,7 +7924,7 @@ function QuestionLevelsPanel({
     onClick: () => resetLevel(v.level),
     title: "Reset to auto",
     style: miniBtn(C, true)
-  }, "↺")))), /*#__PURE__*/React.createElement(Modal, {
+  }, "\u21BA")))), /*#__PURE__*/React.createElement(Modal, {
     open: editLevel !== null,
     onClose: () => setEditLevel(null),
     width: 520
@@ -8005,7 +8035,7 @@ function QuestionLevelEditor({
       fontWeight: 800,
       marginTop: 4
     }
-  }, "→ ", [merged.answer, merged.alt_answer].filter(Boolean).map(w => w.toUpperCase()).join(" / "))), /*#__PURE__*/React.createElement(Field, {
+  }, "\u2192 ", [merged.answer, merged.alt_answer].filter(Boolean).map(w => w.toUpperCase()).join(" / "))), /*#__PURE__*/React.createElement(Field, {
     label: "Sentence",
     hint: "Blank to inherit the concept's sentence"
   }, /*#__PURE__*/React.createElement(Textarea, {
@@ -8114,10 +8144,10 @@ const MASTER_CONTEXT = `# Positive Minds — Background & Authoring Context
 Positive Minds is a word game for children (roughly ages 5–12) built on **Cognitive Bias Modification Therapy (CBMT)**. The premise of CBMT is simple but powerful: the thoughts a child rehearses shape the thoughts that come automatically. By having children repeatedly complete warm, self-affirming sentences, the game gently trains a more positive, resilient internal voice — building the habit of thinking well of themselves and the world.
 
 ## The core mechanic
-Each question is a short, first-person sentence with one missing word — shown as {blank}. The child completes it by choosing between **two words, and both are positive**. There is never a negative or "wrong feeling" option. Whichever the child picks, they affirm something good: "I am BRAVE / BOLD when I try new things." The two words are near-synonyms or equally valid positive choices, so the child is choosing *how* to feel good, never *whether* to.
+Each question is a short, first-person sentence with one missing word — shown as {blank}. The child chooses between **two words. Both are positive** — there is never a negative or "wrong feeling" option — but only **one of them (the primary answer) is the correct word that actually fits this sentence**. The second word is also warm and positive, but it does not fit the blank here; it is a gentle distractor, not a synonym. Example: "I am {blank} when I try something new." → primary **BRAVE** (correct), alternate **KIND** (positive, but not what fits this sentence). Both leave the child thinking a good thought; the challenge is choosing the word that truly belongs.
 
-## Why both words are positive
-This is the therapeutic heart of the design and must never be broken. In ordinary quizzes a child can pick the "wrong" answer and feel bad. Here, the act of answering is itself the intervention: the child's mind rehearses an affirming completion every single time. Offering a negative option would rehearse the exact bias we're trying to soften. So both options are always constructive, kind, and true-feeling.
+## Why both words are positive (but only one is correct)
+This is the therapeutic heart of the design and must never be broken. The child should never be offered a negative, unkind, or "bad feeling" option — every word on screen is something good, so even a wrong guess never rehearses a harmful thought. What makes it a real game (not just tapping) is that only the primary word correctly completes the sentence; the positive alternate simply doesn't fit *here*. So "wrong" only ever means "that lovely word doesn't belong in this sentence" — never "you had a bad feeling" or "you failed as a person." Keep both options constructive, kind, and true-feeling; make the primary clearly the best fit and the alternate a plausible-but-not-right positive word.
 
 ## Who the child is
 Assume a child who may be shy, anxious, still building confidence, or simply learning emotional vocabulary. The tone is warm, safe, and encouraging — like a kind adult who believes in them. Never clinical, never scary, never shaming. Nothing that references the child doing something wrong, being in danger, or failing. Language is simple and concrete; words are ones a child that age would recognise and be able to spell.
@@ -8140,7 +8170,7 @@ Confidence and self-worth · kindness and caring for others · courage and tryin
 - Any implication the child did something wrong or is at fault.
 - Obscure or hard-to-spell words; multi-word answers.
 - Two words where one is clearly better than the other (both should be valid).
-- Repeating an affirmation the pack already covers (see the "already covered" list when provided).
+- Repeating a question the pack already covers (see the "already covered" list when provided).
 
 ## Optional: frame words
 Some sentences include a second braced word besides {blank} — e.g. "…when things are {hard}". These "frame words" are NOT guessed; they exist so the sentence can be varied for freshness or made gently more advanced at higher levels (hard → difficult → challenging). They are always neutral-to-mild and never undo the positivity of the sentence.
@@ -8249,10 +8279,10 @@ function buildGeneratorPrompt({
   lines.push(`You are helping author content for "Positive Minds", a Cognitive Bias Modification Therapy (CBMT) word game for children roughly aged 5–12.`);
   lines.push("");
   if (includeContext) {
-    lines.push(`BACKGROUND (why this matters): CBMT works on the principle that the thoughts a child rehearses become the thoughts that come automatically. Every question has the child complete a warm, first-person sentence by choosing between TWO positive words — so the act of answering always rehearses an affirming thought. There is never a negative option. The tone is warm, safe and encouraging, never clinical or shaming, and never implies the child did anything wrong. Words are simple, common, and spellable for the age. The aim is small, repeated moments that leave a child feeling a little braver, kinder, and more capable.`);
+    lines.push(`BACKGROUND (why this matters): CBMT works on the principle that the thoughts a child rehearses become the thoughts that come automatically. Every question has the child complete a warm, first-person sentence by choosing between TWO positive words — so even a wrong guess never rehearses a harmful thought. Only ONE of the two words (the primary answer) actually fits the sentence; the other is also positive but is a gentle distractor that does not fit here. The tone is warm, safe and encouraging, never clinical or shaming; a wrong pick only means "that kind word doesn't belong in this sentence", never that the child failed. Words are simple, common, and spellable for the age.`);
     lines.push("");
   }
-  lines.push(`THE GAME MECHANIC: each question is a short, affirming sentence with one missing word. The child fills in the blank by choosing between TWO words — and BOTH words are positive. There is never a "wrong feeling" option; the child always affirms something good about themselves. The missing word is written as {blank} in the sentence.`);
+  lines.push(`THE GAME MECHANIC: each question is a short, positive first-person sentence with one missing word. The child fills the blank by choosing between TWO words — BOTH positive, but only the PRIMARY word correctly fits the sentence. The second word is positive too, yet does not fit this blank (a gentle distractor, NOT a synonym). There is never a negative or "wrong feeling" option. The missing word is written as {blank} in the sentence.`);
   lines.push("");
 
   // Pack context
@@ -8272,14 +8302,14 @@ function buildGeneratorPrompt({
       if (l.age_hint) bits.push(`ages ${l.age_hint}`);
       lines.push(`- ${bits.join(" — ")}`);
     }
-    lines.push(`The same affirmation works across levels; the game itself controls how much of the word is hidden per level, so you do NOT need to vary the blank difficulty — just write good, level-appropriate sentences and words.`);
+    lines.push(`The same question works across levels; the game itself controls how much of the word is hidden per level, so you do NOT need to vary the blank difficulty — just write good, level-appropriate sentences and words.`);
     lines.push("");
   }
 
   // Rules
   lines.push(`RULES (important):`);
   lines.push(`1. Every sentence must contain exactly one {blank}.`);
-  lines.push(`2. Provide TWO answer words. Both must be genuinely positive, age-appropriate, and both must fit the sentence naturally. They should be near-synonyms or equally-valid positive choices (e.g. BRAVE / BOLD, KIND / CARING).`);
+  lines.push(`2. Provide TWO answer words, both genuinely positive and age-appropriate. The FIRST (primary) word is the CORRECT answer — it must fit the sentence naturally and be clearly the right completion. The SECOND word is also positive but must NOT fit this sentence — a plausible, kind distractor that a child could be tempted by, yet is not the right word here (e.g. for "I am {blank} when I try something new" → BRAVE as primary, KIND as the alternate: both lovely, but only BRAVE fits). Do NOT make them synonyms; if both fit equally, the question has no correct answer.`);
   lines.push(`3. Answer words are single words, UPPERCASE, no punctuation. Prefer common words a child would know; keep them short enough to spell.`);
   lines.push(`4. Sentences are warm, simple, first-person ("I am…", "I feel…", "Being…"), and self-affirming.`);
   lines.push(`5. Avoid anything scary, negative, clinical, or that references the child doing something wrong.`);
@@ -8422,7 +8452,7 @@ function GeneratorView({
       lineHeight: 1.5,
       maxWidth: 640
     }
-  }, "Build a ready-to-paste prompt for an AI tool. Pick a pack, choose levels and themes, and copy the prompt — the AI returns a batch of questions in a format you can bulk-import.")), /*#__PURE__*/React.createElement("div", {
+  }, "Build a ready-to-paste prompt for an AI tool. Pick a pack, choose levels and themes, and copy the prompt \u2014 the AI returns a batch of questions in a format you can bulk-import.")), /*#__PURE__*/React.createElement("div", {
     className: "pm-gen-grid",
     style: {
       display: "grid",
@@ -8452,7 +8482,7 @@ function GeneratorView({
     onChange: e => applyPack(e.target.value)
   }, /*#__PURE__*/React.createElement("option", {
     value: ""
-  }, "Choose a pack…"), (packs || []).map(p => /*#__PURE__*/React.createElement("option", {
+  }, "Choose a pack\u2026"), (packs || []).map(p => /*#__PURE__*/React.createElement("option", {
     key: p.id,
     value: p.id
   }, p.emoji ? p.emoji + " " : "", p.name)))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
@@ -8510,9 +8540,9 @@ function GeneratorView({
       color: C.faint,
       marginTop: 6
     }
-  }, "No levels selected — the prompt will target the pack generally.")), /*#__PURE__*/React.createElement(Field, {
+  }, "No levels selected \u2014 the prompt will target the pack generally.")), /*#__PURE__*/React.createElement(Field, {
     label: "Themes / focus",
-    hint: "What these questions should be about — edit freely"
+    hint: "What these questions should be about \u2014 edit freely"
   }, /*#__PURE__*/React.createElement(Textarea, {
     value: themes,
     onChange: e => setThemes(e.target.value),
@@ -8631,7 +8661,7 @@ function GeneratorView({
     }
   }, !pack ? "Pick a pack first." : loadingQs ? "Loading this pack's questions…" : `Tell the AI not to repeat the ${existingQuestions.length} question${existingQuestions.length === 1 ? "" : "s"} already in this pack.`))), /*#__PURE__*/React.createElement(Field, {
     label: "Extra instructions",
-    hint: "Optional — anything specific to add to the prompt"
+    hint: "Optional \u2014 anything specific to add to the prompt"
   }, /*#__PURE__*/React.createElement(Textarea, {
     value: extraNotes,
     onChange: e => setExtraNotes(e.target.value),
@@ -8685,7 +8715,7 @@ function GeneratorView({
       color: C.sub,
       lineHeight: 1.5
     }
-  }, "The full background on the game's purpose and CBMT model. Paste this once at the top of a fresh AI chat, then paste the generated prompt after it — the AI keeps the context for every batch you ask for in that chat."), /*#__PURE__*/React.createElement("div", {
+  }, "The full background on the game's purpose and CBMT model. Paste this once at the top of a fresh AI chat, then paste the generated prompt after it \u2014 the AI keeps the context for every batch you ask for in that chat."), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8
@@ -8764,7 +8794,7 @@ function GeneratorView({
       color: C.sub,
       lineHeight: 1.5
     }
-  }, "Paste this into your AI tool, then bring the result back via ", /*#__PURE__*/React.createElement("b", null, "a pack → Import"), format === "table" ? " (convert the table to pipe/JSON first)" : "", "."))));
+  }, "Paste this into your AI tool, then bring the result back via ", /*#__PURE__*/React.createElement("b", null, "a pack \u2192 Import"), format === "table" ? " (convert the table to pipe/JSON first)" : "", "."))));
 }
 
 // ===== views1.jsx =====
@@ -8906,17 +8936,17 @@ function Dashboard({
     variant: "soft",
     full: true,
     onClick: onNewPack,
-    icon: "＋"
+    icon: "\uFF0B"
   }, "Create a new pack"), /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     full: true,
     onClick: onGoLibrary,
-    icon: "▦"
+    icon: "\u25A6"
   }, "Browse pack library"), /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     full: true,
     onClick: onGoQuestions,
-    icon: "⌕"
+    icon: "\u2315"
   }, "Search all questions")))), /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: S.xl
@@ -8941,7 +8971,7 @@ function Dashboard({
       color: C.faint,
       fontWeight: 600
     }
-  }, (packs || []).length, " total · tap to open")), !packs ? /*#__PURE__*/React.createElement("div", {
+  }, (packs || []).length, " total \xB7 tap to open")), !packs ? /*#__PURE__*/React.createElement("div", {
     className: "pm-index-grid"
   }, [0, 1, 2, 3, 4, 5].map(i => /*#__PURE__*/React.createElement(Skeleton, {
     key: i,
@@ -9113,7 +9143,7 @@ function Library({
   }, /*#__PURE__*/React.createElement(SearchBox, {
     value: search,
     onChange: setSearch,
-    placeholder: "Search packs…"
+    placeholder: "Search packs\u2026"
   }), /*#__PURE__*/React.createElement(Select, {
     value: statusF,
     onChange: e => setStatusF(e.target.value),
@@ -9167,16 +9197,16 @@ function Library({
     variant: "ghost",
     size: "sm",
     onClick: onImportFile,
-    icon: "⭳"
+    icon: "\u2B73"
   }, "Import"), /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     size: "sm",
     onClick: onExport,
-    icon: "⭱"
+    icon: "\u2B71"
   }, "Export"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     onClick: onNew,
-    icon: "＋"
+    icon: "\uFF0B"
   }, "New pack")), loading ? /*#__PURE__*/React.createElement("div", {
     className: "pm-pack-grid"
   }, [0, 1, 2, 3, 4, 5].map(i => /*#__PURE__*/React.createElement("div", {
@@ -9204,12 +9234,12 @@ function Library({
       marginTop: 10
     }
   })))) : shown.length === 0 ? /*#__PURE__*/React.createElement(EmptyState, {
-    icon: "📦",
+    icon: "\uD83D\uDCE6",
     title: order.length === 0 ? "No packs yet" : "Nothing matches",
     body: order.length === 0 ? "Create your first pack to get started." : "Try adjusting your search or filters.",
     action: order.length === 0 ? /*#__PURE__*/React.createElement(Btn, {
       onClick: onNew,
-      icon: "＋"
+      icon: "\uFF0B"
     }, "Create first pack") : null
   }) : /*#__PURE__*/React.createElement("div", {
     className: "pm-pack-grid"
@@ -9331,7 +9361,7 @@ function PackCard({
       alignItems: "center",
       justifyContent: "center"
     }
-  }, "ⓘ")), /*#__PURE__*/React.createElement("div", {
+  }, "\u24D8")), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 13,
       color: C.sub,
@@ -9627,7 +9657,7 @@ function PackDetail({
       gap: 6,
       fontFamily: "inherit"
     }
-  }, "← All packs"), /*#__PURE__*/React.createElement("div", {
+  }, "\u2190 All packs"), /*#__PURE__*/React.createElement("div", {
     style: {
       background: C.panel,
       borderRadius: R.lg,
@@ -9701,7 +9731,7 @@ function PackDetail({
     style: {
       color: C.ink
     }
-  }, total), " question", total === 1 ? "" : "s", " · slug ", /*#__PURE__*/React.createElement("code", {
+  }, total), " question", total === 1 ? "" : "s", " \xB7 slug ", /*#__PURE__*/React.createElement("code", {
     style: {
       background: C.bg,
       padding: "1px 6px",
@@ -9718,12 +9748,12 @@ function PackDetail({
     variant: "soft",
     size: "sm",
     onClick: () => setPlay(true),
-    icon: "▶"
+    icon: "\u25B6"
   }, "Play"), onEditPack && /*#__PURE__*/React.createElement(Btn, {
     variant: "ghost",
     size: "sm",
     onClick: () => onEditPack(pack),
-    icon: "✎"
+    icon: "\u270E"
   }, "Edit"))), (pack.purpose || pack.focus_areas || pack.style_approach || pack.example_objectives) && /*#__PURE__*/React.createElement("div", {
     style: {
       background: C.panel,
@@ -9812,7 +9842,7 @@ function PackDetail({
   }), /*#__PURE__*/React.createElement(SearchBox, {
     value: search,
     onChange: setSearch,
-    placeholder: "Search…"
+    placeholder: "Search\u2026"
   }), /*#__PURE__*/React.createElement(Select, {
     value: lvlF,
     onChange: e => setLvlF(e.target.value),
@@ -9834,11 +9864,11 @@ function PackDetail({
     variant: "soft",
     size: "sm",
     onClick: () => setBulk(true),
-    icon: "⭳"
+    icon: "\u2B73"
   }, "Import"), /*#__PURE__*/React.createElement(Btn, {
     size: "sm",
     onClick: () => setQEdit({}),
-    icon: "＋"
+    icon: "\uFF0B"
   }, "Add")), err ? /*#__PURE__*/React.createElement(ErrorState, {
     error: err,
     onRetry: load
@@ -9852,12 +9882,12 @@ function PackDetail({
     h: 62,
     r: 12
   }))) : shown.length === 0 ? /*#__PURE__*/React.createElement(EmptyState, {
-    icon: "✍️",
+    icon: "\u270D\uFE0F",
     title: total === 0 ? "No questions yet" : "Nothing matches",
-    body: total === 0 ? "Add your first affirming sentence to this pack." : "Try a different search or filter.",
+    body: total === 0 ? "Add your first question to this pack." : "Try a different search or filter.",
     action: total === 0 ? /*#__PURE__*/React.createElement(Btn, {
       onClick: () => setQEdit({}),
-      icon: "＋"
+      icon: "\uFF0B"
     }, "Add first question") : null
   }) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -9933,7 +9963,7 @@ function PackDetail({
         fontWeight: 800,
         marginTop: 4
       }
-    }, "→ ", pv.opts)), /*#__PURE__*/React.createElement("div", {
+    }, "\u2192 ", pv.opts)), /*#__PURE__*/React.createElement("div", {
       className: "pm-qrow-meta"
     }, /*#__PURE__*/React.createElement("button", {
       onClick: () => toggleExpand(q.id),
@@ -9959,7 +9989,7 @@ function PackDetail({
         transition: "transform .15s",
         fontSize: 10
       }
-    }, "▶"), "Levels"), /*#__PURE__*/React.createElement(LevelChip, {
+    }, "\u25B6"), "Levels"), /*#__PURE__*/React.createElement(LevelChip, {
       level: q.level || pack.level,
       levels: levels,
       size: "xs"
@@ -10044,7 +10074,7 @@ const Pager = ({
   size: "sm",
   disabled: page === 0,
   onClick: () => onPage(page - 1)
-}, "← Prev"), /*#__PURE__*/React.createElement("span", {
+}, "\u2190 Prev"), /*#__PURE__*/React.createElement("span", {
   style: {
     fontSize: 13,
     color: C.sub,
@@ -10056,7 +10086,7 @@ const Pager = ({
   size: "sm",
   disabled: page >= pages - 1,
   onClick: () => onPage(page + 1)
-}, "Next →"));
+}, "Next \u2192"));
 
 // ============================================================
 // All questions — global search across every pack (server-side)
@@ -10126,7 +10156,7 @@ function AllQuestions({
   }, /*#__PURE__*/React.createElement(SearchBox, {
     value: q,
     onChange: setQ,
-    placeholder: "Search all questions…",
+    placeholder: "Search all questions\u2026",
     autoFocus: true
   }), /*#__PURE__*/React.createElement(Select, {
     value: lvl,
@@ -10171,7 +10201,7 @@ function AllQuestions({
     h: 58,
     r: 12
   }))) : rows.length === 0 ? /*#__PURE__*/React.createElement(EmptyState, {
-    icon: "🔍",
+    icon: "\uD83D\uDD0D",
     title: "No matches",
     body: debounced ? `Nothing found for "${debounced}".` : "Start typing to search across all your questions."
   }) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
@@ -10234,7 +10264,7 @@ function AllQuestions({
         fontWeight: 800,
         marginTop: 4
       }
-    }, "→ ", pv.opts)), /*#__PURE__*/React.createElement("div", {
+    }, "\u2192 ", pv.opts)), /*#__PURE__*/React.createElement("div", {
       className: "pm-qrow-meta"
     }, r.level && /*#__PURE__*/React.createElement(LevelChip, {
       level: r.level,
@@ -10338,7 +10368,7 @@ function Login({
       margin: "0 auto 18px",
       boxShadow: SH.brand
     }
-  }, "🧠"), /*#__PURE__*/React.createElement("h1", {
+  }, "\uD83E\uDDE0"), /*#__PURE__*/React.createElement("h1", {
     style: {
       margin: 0,
       fontSize: 22,
@@ -11051,7 +11081,7 @@ function App() {
       boxShadow: SH.brand,
       flexShrink: 0
     }
-  }, "🧠"), !bp.isTablet && /*#__PURE__*/React.createElement("div", {
+  }, "\uD83E\uDDE0"), !bp.isTablet && /*#__PURE__*/React.createElement("div", {
     style: {
       minWidth: 0
     }
@@ -11117,14 +11147,14 @@ function App() {
     style: {
       fontSize: 14
     }
-  }, "⌕"), /*#__PURE__*/React.createElement("span", {
+  }, "\u2315"), /*#__PURE__*/React.createElement("span", {
     style: {
       flex: 1,
       textAlign: "left"
     }
   }, "Quick actions"), /*#__PURE__*/React.createElement("kbd", {
     style: kbdStyle
-  }, "⌘K")), /*#__PURE__*/React.createElement("div", {
+  }, "\u2318K")), /*#__PURE__*/React.createElement("div", {
     style: {
       flex: 1
     }
@@ -11164,13 +11194,13 @@ function App() {
     }
   }, bp.isTablet && /*#__PURE__*/React.createElement("button", {
     onClick: () => setPaletteOpen(true),
-    title: "Quick actions (⌘K)",
+    title: "Quick actions (\u2318K)",
     style: sideBtn(true)
   }, /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: 16
     }
-  }, "⌕")), bp.isTablet && /*#__PURE__*/React.createElement(ThemeToggle, {
+  }, "\u2315")), bp.isTablet && /*#__PURE__*/React.createElement(ThemeToggle, {
     theme: theme,
     mini: true
   }), /*#__PURE__*/React.createElement("button", {
@@ -11181,7 +11211,7 @@ function App() {
     style: {
       fontSize: 16
     }
-  }, "⚙"), !bp.isTablet && "Password"), /*#__PURE__*/React.createElement("button", {
+  }, "\u2699"), !bp.isTablet && "Password"), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       auth.logout();
       setAuthed(false);
@@ -11196,7 +11226,7 @@ function App() {
     style: {
       fontSize: 16
     }
-  }, "⏻"), !bp.isTablet && "Sign out"))), /*#__PURE__*/React.createElement("div", {
+  }, "\u23FB"), !bp.isTablet && "Sign out"))), /*#__PURE__*/React.createElement("div", {
     style: {
       flex: 1,
       minWidth: 0,
@@ -11230,7 +11260,7 @@ function App() {
       fontSize: 18,
       flexShrink: 0
     }
-  }, "🧠"), /*#__PURE__*/React.createElement("div", {
+  }, "\uD83E\uDDE0"), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 15.5,
       fontWeight: 800
@@ -11258,7 +11288,7 @@ function App() {
       cursor: "pointer",
       color: C.ink2
     }
-  }, "⋯"), menuOpen && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+  }, "\u22EF"), menuOpen && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     onClick: () => setMenuOpen(false),
     style: {
       position: "fixed",
@@ -11283,7 +11313,7 @@ function App() {
       goNav("health");
     },
     style: menuItem
-  }, "◉ Content health"), /*#__PURE__*/React.createElement("button", {
+  }, "\u25C9 Content health"), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       goNav("levels");
     },
@@ -11291,7 +11321,7 @@ function App() {
       ...menuItem,
       borderTop: "1px solid " + C.line
     }
-  }, "▲ Levels"), /*#__PURE__*/React.createElement("button", {
+  }, "\u25B2 Levels"), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       goNav("activity");
     },
@@ -11299,7 +11329,7 @@ function App() {
       ...menuItem,
       borderTop: "1px solid " + C.line
     }
-  }, "≡ Activity log"), /*#__PURE__*/React.createElement("button", {
+  }, "\u2261 Activity log"), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       goNav("devnotes");
     },
@@ -11307,7 +11337,7 @@ function App() {
       ...menuItem,
       borderTop: "1px solid " + C.line
     }
-  }, "⌘ Developer notes"), /*#__PURE__*/React.createElement("div", {
+  }, "\u2318 Developer notes"), /*#__PURE__*/React.createElement("div", {
     style: {
       padding: "10px 12px",
       borderTop: "1px solid " + C.line
@@ -11323,7 +11353,7 @@ function App() {
       ...menuItem,
       borderTop: "1px solid " + C.line
     }
-  }, "⚙ Change password"), /*#__PURE__*/React.createElement("button", {
+  }, "\u2699 Change password"), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       setMenuOpen(false);
       auth.logout();
@@ -11335,7 +11365,7 @@ function App() {
       borderTop: "1px solid " + C.line,
       color: C.danger
     }
-  }, "⏻ Sign out")))))), /*#__PURE__*/React.createElement("main", {
+  }, "\u23FB Sign out")))))), /*#__PURE__*/React.createElement("main", {
     className: "pm-main",
     style: {
       flex: 1,
