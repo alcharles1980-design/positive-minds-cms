@@ -2621,7 +2621,30 @@ Anon publishable key authorizes reads only.
    have a nullable \`level\` override (null = inherit the pack). Build a dedicated Levels page
    to view/edit each definition, a level chip shown on pack cards and question rows, and level
    selectors in the pack and question editors. The question-search RPC returns the effective
-   level (coalesce question→pack).
+   level (coalesce question→pack). Add a Level filter to the question bank, the in-pack list,
+   and the pack library.
+10. **Blank-shape control:** each level (and per-question override) also controls WHERE the
+   missing letters sit (letter_position: start/middle/end/random) and whether multiple hidden
+   letters are grouped or spread (letter_grouping). A single maskWord(word, letters, position,
+   grouping) generates the actual blank and MUST be the one source of truth used by every
+   preview, row, PlayMode, and the export/feed. "random" must be DETERMINISTIC (seed from the
+   word) so it's stable across renders and matches the game. Every preview ("how the child
+   sees it") reflects the real shape.
+11. **Questions are multi-level concepts:** every question auto-renders all 10 levels — the
+   same affirmation at each level's blank difficulty (buildLevelVariants derives them from the
+   question + level rules; no row duplication). The question bank keeps flat rows with a
+   "Levels" expand toggle revealing all 10 variants. Any individual level can be edited
+   (override sentence/word/letters/position/grouping, or disabled for that concept), stored in
+   a pm_question_levels table (a row exists only where edited; absent = auto). A Reset returns
+   a level to auto. Cloning a pack must copy level data + these overrides.
+12. **Export must carry levels, in JSON and XML:** the transform engine's field mapper must
+   expose level, effective_level, letter_position, letter_grouping. A profile flag
+   \`expand_levels\` attaches a \`levels\` array (sentence + blank for all 10 levels) to each
+   exported question so the game can serve the right difficulty per child. Provide a
+   ready-made "Full game export (with levels)" starter profile. Offer BOTH JSON and XML output
+   (a toXml serializer with sane singular tags + escaping); the pull-feed accepts ?format=xml.
+   The client engine and the edge function must stay byte-identical (maskWord, buildLevelVariants,
+   toXml, the expand logic) — this parity is a hard invariant.
 
 ## UX / cross-cutting
 - Dark mode (light/dark/system, persisted, CSS variables). Command palette (⌘/Ctrl-K):
