@@ -1987,7 +1987,7 @@ const withMeta = (spec, body, counts) => {
 
 // Field names available to map from
 const PACK_SOURCE_FIELDS = ["slug", "name", "emoji", "description", "color", "difficulty", "status", "is_custom", "tags", "level", "purpose", "focus_areas", "style_approach", "example_objectives"];
-const QUESTION_SOURCE_FIELDS = ["template", "base_sentence", "answer", "alt_answer", "letters_hidden", "difficulty", "status", "notes", "level", "effective_level", "letter_position", "letter_grouping", "frame_slots"];
+const QUESTION_SOURCE_FIELDS = ["template", "base_sentence", "answer", "alt_answer", "status", "notes", "level", "effective_level", "letter_position", "letter_grouping", "frame_slots"];
 const emptySpec = () => ({
   structure: "nested",
   root_key: "packs",
@@ -2770,7 +2770,6 @@ function FrameSlotEditor({
 function QuestionEditor({
   question,
   packId,
-  packDifficulty,
   packLevel,
   levels,
   onSave,
@@ -3276,13 +3275,13 @@ function BulkImport({
     setBusy(true);
     setErr("");
     try {
+      // Imported questions inherit the pack's level (level=null) and let difficulty/letters_hidden
+      // fall to their DB defaults — the level system drives rendering, not these legacy fields.
       await onDone(toImport.map((v, i) => ({
         pack_id: packId,
         template: v.template,
         answer: v.answer,
         alt_answer: v.alt_answer,
-        difficulty: "basic",
-        letters_hidden: 2,
         status: "active",
         sort_order: 100 + i,
         ...(v.frame_slots ? {
@@ -6416,9 +6415,11 @@ config → data layer → design tokens → hooks → primitives → feature vie
   tags text[], content_version, released_version, released_at, level, and structured
   descriptive fields: purpose, focus_areas, style_approach, example_objectives. timestamps.
 - \`pm_questions\` — id, pack_id (FK cascade), template (with \`{blank}\` for the target, plus
-  optional \`{token}\` frame-word slots), answer, alt_answer, letters_hidden, difficulty
-  (basic/advanced), status (active/inactive), sort_order, notes, level, letter_position,
-  letter_grouping, frame_slots (jsonb: per-token {pool, byLevel}), timestamps.
+  optional \`{token}\` frame-word slots), answer, alt_answer, status (active/inactive),
+  sort_order, notes, level (nullable = inherit pack), letter_position, letter_grouping,
+  frame_slots (jsonb: per-token {pool, byLevel}), timestamps. (letters_hidden + difficulty
+  columns still exist but are DERIVED-LEGACY — auto-set from the level on save, not authored;
+  rendering ignores them and reads the level.)
 - \`pm_activity\` — audit log: entity, entity_id, entity_name, action, actor, detail, created_at.
 - \`pm_export_profiles\` — id, name, description, spec (jsonb transform config), is_builtin.
 - \`pm_sync_log\` — profile/target/channel/mode/status/counts/detail, created_at.
@@ -6535,6 +6536,20 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Old difficulty/letters model purged from the app (follow-through cleanup):** after the
+  editor was reconciled with levels, a full sweep removed the remaining old-model residue.
+  Per-question difficulty is now DERIVED from the level (never authored), so: the question-list
+  and global-search "difficulty" filters and the per-question difficulty pills were removed
+  (a LevelChip shows the meaningful axis instead); difficulty/letters_hidden were dropped from
+  the exportable QUESTION_SOURCE_FIELDS; the built-in export profiles had their stale
+  level→difficulty value-map and redundant difficulty fields stripped (DB); the dead
+  packDifficulty prop was removed from QuestionEditor; the bulk importer stopped hard-coding
+  difficulty/letters_hidden (they fall to DB defaults, questions inherit the pack level). The
+  whole-CMS JSON backup was also MODERNIZED (v3): it now exports/imports level, letter_position,
+  letter_grouping, frame_slots and the pack's purpose/focus/style fields (previously it carried
+  the dead letters_hidden/difficulty and silently DROPPED levels + frame words on restore).
+  NOTE: pack-level difficulty (basic/advanced/mixed) is a real pack tag and was kept; the
+  letters_hidden/difficulty COLUMNS remain (derived-legacy) so nothing downstream breaks.
 - **Question editor reconciled with the level system (bug fix):** the editor still exposed the
   OLD model — a per-question "Difficulty" (basic/advanced) toggle and a "Letters hidden" number
   — but rendering has long been driven by the LEVEL (hidden_mode, letters_hidden_default,
@@ -6852,9 +6867,10 @@ is the authoring + publishing layer; a separate game backend consumes the conten
   [basic/advanced/mixed], status [draft/published/archived], sort_order, is_custom,
   tags text[], content_version int default 1, released_version int default 0, released_at,
   timestamps)
-- pm_questions(id, pack_id FK cascade, template with {blank}, answer, alt_answer,
-  letters_hidden int, difficulty [basic/advanced], status [active/inactive], sort_order,
-  notes, timestamps)
+- pm_questions(id, pack_id FK cascade, template with {blank} + optional {token} frame slots,
+  answer, alt_answer, status [active/inactive], sort_order, notes, level, letter_position,
+  letter_grouping, frame_slots jsonb, timestamps; letters_hidden/difficulty are derived-legacy
+  columns — set from the level on save, not authored)
 - pm_activity (audit log), pm_export_profiles(spec jsonb, is_builtin), pm_sync_log,
   pm_sync_targets(config jsonb), pm_dev_notes (singleton id=1)
 - View pm_pack_overview: packs + active_questions + total_questions + has_pending_changes
@@ -9454,7 +9470,6 @@ function PackDetail({
     return n;
   });
   const [search, setSearch] = useState("");
-  const [diffF, setDiffF] = useState("all");
   const [lvlF, setLvlF] = useState("all");
   const load = useCallback(async () => {
     setErr("");
@@ -9565,7 +9580,6 @@ function PackDetail({
     }
   };
   const shown = (rows || []).filter(q => {
-    if (diffF !== "all" && q.difficulty !== diffF) return false;
     if (lvlF !== "all" && (q.level || pack.level) !== parseInt(lvlF)) return false;
     if (search && !`${q.template} ${q.answer} ${q.alt_answer}`.toLowerCase().includes(search.toLowerCase())) return false;
     return true;
@@ -9797,20 +9811,7 @@ function PackDetail({
   }))).map(l => /*#__PURE__*/React.createElement("option", {
     key: l.level,
     value: l.level
-  }, "Level ", l.level, l.name ? ` — ${l.name}` : ""))), /*#__PURE__*/React.createElement(Select, {
-    value: diffF,
-    onChange: e => setDiffF(e.target.value),
-    style: {
-      minWidth: 130,
-      padding: "8px 12px"
-    }
-  }, /*#__PURE__*/React.createElement("option", {
-    value: "all"
-  }, "All difficulty"), /*#__PURE__*/React.createElement("option", {
-    value: "basic"
-  }, "Basic"), /*#__PURE__*/React.createElement("option", {
-    value: "advanced"
-  }, "Advanced")), /*#__PURE__*/React.createElement(Btn, {
+  }, "Level ", l.level, l.name ? ` — ${l.name}` : ""))), /*#__PURE__*/React.createElement(Btn, {
     variant: "soft",
     size: "sm",
     onClick: () => setBulk(true),
@@ -9939,9 +9940,11 @@ function PackDetail({
         transition: "transform .15s",
         fontSize: 10
       }
-    }, "▶"), "Levels"), /*#__PURE__*/React.createElement(Pill, {
-      tone: "muted"
-    }, q.difficulty), /*#__PURE__*/React.createElement("button", {
+    }, "▶"), "Levels"), /*#__PURE__*/React.createElement(LevelChip, {
+      level: q.level || pack.level,
+      levels: levels,
+      size: "xs"
+    }), /*#__PURE__*/React.createElement("button", {
       onClick: () => toggleQ(q),
       title: "Toggle active",
       style: {
@@ -9987,7 +9990,6 @@ function PackDetail({
   }, qEdit !== null && /*#__PURE__*/React.createElement(QuestionEditor, {
     question: qEdit.id ? qEdit : null,
     packId: pack.id,
-    packDifficulty: pack.difficulty,
     packLevel: pack.level,
     levels: levels,
     onSave: saveQ,
@@ -10045,7 +10047,6 @@ function AllQuestions({
   levels
 }) {
   const [q, setQ] = useState("");
-  const [diff, setDiff] = useState("all");
   const [stat, setStat] = useState("all");
   const [lvl, setLvl] = useState("all");
   const [page, setPage] = useState(0);
@@ -10059,7 +10060,7 @@ function AllQuestions({
       const r = await db.searchQuestions({
         q: debounced,
         pack: null,
-        diff: diff === "all" ? null : diff,
+        diff: null,
         stat: stat === "all" ? null : stat,
         lvl: lvl === "all" ? null : parseInt(lvl),
         lim: CFG.pageSize,
@@ -10070,13 +10071,13 @@ function AllQuestions({
     } catch (e) {
       setErr(e.message);
     }
-  }, [debounced, diff, stat, lvl, page]);
+  }, [debounced, stat, lvl, page]);
   useEffect(() => {
     load();
   }, [load]);
   useEffect(() => {
     setPage(0);
-  }, [debounced, diff, stat, lvl]);
+  }, [debounced, stat, lvl]);
 
   // Live sync: refresh the global search when questions change anywhere.
   useRealtimeRefresh(["pm_questions", "pm_question_levels"], () => load(), [load]);
@@ -10127,19 +10128,6 @@ function AllQuestions({
     key: l.level,
     value: l.level
   }, "Level ", l.level, l.name ? ` — ${l.name}` : ""))), /*#__PURE__*/React.createElement(Select, {
-    value: diff,
-    onChange: e => setDiff(e.target.value),
-    style: {
-      minWidth: 130,
-      padding: "8px 12px"
-    }
-  }, /*#__PURE__*/React.createElement("option", {
-    value: "all"
-  }, "All difficulty"), /*#__PURE__*/React.createElement("option", {
-    value: "basic"
-  }, "Basic"), /*#__PURE__*/React.createElement("option", {
-    value: "advanced"
-  }, "Advanced")), /*#__PURE__*/React.createElement(Select, {
     value: stat,
     onChange: e => setStat(e.target.value),
     style: {
@@ -10230,9 +10218,7 @@ function AllQuestions({
       }
     }, "→ ", pv.opts)), /*#__PURE__*/React.createElement("div", {
       className: "pm-qrow-meta"
-    }, /*#__PURE__*/React.createElement(Pill, {
-      tone: "muted"
-    }, r.difficulty), r.level && /*#__PURE__*/React.createElement(LevelChip, {
+    }, r.level && /*#__PURE__*/React.createElement(LevelChip, {
       level: r.level,
       levels: levels,
       size: "xs"
@@ -10711,7 +10697,7 @@ function App() {
     questions.forEach(x => (byPack[x.pack_id] = byPack[x.pack_id] || []).push(x));
     const out = {
       exported_at: new Date().toISOString(),
-      version: 2,
+      version: 3,
       packs: pk.map(p => ({
         slug: p.slug,
         name: p.name,
@@ -10721,13 +10707,20 @@ function App() {
         difficulty: p.difficulty,
         status: p.status,
         is_custom: p.is_custom,
+        level: p.level,
+        purpose: p.purpose,
+        focus_areas: p.focus_areas,
+        style_approach: p.style_approach,
+        example_objectives: p.example_objectives,
         questions: (byPack[p.id] || []).map(x => ({
           template: x.template,
           answer: x.answer,
           alt_answer: x.alt_answer,
-          letters_hidden: x.letters_hidden,
-          difficulty: x.difficulty,
-          status: x.status
+          status: x.status,
+          level: x.level,
+          letter_position: x.letter_position,
+          letter_grouping: x.letter_grouping,
+          frame_slots: x.frame_slots
         }))
       }))
     };
@@ -10780,7 +10773,12 @@ function App() {
           difficulty: p.difficulty || "basic",
           status: "draft",
           is_custom: !!p.is_custom,
-          sort_order: (packs?.length || 0) + created + 1
+          sort_order: (packs?.length || 0) + created + 1,
+          level: p.level ?? 1,
+          purpose: p.purpose || null,
+          focus_areas: p.focus_areas || null,
+          style_approach: p.style_approach || null,
+          example_objectives: p.example_objectives || null
         });
         if (newPack && p.questions?.length) {
           await db.createQuestions(p.questions.map((q, i) => ({
@@ -10788,10 +10786,12 @@ function App() {
             template: q.template,
             answer: (q.answer || "").toUpperCase(),
             alt_answer: (q.alt_answer || "").toUpperCase(),
-            letters_hidden: q.letters_hidden ?? 2,
-            difficulty: q.difficulty || "basic",
             status: q.status || "active",
-            sort_order: i
+            sort_order: i,
+            level: q.level ?? null,
+            letter_position: q.letter_position ?? null,
+            letter_grouping: q.letter_grouping ?? null,
+            frame_slots: q.frame_slots && typeof q.frame_slots === "object" ? q.frame_slots : {}
           })));
         }
         created++;

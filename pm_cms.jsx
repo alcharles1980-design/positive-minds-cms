@@ -912,7 +912,7 @@ const withMeta = (spec, body, counts) => {
 
 // Field names available to map from
 const PACK_SOURCE_FIELDS = ["slug", "name", "emoji", "description", "color", "difficulty", "status", "is_custom", "tags", "level", "purpose", "focus_areas", "style_approach", "example_objectives"];
-const QUESTION_SOURCE_FIELDS = ["template", "base_sentence", "answer", "alt_answer", "letters_hidden", "difficulty", "status", "notes", "level", "effective_level", "letter_position", "letter_grouping", "frame_slots"];
+const QUESTION_SOURCE_FIELDS = ["template", "base_sentence", "answer", "alt_answer", "status", "notes", "level", "effective_level", "letter_position", "letter_grouping", "frame_slots"];
 
 const emptySpec = () => ({
   structure: "nested", root_key: "packs", questions_key: "questions", key_by: "slug",
@@ -1289,7 +1289,7 @@ function FrameSlotEditor({ token, slot, setSlot, levels }) {
   );
 }
 
-function QuestionEditor({ question, packId, packDifficulty, packLevel, levels, onSave, onClose }) {
+function QuestionEditor({ question, packId, packLevel, levels, onSave, onClose }) {
   const isNew = !question?.id;
   const levelList = (levels && levels.length) ? levels : Array.from({ length: 10 }, (_, i) => ({ level: i + 1, name: "", hidden_mode: i >= 6 ? "word" : "letters" }));
   const [f, setF] = useState({
@@ -1578,7 +1578,9 @@ function BulkImport({ packId, onDone, onClose }) {
     if (!toImport.length) { setErr("Nothing selected to import."); return; }
     setBusy(true); setErr("");
     try {
-      await onDone(toImport.map((v, i) => ({ pack_id: packId, template: v.template, answer: v.answer, alt_answer: v.alt_answer, difficulty: "basic", letters_hidden: 2, status: "active", sort_order: 100 + i, ...(v.frame_slots ? { frame_slots: v.frame_slots } : {}) })));
+      // Imported questions inherit the pack's level (level=null) and let difficulty/letters_hidden
+      // fall to their DB defaults — the level system drives rendering, not these legacy fields.
+      await onDone(toImport.map((v, i) => ({ pack_id: packId, template: v.template, answer: v.answer, alt_answer: v.alt_answer, status: "active", sort_order: 100 + i, ...(v.frame_slots ? { frame_slots: v.frame_slots } : {}) })));
       onClose();
     } catch (e) { setErr(e.message); setBusy(false); }
   };
@@ -2778,9 +2780,11 @@ config → data layer → design tokens → hooks → primitives → feature vie
   tags text[], content_version, released_version, released_at, level, and structured
   descriptive fields: purpose, focus_areas, style_approach, example_objectives. timestamps.
 - \`pm_questions\` — id, pack_id (FK cascade), template (with \`{blank}\` for the target, plus
-  optional \`{token}\` frame-word slots), answer, alt_answer, letters_hidden, difficulty
-  (basic/advanced), status (active/inactive), sort_order, notes, level, letter_position,
-  letter_grouping, frame_slots (jsonb: per-token {pool, byLevel}), timestamps.
+  optional \`{token}\` frame-word slots), answer, alt_answer, status (active/inactive),
+  sort_order, notes, level (nullable = inherit pack), letter_position, letter_grouping,
+  frame_slots (jsonb: per-token {pool, byLevel}), timestamps. (letters_hidden + difficulty
+  columns still exist but are DERIVED-LEGACY — auto-set from the level on save, not authored;
+  rendering ignores them and reads the level.)
 - \`pm_activity\` — audit log: entity, entity_id, entity_name, action, actor, detail, created_at.
 - \`pm_export_profiles\` — id, name, description, spec (jsonb transform config), is_builtin.
 - \`pm_sync_log\` — profile/target/channel/mode/status/counts/detail, created_at.
@@ -2897,6 +2901,20 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Old difficulty/letters model purged from the app (follow-through cleanup):** after the
+  editor was reconciled with levels, a full sweep removed the remaining old-model residue.
+  Per-question difficulty is now DERIVED from the level (never authored), so: the question-list
+  and global-search "difficulty" filters and the per-question difficulty pills were removed
+  (a LevelChip shows the meaningful axis instead); difficulty/letters_hidden were dropped from
+  the exportable QUESTION_SOURCE_FIELDS; the built-in export profiles had their stale
+  level→difficulty value-map and redundant difficulty fields stripped (DB); the dead
+  packDifficulty prop was removed from QuestionEditor; the bulk importer stopped hard-coding
+  difficulty/letters_hidden (they fall to DB defaults, questions inherit the pack level). The
+  whole-CMS JSON backup was also MODERNIZED (v3): it now exports/imports level, letter_position,
+  letter_grouping, frame_slots and the pack's purpose/focus/style fields (previously it carried
+  the dead letters_hidden/difficulty and silently DROPPED levels + frame words on restore).
+  NOTE: pack-level difficulty (basic/advanced/mixed) is a real pack tag and was kept; the
+  letters_hidden/difficulty COLUMNS remain (derived-legacy) so nothing downstream breaks.
 - **Question editor reconciled with the level system (bug fix):** the editor still exposed the
   OLD model — a per-question "Difficulty" (basic/advanced) toggle and a "Letters hidden" number
   — but rendering has long been driven by the LEVEL (hidden_mode, letters_hidden_default,
@@ -3216,9 +3234,10 @@ is the authoring + publishing layer; a separate game backend consumes the conten
   [basic/advanced/mixed], status [draft/published/archived], sort_order, is_custom,
   tags text[], content_version int default 1, released_version int default 0, released_at,
   timestamps)
-- pm_questions(id, pack_id FK cascade, template with {blank}, answer, alt_answer,
-  letters_hidden int, difficulty [basic/advanced], status [active/inactive], sort_order,
-  notes, timestamps)
+- pm_questions(id, pack_id FK cascade, template with {blank} + optional {token} frame slots,
+  answer, alt_answer, status [active/inactive], sort_order, notes, level, letter_position,
+  letter_grouping, frame_slots jsonb, timestamps; letters_hidden/difficulty are derived-legacy
+  columns — set from the level on save, not authored)
 - pm_activity (audit log), pm_export_profiles(spec jsonb, is_builtin), pm_sync_log,
   pm_sync_targets(config jsonb), pm_dev_notes (singleton id=1)
 - View pm_pack_overview: packs + active_questions + total_questions + has_pending_changes
@@ -4397,7 +4416,6 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
   const [expanded, setExpanded] = useState(new Set());
   const toggleExpand = (id) => setExpanded(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const [search, setSearch] = useState("");
-  const [diffF, setDiffF] = useState("all");
   const [lvlF, setLvlF] = useState("all");
 
   const load = useCallback(async () => {
@@ -4437,7 +4455,6 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
   const bulkStatus = async (status) => { const ids = [...sel]; try { await db.setQuestionsStatus(ids, status); await afterChange(); notify(`${ids.length} set to ${status}`); } catch (e) { notify("Bulk update failed: " + e.message, { kind: "error" }); } };
 
   const shown = (rows || []).filter(q => {
-    if (diffF !== "all" && q.difficulty !== diffF) return false;
     if (lvlF !== "all" && (q.level || pack.level) !== parseInt(lvlF)) return false;
     if (search && !`${q.template} ${q.answer} ${q.alt_answer}`.toLowerCase().includes(search.toLowerCase())) return false;
     return true;
@@ -4501,9 +4518,6 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
               <option key={l.level} value={l.level}>Level {l.level}{l.name ? ` — ${l.name}` : ""}</option>
             ))}
           </Select>
-          <Select value={diffF} onChange={(e) => setDiffF(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
-            <option value="all">All difficulty</option><option value="basic">Basic</option><option value="advanced">Advanced</option>
-          </Select>
           <Btn variant="soft" size="sm" onClick={() => setBulk(true)} icon="⭳">Import</Btn>
           <Btn size="sm" onClick={() => setQEdit({})} icon="＋">Add</Btn>
         </div>
@@ -4536,7 +4550,7 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
                       <button onClick={() => toggleExpand(q.id)} title={isOpen ? "Hide levels" : "Show all levels"} aria-expanded={isOpen} style={{ display: "inline-flex", alignItems: "center", gap: 5, background: isOpen ? C.brandSoft : C.bg, border: "1px solid " + (isOpen ? C.brand : C.line), borderRadius: R.pill, padding: "3px 10px", cursor: "pointer", color: isOpen ? C.brandInk : C.sub, fontSize: 11.5, fontWeight: 700, whiteSpace: "nowrap" }}>
                         <span style={{ transform: isOpen ? "rotate(90deg)" : "none", transition: "transform .15s", fontSize: 10 }}>▶</span>Levels
                       </button>
-                      <Pill tone="muted">{q.difficulty}</Pill>
+                      <LevelChip level={q.level || pack.level} levels={levels} size="xs" />
                       <button onClick={() => toggleQ(q)} title="Toggle active" style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}><Badge kind={q.status} /></button>
                     </div>
                     <div className="pm-qrow-actions">
@@ -4558,7 +4572,7 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
         )}
 
       <Modal open={qEdit !== null} onClose={() => setQEdit(null)} labelledBy="pm-q-title">
-        {qEdit !== null && <QuestionEditor question={qEdit.id ? qEdit : null} packId={pack.id} packDifficulty={pack.difficulty} packLevel={pack.level} levels={levels} onSave={saveQ} onClose={() => setQEdit(null)} />}
+        {qEdit !== null && <QuestionEditor question={qEdit.id ? qEdit : null} packId={pack.id} packLevel={pack.level} levels={levels} onSave={saveQ} onClose={() => setQEdit(null)} />}
       </Modal>
       <Modal open={bulk} onClose={() => setBulk(false)} labelledBy="pm-imp-title">
         {bulk && <BulkImport packId={pack.id} onDone={importQ} onClose={() => setBulk(false)} />}
@@ -4581,7 +4595,6 @@ const Pager = ({ page, pages, onPage }) => (
 // ============================================================
 function AllQuestions({ onOpenPack, levels }) {
   const [q, setQ] = useState("");
-  const [diff, setDiff] = useState("all");
   const [stat, setStat] = useState("all");
   const [lvl, setLvl] = useState("all");
   const [page, setPage] = useState(0);
@@ -4593,12 +4606,12 @@ function AllQuestions({ onOpenPack, levels }) {
   const load = useCallback(async () => {
     setErr("");
     try {
-      const r = await db.searchQuestions({ q: debounced, pack: null, diff: diff === "all" ? null : diff, stat: stat === "all" ? null : stat, lvl: lvl === "all" ? null : parseInt(lvl), lim: CFG.pageSize, off: page * CFG.pageSize });
+      const r = await db.searchQuestions({ q: debounced, pack: null, diff: null, stat: stat === "all" ? null : stat, lvl: lvl === "all" ? null : parseInt(lvl), lim: CFG.pageSize, off: page * CFG.pageSize });
       setRows(r || []); setTotal(r?.[0]?.total_count ? Number(r[0].total_count) : 0);
     } catch (e) { setErr(e.message); }
-  }, [debounced, diff, stat, lvl, page]);
+  }, [debounced, stat, lvl, page]);
   useEffect(() => { load(); }, [load]);
-  useEffect(() => { setPage(0); }, [debounced, diff, stat, lvl]);
+  useEffect(() => { setPage(0); }, [debounced, stat, lvl]);
 
   // Live sync: refresh the global search when questions change anywhere.
   useRealtimeRefresh(["pm_questions", "pm_question_levels"], () => load(), [load]);
@@ -4618,9 +4631,6 @@ function AllQuestions({ onOpenPack, levels }) {
           {(levels && levels.length ? levels : Array.from({ length: 10 }, (_, i) => ({ level: i + 1, name: "" }))).map(l => (
             <option key={l.level} value={l.level}>Level {l.level}{l.name ? ` — ${l.name}` : ""}</option>
           ))}
-        </Select>
-        <Select value={diff} onChange={(e) => setDiff(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
-          <option value="all">All difficulty</option><option value="basic">Basic</option><option value="advanced">Advanced</option>
         </Select>
         <Select value={stat} onChange={(e) => setStat(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
           <option value="all">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option>
@@ -4645,7 +4655,6 @@ function AllQuestions({ onOpenPack, levels }) {
                       <div style={{ fontSize: 13.5, color: C.brandInk, fontWeight: 800, marginTop: 4 }}>→ {pv.opts}</div>
                     </div>
                     <div className="pm-qrow-meta">
-                      <Pill tone="muted">{r.difficulty}</Pill>
                       {r.level && <LevelChip level={r.level} levels={levels} size="xs" />}
                       <Badge kind={r.status} />
                     </div>
@@ -4844,9 +4853,10 @@ function App() {
     const { packs: pk, questions } = await db.exportAll();
     const byPack = {};
     questions.forEach(x => (byPack[x.pack_id] = byPack[x.pack_id] || []).push(x));
-    const out = { exported_at: new Date().toISOString(), version: 2, packs: pk.map(p => ({
+    const out = { exported_at: new Date().toISOString(), version: 3, packs: pk.map(p => ({
       slug: p.slug, name: p.name, emoji: p.emoji, description: p.description, color: p.color, difficulty: p.difficulty, status: p.status, is_custom: p.is_custom,
-      questions: (byPack[p.id] || []).map(x => ({ template: x.template, answer: x.answer, alt_answer: x.alt_answer, letters_hidden: x.letters_hidden, difficulty: x.difficulty, status: x.status })),
+      level: p.level, purpose: p.purpose, focus_areas: p.focus_areas, style_approach: p.style_approach, example_objectives: p.example_objectives,
+      questions: (byPack[p.id] || []).map(x => ({ template: x.template, answer: x.answer, alt_answer: x.alt_answer, status: x.status, level: x.level, letter_position: x.letter_position, letter_grouping: x.letter_grouping, frame_slots: x.frame_slots })),
     })) };
     const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -4869,9 +4879,9 @@ function App() {
       let created = 0, skipped = 0;
       for (const p of arr) {
         if (existing.has(p.slug)) { skipped++; continue; }
-        const newPack = await db.createPack({ slug: p.slug, name: p.name, emoji: p.emoji || "💡", description: p.description || "", color: p.color || C.brand, difficulty: p.difficulty || "basic", status: "draft", is_custom: !!p.is_custom, sort_order: (packs?.length || 0) + created + 1 });
+        const newPack = await db.createPack({ slug: p.slug, name: p.name, emoji: p.emoji || "💡", description: p.description || "", color: p.color || C.brand, difficulty: p.difficulty || "basic", status: "draft", is_custom: !!p.is_custom, sort_order: (packs?.length || 0) + created + 1, level: p.level ?? 1, purpose: p.purpose || null, focus_areas: p.focus_areas || null, style_approach: p.style_approach || null, example_objectives: p.example_objectives || null });
         if (newPack && p.questions?.length) {
-          await db.createQuestions(p.questions.map((q, i) => ({ pack_id: newPack.id, template: q.template, answer: (q.answer || "").toUpperCase(), alt_answer: (q.alt_answer || "").toUpperCase(), letters_hidden: q.letters_hidden ?? 2, difficulty: q.difficulty || "basic", status: q.status || "active", sort_order: i })));
+          await db.createQuestions(p.questions.map((q, i) => ({ pack_id: newPack.id, template: q.template, answer: (q.answer || "").toUpperCase(), alt_answer: (q.alt_answer || "").toUpperCase(), status: q.status || "active", sort_order: i, level: q.level ?? null, letter_position: q.letter_position ?? null, letter_grouping: q.letter_grouping ?? null, frame_slots: (q.frame_slots && typeof q.frame_slots === "object") ? q.frame_slots : {} })));
         }
         created++;
       }
