@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.04-5", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.04-6", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -398,7 +398,7 @@ const buildLevelVariants = (q, levels, overrides = {}) => {
     const sentence = withSlots.replace(/\{blank\}/g, blank);
     const frames = resolveFrameMap(template, q.frame_slots, lvl.level);
     return {
-      level: lvl.level, name: lvl.name, color: lvl.color, tier: lvl.tier,
+      level: lvl.level, name: lvl.name, color: lvl.color,
       sentence, blank, letters, position, grouping,
       target: {
         word: (answer || "").toUpperCase(), altWord: (alt || "").toUpperCase(), blankShape: blank,
@@ -965,7 +965,7 @@ const fetchAllContent = async (filters = {}, opts = {}) => {
     for (const q of questions) {
       q.levels = buildLevelVariants(q, levels, ovByQ[q.id] || {})
         .filter(v => v.enabled)
-        .map(v => ({ level: v.level, level_name: v.name, tier: v.tier, sentence: v.sentence, blank: v.blank, target: v.target, frames: v.frames, opts: v.opts }));
+        .map(v => ({ level: v.level, level_name: v.name, sentence: v.sentence, blank: v.blank, target: v.target, frames: v.frames, opts: v.opts }));
     }
   }
 
@@ -1340,10 +1340,10 @@ function QuestionEditor({ question, packId, packLevel, levels, onSave, onClose }
     for (const t of frameTokens) if (f.frame_slots[t]) cleanedSlots[t] = f.frame_slots[t];
     // Derive legacy difficulty/letters_hidden from the question's base level so filters, pack
     // pills and exports stay coherent — these are no longer edited directly (the level drives
-    // how much is hidden). difficulty mirrors the base level's tier; letters_hidden mirrors its
-    // default (0 when the level hides the whole word).
+    // how much is hidden). difficulty mirrors whether the base level hides the whole word;
+    // letters_hidden mirrors its default (0 when the level hides the whole word).
     const baseDef = levelList.find(l => l.level === baseLevel) || {};
-    const derivedDifficulty = baseDef.tier === "advanced" || baseDef.hidden_mode === "word" ? "advanced" : "basic";
+    const derivedDifficulty = baseDef.hidden_mode === "word" ? "advanced" : "basic";
     const derivedLetters = baseDef.hidden_mode === "word" ? 0 : (baseDef.letters_hidden_default ?? 2);
     try {
       await onSave({ ...f, frame_slots: cleanedSlots, pack_id: packId, difficulty: derivedDifficulty, letters_hidden: derivedLetters,
@@ -2848,10 +2848,12 @@ config → data layer → design tokens → hooks → primitives → feature vie
 - \`pm_sync_targets\` — id, name, channel, profile_id, config (jsonb), enabled.
 - \`pm_dev_notes\` — singleton row (id=1) holding the editable Developer-Notes scratchpad.
 - \`pm_levels\` — the game's progression structure (levels 1–10, editable): level (PK),
-  name, tagline, letters_rule, word_rule, theme, age_hint, tier (basic/advanced),
+  name, tagline, letters_rule, word_rule, theme, age_hint,
   hidden_mode, letters_hidden_default, letter_position (start/middle/end/random),
-  letter_grouping (grouped/spread), color. Packs have a \`level\` (default); questions
-  have nullable \`level\`, \`letter_position\`, \`letter_grouping\` (null = inherit).
+  letter_grouping (grouped/spread), color. The LEVEL NUMBER is the difficulty — there is
+  no separate basic/advanced tier concept (that was removed as redundant). Packs have a
+  \`level\` (default); questions have nullable \`level\`, \`letter_position\`, \`letter_grouping\`
+  (null = inherit).
   The blank SHAPE is computed by maskWord(word, letters, position, grouping) and the
   effective settings resolve question-override → level-default (via buildLevelVariants).
 - \`pm_question_levels\` — per-question, per-level OVERRIDES. Every question is a single
@@ -2877,9 +2879,10 @@ old row (pack_id / question_id) — otherwise the client can't route a delete to
 
 **Functions (RPC):** (all SECURITY INVOKER — they respect the caller's RLS; anon EXECUTE
 was revoked on the admin/write ones, so these are authenticated-only in practice)
-- \`pm_dashboard_stats()\` — aggregate counts for the Overview. The basic/advanced split is
-  computed by each question's EFFECTIVE LEVEL's tier (question level → pack level →
-  pm_levels.tier), not the dead difficulty column.
+- \`pm_dashboard_stats()\` — aggregate counts for the Overview: total/published/draft packs,
+  total/active questions, distinct_levels_used (how many of the 10 levels have questions),
+  questions_by_level (a {level: count} map for the distribution), empty_packs, and
+  avg_questions_per_pack. No tier/difficulty counts (those concepts were removed).
 - \`pm_search_questions(q,pack,stat,lvl,lim,off)\` — global paginated question search.
   Returns the effective level + resolved letter_position/letter_grouping + frame_slots.
   (The legacy \`diff\` param was removed.)
@@ -2985,6 +2988,19 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Removed the basic/advanced TIER concept entirely — the level number is the difficulty.**
+  Tier was a redundant leftover from the old model (like the purged difficulty field): the app
+  already has a clean 1–10 level progression, so classifying levels into basic/advanced added
+  nothing. Removed everywhere: the two "Basic-tier / Advanced-tier levels" Overview boxes (replaced
+  with "Levels in use" + "Empty packs" boxes and a "questions by level" mini bar-chart in the
+  Library-health card); the Tier <Select> in the Level editor and the tier Pill in the level list
+  (now shows the hidden-mode: "whole word" / "N letters"); the tier field in buildLevelVariants
+  output and the export projection; the tier branch in the derived-legacy difficulty (now keys off
+  hidden_mode only). Fixed a latent bug found on the way: the QuestionLevelEditor preview used
+  \`variant.tier === "advanced"\` to decide whole-word rendering — now uses \`variant.target.wholeWord\`.
+  DB: pm_dashboard_stats rewritten to return distinct_levels_used + questions_by_level instead of
+  tier counts; game-feed edge fn redeployed (v11) without tier; and the \`pm_levels.tier\` COLUMN was
+  dropped. Verified no functions/views referenced it before dropping.
 - **Play mode level filter:** added a level selector at the top of Play mode. Default "each own
   level" plays every question at its own effective level; picking a specific level forces the whole
   pack to render at that level's blank difficulty (via previewAtLevel with an overridden q.level —
@@ -3453,9 +3469,9 @@ refocus) AND reactively on a 401 with one retry, falling back to login only if t
 token is genuinely dead or the 7 days elapse. Anon publishable key authorizes reads only.
 
 ## Features to build
-1. **Dashboard/Overview:** aggregate stats (packs, questions, questions by level tier
-   [basic-tier vs advanced-tier, computed from each question's effective level], empty packs,
-   avg/pack) via one RPC; quick actions; and a compact at-a-glance index of ALL pack names
+1. **Dashboard/Overview:** aggregate stats (packs, questions, levels in use [how many of the
+   10 levels have questions], a "questions by level" mini bar-chart of the distribution, empty
+   packs, avg/pack) via one RPC; quick actions; and a compact at-a-glance index of ALL pack names
    (one line each, tap to open).
 2. **Library:** pack cards (emoji, color accent, status, question counts); search + status/
    difficulty filters; drag-to-reorder; clone (duplicate pack + questions); delete with
@@ -3507,9 +3523,11 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    These docs MUST be kept in sync with the app on every subsequent change.
 9. **Levels (progression structure):** a pm_levels table defining levels 1–10, each with a
    name, tagline, letter-hiding rule, word-length/complexity rule, emotional theme, age hint,
-   tier (basic/advanced), and color. Ground the progression in the game concept: Basic tier
-   ≈ levels 1–6 (hide some letters, simple self-affirmation themes), Advanced ≈ 7–10 (hide
-   the whole word, nuanced social-emotional themes). Packs carry a default \`level\`; questions
+   hidden_mode (hide some letters vs the whole word), letters_hidden_default, letter_position,
+   letter_grouping, and color. The LEVEL NUMBER itself is the difficulty — do NOT add a separate
+   basic/advanced tier. Ground the progression in the game concept: low levels ≈ hide one or two
+   letters with simple self-affirmation themes; high levels ≈ hide more, up to the whole word,
+   with nuanced themes. Packs carry a default \`level\`; questions
    have a nullable \`level\` override (null = inherit the pack). Build a dedicated Levels page
    to view/edit each definition, a level chip shown on pack cards and question rows, and level
    selectors in the pack and question editors. The question-search RPC returns the effective
@@ -3801,7 +3819,7 @@ function LevelsView() {
                 <div style={{ flex: 1, minWidth: 200 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                     <span style={{ fontSize: 16.5, fontWeight: 800, color: C.ink }}>{l.name}</span>
-                    <Pill tone={l.tier === "advanced" ? "info" : "muted"}>{l.tier}</Pill>
+                    <Pill tone="muted">{l.hidden_mode === "word" ? "whole word" : `${l.letters_hidden_default ?? 1} letter${(l.letters_hidden_default ?? 1) === 1 ? "" : "s"}`}</Pill>
                     <span style={{ fontSize: 12.5, color: C.faint }}>{l.age_hint}</span>
                   </div>
                   {l.tagline && <div style={{ fontSize: 13.5, color: C.sub, marginTop: 3, fontStyle: "italic" }}>“{l.tagline}”</div>}
@@ -3838,17 +3856,14 @@ function LevelEditor({ level, onSave, onClose }) {
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
   const submit = async () => {
     setBusy(true);
-    try { await onSave(level.level, { name: f.name, tagline: f.tagline, letters_rule: f.letters_rule, word_rule: f.word_rule, theme: f.theme, age_hint: f.age_hint, tier: f.tier, hidden_mode: f.hidden_mode, letters_hidden_default: f.letters_hidden_default, letter_position: f.letter_position, letter_grouping: f.letter_grouping, color: f.color }); onClose(); }
+    try { await onSave(level.level, { name: f.name, tagline: f.tagline, letters_rule: f.letters_rule, word_rule: f.word_rule, theme: f.theme, age_hint: f.age_hint, hidden_mode: f.hidden_mode, letters_hidden_default: f.letters_hidden_default, letter_position: f.letter_position, letter_grouping: f.letter_grouping, color: f.color }); onClose(); }
     catch { setBusy(false); }
   };
   return (
     <>
       <ModalHead title={`Edit Level ${level.level}`} subtitle="Define this level's rules and theme" />
       <div style={{ padding: S.xl, display: "grid", gap: S.md + 2, maxHeight: "64vh", overflowY: "auto" }}>
-        <div className="pm-form-2">
-          <Field label="Level name"><Input value={f.name} onChange={(e) => set("name", e.target.value)} autoFocus /></Field>
-          <Field label="Tier"><Select value={f.tier} onChange={(e) => set("tier", e.target.value)}><option value="basic">Basic</option><option value="advanced">Advanced</option></Select></Field>
-        </div>
+        <Field label="Level name"><Input value={f.name} onChange={(e) => set("name", e.target.value)} autoFocus /></Field>
         <Field label="Tagline" hint="Short, child-friendly description"><Input value={f.tagline} onChange={(e) => set("tagline", e.target.value)} /></Field>
         <Field label="Letters rule" hint="How much of the word is hidden"><Input value={f.letters_rule} onChange={(e) => set("letters_rule", e.target.value)} /></Field>
         <Field label="Words rule" hint="Word length / complexity"><Input value={f.word_rule} onChange={(e) => set("word_rule", e.target.value)} /></Field>
@@ -3965,7 +3980,7 @@ function QuestionLevelEditor({ question, variant, onSave, onClose }) {
   const previewLetters = f.letters_hidden === "" ? variant.letters : parseInt(f.letters_hidden);
   const pos = f.letter_position || variant.position, grp = f.letter_grouping || variant.grouping;
   const word = (merged.answer || "").toUpperCase();
-  const blank = (variant.tier === "advanced" && !f.letters_hidden) || previewLetters >= word.length ? "_".repeat(Math.max(3, word.length)) : maskWord(word, previewLetters || 0, pos, grp);
+  const blank = (variant.target?.wholeWord && f.letters_hidden === "") || previewLetters >= word.length ? "_".repeat(Math.max(3, word.length)) : maskWord(word, previewLetters || 0, pos, grp);
   const previewSentence = (merged.template || "").replace(/\{blank\}/g, blank);
 
   const submit = async () => {
@@ -4438,8 +4453,8 @@ function Dashboard({ packs, onOpenPack, onGoLibrary, onGoQuestions, onNewPack })
       <div className="pm-stats" style={{ marginBottom: S.lg }}>
         {stat(d.total_packs ?? 0, "Total packs", C.brand, `${d.published_packs ?? 0} published · ${d.draft_packs ?? 0} draft`)}
         {stat(d.total_questions ?? 0, "Questions", C.ink, `${d.active_questions ?? 0} active`)}
-        {stat(d.basic_questions ?? 0, "Basic-tier levels", C.good)}
-        {stat(d.advanced_questions ?? 0, "Advanced-tier levels", C.warn)}
+        {stat(d.distinct_levels_used ?? 0, "Levels in use", C.good, "of 10 levels")}
+        {stat(d.empty_packs ?? 0, "Empty packs", (d.empty_packs ?? 0) > 0 ? C.warn : C.good, "need content")}
       </div>
       <div className="pm-dash-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: S.lg }}>
         <div style={{ background: C.panel, borderRadius: R.lg, padding: S.xl, border: "1px solid " + C.line }}>
@@ -4447,6 +4462,28 @@ function Dashboard({ packs, onOpenPack, onGoLibrary, onGoQuestions, onNewPack })
           <Row label="Average questions per pack" value={loading ? "…" : d.avg_questions_per_pack} />
           <Row label="Empty packs (need content)" value={loading ? "…" : d.empty_packs} warn={d.empty_packs > 0} />
           <Row label="Draft packs (not live)" value={loading ? "…" : d.draft_packs} />
+          {!loading && d.questions_by_level && Object.keys(d.questions_by_level).length > 0 && (() => {
+            const byLevel = d.questions_by_level || {};
+            const max = Math.max(1, ...Object.values(byLevel).map(Number));
+            return (
+              <div style={{ marginTop: S.md + 2 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 8 }}>Questions by level</div>
+                <div style={{ display: "flex", alignItems: "flex-end", gap: 4, height: 56 }}>
+                  {Array.from({ length: 10 }, (_, idx) => {
+                    const lvl = idx + 1; const cnt = Number(byLevel[lvl] || 0);
+                    return (
+                      <div key={lvl} title={`Level ${lvl}: ${cnt} question${cnt === 1 ? "" : "s"}`} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+                        <div style={{ width: "100%", height: 40, display: "flex", alignItems: "flex-end" }}>
+                          <div style={{ width: "100%", height: `${cnt ? Math.max(8, (cnt / max) * 40) : 2}px`, background: cnt ? C.brand : C.line, borderRadius: 3, transition: "height .3s" }} />
+                        </div>
+                        <div style={{ fontSize: 9.5, fontWeight: 700, color: C.faint }}>{lvl}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
           {d.empty_packs > 0 && <div style={{ marginTop: S.md, fontSize: 12.5, color: C.warnInk, background: C.warnSoft, padding: "8px 12px", borderRadius: R.sm }}>{d.empty_packs} pack{d.empty_packs === 1 ? "" : "s"} have no questions yet.</div>}
         </div>
         <div style={{ background: C.panel, borderRadius: R.lg, padding: S.xl, border: "1px solid " + C.line }}>
