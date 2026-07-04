@@ -1711,7 +1711,7 @@ function PlayMode({ pack, levels, onClose }) {
 
   useEffect(() => {
     (async () => {
-      const { data } = await db.questions(pack.id, { page: 0, size: 100 });
+      const data = await db.allQuestionsForPack(pack.id);
       setQuestions((data || []).filter(q => q.status === "active"));
     })();
   }, [pack.id]);
@@ -2918,6 +2918,29 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Full audit — several real bugs found & fixed:**
+  · **Client/edge PARITY bug (important):** the client buildLevelVariants precedence was changed to
+    \`ov ?? q.letter_position ?? lvl ?? default\` during the editor rebuild, but the game-feed edge
+    function still used \`ov ?? lvl ?? default\`. A question with its OWN letter_position/grouping
+    rendered differently in the game than in the CMS (proven: "start" → __AVE in CMS, BRA__ in
+    game). Fixed the edge function to the same precedence and redeployed (game-feed v10). Parity
+    invariant restored.
+  · **PlayMode silent 100-row cap:** Play mode fetched only the first 100 active questions
+    (size:100), so packs with >100 questions were truncated and the "X of Y" count was wrong.
+    Switched to db.allQuestionsForPack (paginated). 
+  · **Pack-delete Undo dropped fields:** restoring a deleted pack via the Undo toast recreated
+    only the basics — it silently lost level, purpose, focus_areas, style_approach,
+    example_objectives. Now restores all pack fields (the overview view exposes them).
+  · **Stale lint check:** pm_lint_details' \`revealed_answer\` rule keyed off the dead
+    difficulty/letters_hidden columns; rewrote it to use the effective LEVEL's hidden_mode +
+    letters_hidden_default. pm_lint (summary) was already clean.
+  · **RPC grant hygiene:** revoked anon EXECUTE on the admin/write RPCs (pm_dashboard_stats,
+    pm_search_questions, pm_lint, pm_lint_details, pm_mark_released, pm_log) — they already failed
+    for anon via RLS/INVOKER, but the grants were misleading. Public game feed (service_role via
+    edge fn) unaffected.
+  Verified: all major components render headlessly without crashing; maskWord "random" is
+  deterministic; whole-word levels hide the whole word; transform engine still guards objects on
+  both client and edge; RLS confirmed published-only for anon.
 - **Play mode scoring fixed + game rule clarified:** Play mode treated BOTH answer words as
   correct (picking either said "Great choice!" and scored a point), so a wrong pick was reported
   as correct. Clarified rule: both words are positive, but only the PRIMARY word (\`answer\`) is
@@ -4889,9 +4912,8 @@ function App() {
       await db.deletePack(p.id);
       logActivity("pack", p.id, p.name, "delete", `${p.total_questions || 0} questions removed`);
       notify("Pack deleted", { action: { label: "Undo", onClick: async () => {
-        await db.createPack({ slug: p.slug, name: p.name, emoji: p.emoji, description: p.description, color: p.color, difficulty: p.difficulty, status: p.status, is_custom: p.is_custom, sort_order: p.sort_order });
-        await reloadPacks(); notify("Pack restored");
-      } } });
+        await db.createPack({ slug: p.slug, name: p.name, emoji: p.emoji, description: p.description, color: p.color, difficulty: p.difficulty, status: p.status, is_custom: p.is_custom, sort_order: p.sort_order, level: p.level ?? 1, purpose: p.purpose ?? null, focus_areas: p.focus_areas ?? null, style_approach: p.style_approach ?? null, example_objectives: p.example_objectives ?? null });
+        await reloadPacks(); notify("Pack restored"); }
     } catch (e) { packsState.setData(snapshot); notify("Couldn't delete: " + e.message, { kind: "error" }); }
   };
   const reorderPacks = async (updates) => { try { await db.reorderPacks(updates); } catch (e) { notify("Reorder failed", { kind: "error" }); reloadPacks(); } };

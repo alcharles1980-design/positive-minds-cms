@@ -3642,12 +3642,7 @@ function PlayMode({
   const [done, setDone] = useState(false);
   useEffect(() => {
     (async () => {
-      const {
-        data
-      } = await db.questions(pack.id, {
-        page: 0,
-        size: 100
-      });
+      const data = await db.allQuestionsForPack(pack.id);
       setQuestions((data || []).filter(q => q.status === "active"));
     })();
   }, [pack.id]);
