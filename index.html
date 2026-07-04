@@ -5672,6 +5672,9 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Pack purpose at a glance:** Library pack cards reveal the pack's Purpose + Focus areas
+  on hover (desktop) or via an ⓘ toggle (touch), without opening the pack; the Overview
+  pack-index tooltip also includes the purpose.
 - **Structured pack descriptions:** each pack now has purpose, focus_areas, style_approach,
   and example_objectives (shown as an "About this pack" panel on the pack page, editable in
   the pack editor, exportable via the field mapper). An AI "draft" button calls a new
@@ -7235,7 +7238,7 @@ function Dashboard({
   }, packs.map(p => /*#__PURE__*/React.createElement("button", {
     key: p.id,
     onClick: () => onOpenPack(p),
-    title: `${p.name} — ${p.active_questions || 0} active of ${p.total_questions || 0}`,
+    title: `${p.name} — ${p.active_questions || 0} active of ${p.total_questions || 0}${p.purpose ? "\n\n" + p.purpose : ""}`,
     style: {
       display: "flex",
       alignItems: "center",
@@ -7520,6 +7523,9 @@ function PackCard({
   onClone
 }) {
   const [hover, setHover] = useState(false);
+  const [showInfo, setShowInfo] = useState(false);
+  const hasDetails = !!(p.purpose || p.focus_areas);
+  const reveal = hover || showInfo;
   return /*#__PURE__*/React.createElement("div", {
     draggable: draggable,
     onDragStart: onDragStart,
@@ -7571,11 +7577,42 @@ function PackCard({
     kind: p.status
   })), /*#__PURE__*/React.createElement("div", {
     style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
       fontSize: 17,
       fontWeight: 800,
-      color: C.ink
+      color: C.ink,
+      flex: 1,
+      minWidth: 0
     }
-  }, p.name), /*#__PURE__*/React.createElement("div", {
+  }, p.name), hasDetails && /*#__PURE__*/React.createElement("button", {
+    onClick: e => {
+      e.stopPropagation();
+      setShowInfo(v => !v);
+    },
+    title: reveal ? "Hide details" : "About this pack",
+    "aria-label": "About this pack",
+    style: {
+      flexShrink: 0,
+      width: 22,
+      height: 22,
+      borderRadius: 99,
+      border: "1px solid " + (reveal ? p.color : C.line),
+      background: reveal ? p.color + "1E" : "transparent",
+      color: reveal ? p.color : C.faint,
+      cursor: "pointer",
+      fontSize: 12,
+      fontWeight: 800,
+      lineHeight: 1,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center"
+    }
+  }, "ⓘ")), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 13,
       color: C.sub,
@@ -7587,7 +7624,53 @@ function PackCard({
       WebkitBoxOrient: "vertical",
       overflow: "hidden"
     }
-  }, p.description || "No description"), /*#__PURE__*/React.createElement("div", {
+  }, p.description || "No description"), (p.purpose || p.focus_areas) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      maxHeight: reveal ? 200 : 0,
+      opacity: reveal ? 1 : 0,
+      overflow: "hidden",
+      transition: "max-height .25s ease, opacity .2s ease, margin .2s ease",
+      marginTop: reveal ? 10 : 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.bg,
+      borderRadius: R.md,
+      padding: "10px 12px",
+      display: "grid",
+      gap: 8
+    }
+  }, p.purpose && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 9.5,
+      fontWeight: 800,
+      color: C.faint,
+      letterSpacing: 0.4,
+      textTransform: "uppercase",
+      marginBottom: 2
+    }
+  }, "Purpose"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.ink2,
+      lineHeight: 1.45
+    }
+  }, p.purpose)), p.focus_areas && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 9.5,
+      fontWeight: 800,
+      color: C.faint,
+      letterSpacing: 0.4,
+      textTransform: "uppercase",
+      marginBottom: 2
+    }
+  }, "Focus"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: C.ink2,
+      lineHeight: 1.45
+    }
+  }, p.focus_areas)))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       alignItems: "center",

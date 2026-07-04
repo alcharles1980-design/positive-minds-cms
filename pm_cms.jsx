@@ -2425,6 +2425,9 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Pack purpose at a glance:** Library pack cards reveal the pack's Purpose + Focus areas
+  on hover (desktop) or via an ⓘ toggle (touch), without opening the pack; the Overview
+  pack-index tooltip also includes the purpose.
 - **Structured pack descriptions:** each pack now has purpose, focus_areas, style_approach,
   and example_objectives (shown as an "About this pack" panel on the pack page, editable in
   the pack editor, exportable via the field mapper). An AI "draft" button calls a new
@@ -3202,7 +3205,7 @@ function Dashboard({ packs, onOpenPack, onGoLibrary, onGoQuestions, onNewPack })
         ) : (
           <div className="pm-index-grid">
             {packs.map(p => (
-              <button key={p.id} onClick={() => onOpenPack(p)} title={`${p.name} — ${p.active_questions || 0} active of ${p.total_questions || 0}`}
+              <button key={p.id} onClick={() => onOpenPack(p)} title={`${p.name} — ${p.active_questions || 0} active of ${p.total_questions || 0}${p.purpose ? "\n\n" + p.purpose : ""}`}
                 style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 12px", background: C.panel, border: "1px solid " + C.line, borderLeft: `3px solid ${p.color}`, borderRadius: R.sm, cursor: "pointer", fontFamily: "inherit", textAlign: "left", width: "100%", overflow: "hidden" }}>
                 <span style={{ fontSize: 16, flexShrink: 0 }}>{p.emoji}</span>
                 <span style={{ fontSize: 13.5, fontWeight: 700, color: C.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1 }}>{p.name}</span>
@@ -3304,6 +3307,9 @@ function Library({ packs, levels, loading, error, onOpen, onNew, onEdit, onExpor
 
 function PackCard({ pack: p, levels, draggable, dragging, onDragStart, onDragOver, onDrop, onOpen, onEdit, onDelete, onClone }) {
   const [hover, setHover] = useState(false);
+  const [showInfo, setShowInfo] = useState(false);
+  const hasDetails = !!(p.purpose || p.focus_areas);
+  const reveal = hover || showInfo;
   return (
     <div draggable={draggable} onDragStart={onDragStart} onDragOver={onDragOver} onDrop={onDrop}
       onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
@@ -3315,8 +3321,26 @@ function PackCard({ pack: p, levels, draggable, dragging, onDragStart, onDragOve
           <div style={{ width: 52, height: 52, borderRadius: 13, background: p.color + "22", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 27 }}>{p.emoji}</div>
           <Badge kind={p.status} />
         </div>
-        <div style={{ fontSize: 17, fontWeight: 800, color: C.ink }}>{p.name}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ fontSize: 17, fontWeight: 800, color: C.ink, flex: 1, minWidth: 0 }}>{p.name}</div>
+          {hasDetails && <button onClick={(e) => { e.stopPropagation(); setShowInfo(v => !v); }} title={reveal ? "Hide details" : "About this pack"} aria-label="About this pack"
+            style={{ flexShrink: 0, width: 22, height: 22, borderRadius: 99, border: "1px solid " + (reveal ? p.color : C.line), background: reveal ? p.color + "1E" : "transparent", color: reveal ? p.color : C.faint, cursor: "pointer", fontSize: 12, fontWeight: 800, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>ⓘ</button>}
+        </div>
         <div style={{ fontSize: 13, color: C.sub, marginTop: 5, lineHeight: 1.45, minHeight: 36, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{p.description || "No description"}</div>
+        {(p.purpose || p.focus_areas) && (
+          <div style={{ maxHeight: reveal ? 200 : 0, opacity: reveal ? 1 : 0, overflow: "hidden", transition: "max-height .25s ease, opacity .2s ease, margin .2s ease", marginTop: reveal ? 10 : 0 }}>
+            <div style={{ background: C.bg, borderRadius: R.md, padding: "10px 12px", display: "grid", gap: 8 }}>
+              {p.purpose && <div>
+                <div style={{ fontSize: 9.5, fontWeight: 800, color: C.faint, letterSpacing: 0.4, textTransform: "uppercase", marginBottom: 2 }}>Purpose</div>
+                <div style={{ fontSize: 12, color: C.ink2, lineHeight: 1.45 }}>{p.purpose}</div>
+              </div>}
+              {p.focus_areas && <div>
+                <div style={{ fontSize: 9.5, fontWeight: 800, color: C.faint, letterSpacing: 0.4, textTransform: "uppercase", marginBottom: 2 }}>Focus</div>
+                <div style={{ fontSize: 12, color: C.ink2, lineHeight: 1.45 }}>{p.focus_areas}</div>
+              </div>}
+            </div>
+          </div>
+        )}
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: S.md + 2, paddingTop: S.md + 2, borderTop: "1px solid " + C.line }}>
           <Pill>{p.difficulty}</Pill>{p.is_custom && <Pill tone="muted">custom</Pill>}{p.level && <LevelChip level={p.level} levels={levels} size="xs" />}
           <div style={{ flex: 1 }} />
