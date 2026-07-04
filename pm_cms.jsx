@@ -185,8 +185,8 @@ const db = {
   createQuestions: (rows) => rest("pm_questions", { method: "POST", body: rows }).then(r => r.data),
   updateQuestion: (id, q) => rest(`pm_questions?id=eq.${id}`, { method: "PATCH", body: q }).then(r => r.data?.[0]),
   deleteQuestion: (id) => rest(`pm_questions?id=eq.${id}`, { method: "DELETE" }),
-  deleteQuestions: (ids) => rest(`pm_questions?id=in.(${ids.join(",")})`, { method: "DELETE" }),
-  setQuestionsStatus: (ids, status) => rest(`pm_questions?id=in.(${ids.join(",")})`, { method: "PATCH", body: { status } }),
+  deleteQuestions: (ids) => ids?.length ? rest(`pm_questions?id=in.(${ids.join(",")})`, { method: "DELETE" }) : Promise.resolve({ data: null }),
+  setQuestionsStatus: (ids, status) => ids?.length ? rest(`pm_questions?id=in.(${ids.join(",")})`, { method: "PATCH", body: { status } }) : Promise.resolve({ data: null }),
 
   exportAll: async () => {
     const packs = await restAll("pm_packs?order=sort_order.asc");
@@ -570,7 +570,7 @@ const ToastHost = () => {
   return (
     <div style={{ position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", zIndex: 300, display: "flex", flexDirection: "column", gap: 8, alignItems: "center", width: "calc(100% - 32px)", maxWidth: 440, pointerEvents: "none" }}>
       {items.map((t) => (
-        <div key={t.id} style={{ pointerEvents: "auto", background: C.ink, color: "#fff", padding: "12px 16px", borderRadius: R.md, fontSize: 14, fontWeight: 600, boxShadow: SH.lg, display: "flex", alignItems: "center", gap: 10, width: "fit-content", maxWidth: "100%", animation: "pm-toast-in .2s ease-out" }}>
+        <div key={t.id} style={{ pointerEvents: "auto", background: "#1F1B33", color: "#fff", padding: "12px 16px", borderRadius: R.md, fontSize: 14, fontWeight: 600, boxShadow: SH.lg, display: "flex", alignItems: "center", gap: 10, width: "fit-content", maxWidth: "100%", animation: "pm-toast-in .2s ease-out", border: "1px solid rgba(255,255,255,0.08)" }}>
           <span style={{ color: (tone[t.kind] || tone.success).fg, fontWeight: 800 }}>{(tone[t.kind] || tone.success).i}</span>
           <span style={{ flex: 1 }}>{t.message}</span>
           {t.action && <button onClick={() => { t.action.onClick(); dismiss(t.id); }} style={{ background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", fontWeight: 700, fontSize: 13, padding: "4px 10px", borderRadius: 7, cursor: "pointer", fontFamily: "inherit" }}>{t.action.label}</button>}
@@ -690,8 +690,16 @@ const realtime = (() => {
     emitStatus(false);
   };
 
+  // Push a refreshed access token to the live socket so long-lived connections keep
+  // authorizing correctly after a background token refresh (no need to wait for reconnect).
+  const updateToken = () => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ topic: TOPIC, event: "access_token", payload: { access_token: session.token || CFG.key }, ref: nextRef() }));
+    }
+  };
+
   return {
-    connect, disconnect,
+    connect, disconnect, updateToken,
     onChange: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
     onStatus: (fn) => { statusListeners.add(fn); return () => statusListeners.delete(fn); },
     isConnected: () => connected,
@@ -2486,7 +2494,9 @@ config → data layer → design tokens → hooks → primitives → feature vie
   In the question bank, each row has a "Levels" expand toggle showing all 10 variants.
 
 **View:** \`pm_pack_overview\` — packs + active_questions + total_questions +
-has_pending_changes (= content_version > released_version).
+has_pending_changes (= content_version > released_version). MUST be created with
+\`security_invoker = true\` so it respects the caller's RLS — otherwise anon can read
+draft/unpublished packs through the public API.
 
 **Triggers:** \`pm_touch_updated_at\` (updated_at maintenance); \`pm_bump_pack_version\`
 (bumps pack content_version on any question insert/update/delete).
@@ -2580,6 +2590,24 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Full audit pass — security + robustness fixes:**
+  · SECURITY: pm_pack_overview was SECURITY DEFINER, so anon could read draft/unpublished
+    packs' metadata through the public API. Set security_invoker=true — anon now only sees
+    published packs (verified: a test draft was invisible to anon via the view).
+  · SECURITY (defense in depth): revoked the unused insert/update/delete/truncate grants from
+    anon on all pm_ tables (RLS already blocked writes, now the grant surface matches intent).
+  · DARK MODE BUG: toasts used background:C.ink, which flips to near-white in dark mode,
+    making the pale accent colors + white text invisible. Fixed to a permanent dark bg.
+  · ROBUSTNESS: guarded bulk delete/status against empty id arrays (an empty in.() query
+    would be malformed) — the UI already prevented it, but the data layer now does too.
+  · REALTIME: on background token refresh, push the new token to the live socket
+    (realtime.updateToken) so long-lived connections stay authorized without waiting for a
+    reconnect.
+  · ERROR HANDLING: the question action handlers (toggle status, bulk delete/status, import,
+    single delete) had no try/catch — a failed operation vanished silently with no feedback.
+    They now surface a clear error toast. (Editors, pack delete/clone/reorder already caught.)
+  Verified clean: maskWord client/edge parity (624 combos, identical), data integrity (zero
+  orphans/broken refs), all db.* calls resolve, all components resolve, feed still 200 OK.
 - **Stay logged in for 7 days:** the session was being lost on tab/browser close (it used
   sessionStorage) and the access token was only refreshed reactively. Fixed: the session now
   persists in localStorage with a 7-day window measured from login, the short-lived access
@@ -2791,7 +2819,8 @@ is the authoring + publishing layer; a separate game backend consumes the conten
 - pm_activity (audit log), pm_export_profiles(spec jsonb, is_builtin), pm_sync_log,
   pm_sync_targets(config jsonb), pm_dev_notes (singleton id=1)
 - View pm_pack_overview: packs + active_questions + total_questions + has_pending_changes
-  (content_version > released_version)
+  (content_version > released_version). Create it with security_invoker=true so it respects
+  the caller's RLS (otherwise anon can read draft packs via the public API).
 - Triggers: touch updated_at; bump pack content_version on any question change
 - RPCs: pm_dashboard_stats, pm_search_questions(q,pack,diff,stat,lvl,lim,off) [paginated],
   pm_clone_pack(src,slug,name), pm_lint + pm_lint_details, pm_log, pm_mark_released(uuid[])
@@ -3580,21 +3609,21 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
   const afterChange = async () => { await load(); refreshPacks(); setSel(new Set()); };
 
   const saveQ = async (payload, id) => { id ? await db.updateQuestion(id, payload) : await db.createQuestion(payload); await afterChange(); notify(id ? "Question updated" : "Question added"); };
-  const importQ = async (r) => { await db.createQuestions(r); await afterChange(); notify(`${r.length} questions imported`); };
+  const importQ = async (r) => { try { await db.createQuestions(r); await afterChange(); notify(`${r.length} questions imported`); } catch (e) { notify("Import failed: " + e.message, { kind: "error" }); } };
   const delQ = async (q) => {
     const ok = await confirmDialog({ title: "Delete question?", message: "This can't be undone.", confirmLabel: "Delete", danger: true });
     if (!ok) return;
-    await db.deleteQuestion(q.id); await afterChange(); notify("Question deleted");
+    try { await db.deleteQuestion(q.id); await afterChange(); notify("Question deleted"); } catch (e) { notify("Couldn't delete: " + e.message, { kind: "error" }); }
   };
-  const toggleQ = async (q) => { await db.updateQuestion(q.id, { status: q.status === "active" ? "inactive" : "active" }); await afterChange(); };
+  const toggleQ = async (q) => { try { await db.updateQuestion(q.id, { status: q.status === "active" ? "inactive" : "active" }); await afterChange(); } catch (e) { notify("Couldn't update status: " + e.message, { kind: "error" }); } };
 
   const bulkDelete = async () => {
     const ids = [...sel];
     const ok = await confirmDialog({ title: `Delete ${ids.length} questions?`, message: "This permanently removes the selected questions.", confirmLabel: `Delete ${ids.length}`, danger: true });
     if (!ok) return;
-    await db.deleteQuestions(ids); await afterChange(); notify(`${ids.length} questions deleted`);
+    try { await db.deleteQuestions(ids); await afterChange(); notify(`${ids.length} questions deleted`); } catch (e) { notify("Bulk delete failed: " + e.message, { kind: "error" }); }
   };
-  const bulkStatus = async (status) => { const ids = [...sel]; await db.setQuestionsStatus(ids, status); await afterChange(); notify(`${ids.length} set to ${status}`); };
+  const bulkStatus = async (status) => { const ids = [...sel]; try { await db.setQuestionsStatus(ids, status); await afterChange(); notify(`${ids.length} set to ${status}`); } catch (e) { notify("Bulk update failed: " + e.message, { kind: "error" }); } };
 
   const shown = (rows || []).filter(q => {
     if (diffF !== "all" && q.difficulty !== diffF) return false;
@@ -4077,7 +4106,7 @@ function App() {
   useEffect(() => {
     if (!authed) return;
     let cancelled = false;
-    const refreshNow = async () => { if (!cancelled && session.refresh) { const ok = await auth.refresh(); if (!ok && !cancelled) { /* refresh token invalid — expire handler will fire on next call */ } } };
+    const refreshNow = async () => { if (!cancelled && session.refresh) { const ok = await auth.refresh(); if (ok && !cancelled) realtime.updateToken(); } };
     refreshNow(); // refresh once on load in case the stored token is already near expiry
     const timer = setInterval(refreshNow, 45 * 60 * 1000); // every 45 min (< 60 min token life)
     const onVis = () => { if (document.visibilityState === "visible") refreshNow(); };
