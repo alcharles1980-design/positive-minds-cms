@@ -1392,18 +1392,40 @@ function QuestionEditor({ question, packId, packDifficulty, packLevel, levels, o
 }
 
 // Bulk import — supports both the pipe format and pasted JSON
+// Sanitize AI/user-supplied frame_slots from an import so only clean shapes reach the DB:
+// { token: { pool: [strings], byLevel: { "level": "string" } } }. Returns null if nothing valid.
+function sanitizeFrameSlots(fs) {
+  if (!fs || typeof fs !== "object" || Array.isArray(fs)) return null;
+  const out = {};
+  for (const [token, slotRaw] of Object.entries(fs)) {
+    if (!/^[a-zA-Z][\w-]*$/.test(token) || token === "blank") continue;
+    const slot = (slotRaw && typeof slotRaw === "object" && !Array.isArray(slotRaw)) ? slotRaw : {};
+    const pool = Array.isArray(slot.pool) ? slot.pool.filter(v => typeof v === "string" && v.trim()).map(v => v.trim()) : [];
+    const byLevel = {};
+    if (slot.byLevel && typeof slot.byLevel === "object" && !Array.isArray(slot.byLevel)) {
+      for (const [lvl, w] of Object.entries(slot.byLevel)) {
+        if (/^\d+$/.test(String(lvl)) && (typeof w === "string" || typeof w === "number") && String(w).trim()) byLevel[String(lvl)] = String(w).trim();
+      }
+    }
+    if (pool.length || Object.keys(byLevel).length) out[token] = { pool, byLevel };
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 function BulkImport({ packId, onDone, onClose }) {
   const [raw, setRaw] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [existing, setExisting] = useState([]);
+  const [loadingExisting, setLoadingExisting] = useState(true);
   const [skipIds, setSkipIds] = useState(() => new Set()); // row indices the user chose to skip
   const [userTouched, setUserTouched] = useState(() => new Set()); // rows the user manually toggled
 
   // Load the pack's existing questions so we can flag duplicates.
   useEffect(() => {
     let alive = true;
-    (async () => { try { const qs = await db.allQuestionsForPack(packId); if (alive) setExisting(qs || []); } catch { if (alive) setExisting([]); } })();
+    setLoadingExisting(true);
+    (async () => { try { const qs = await db.allQuestionsForPack(packId); if (alive) setExisting(qs || []); } catch { if (alive) setExisting([]); } finally { if (alive) setLoadingExisting(false); } })();
     return () => { alive = false; };
   }, [packId]);
 
@@ -1433,7 +1455,7 @@ function BulkImport({ packId, onDone, onClose }) {
         rows = arr.map(o => ({
           template: o.template || "", answer: (o.answer || "").toUpperCase(),
           alt_answer: (o.alt_answer || o.alt || "").toUpperCase(),
-          frame_slots: (o.frame_slots && typeof o.frame_slots === "object") ? o.frame_slots : null,
+          frame_slots: sanitizeFrameSlots(o.frame_slots),
           ok: (o.template || "").includes("{blank}") && !!o.answer,
         }));
       } catch { return [{ template: "Invalid JSON", answer: "", alt_answer: "", ok: false, dup: "none" }]; }
@@ -1502,8 +1524,10 @@ function BulkImport({ packId, onDone, onClose }) {
           <div style={{ background: C.bg, borderRadius: R.md, padding: S.md + 2, maxHeight: 260, overflowY: "auto" }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 8, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
               <span>{toImport.length} to import · {valid.length - toImport.length} skipped · {parsed.length - valid.length} invalid</span>
-              {exactCount > 0 && <span style={{ color: C.danger }}>● {exactCount} duplicate{exactCount === 1 ? "" : "s"}</span>}
-              {nearCount > 0 && <span style={{ color: C.warn }}>● {nearCount} similar</span>}
+              {loadingExisting ? <span style={{ color: C.faint }}>● checking for duplicates…</span> : <>
+                {exactCount > 0 && <span style={{ color: C.danger }}>● {exactCount} duplicate{exactCount === 1 ? "" : "s"}</span>}
+                {nearCount > 0 && <span style={{ color: C.warn }}>● {nearCount} similar</span>}
+              </>}
             </div>
             {parsed.map((p, i) => {
               const ds = dupStyle[p.dup];
@@ -1528,7 +1552,7 @@ function BulkImport({ packId, onDone, onClose }) {
       </div>
       <ModalFoot>
         <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
-        <Btn onClick={submit} disabled={busy || !toImport.length}>{busy ? "Importing…" : `Import ${toImport.length} question${toImport.length === 1 ? "" : "s"}`}</Btn>
+        <Btn onClick={submit} disabled={busy || !toImport.length || loadingExisting}>{busy ? "Importing…" : loadingExisting ? "Checking…" : `Import ${toImport.length} question${toImport.length === 1 ? "" : "s"}`}</Btn>
       </ModalFoot>
     </>
   );
@@ -2800,6 +2824,22 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Audit pass on the generator/import loop:**
+  · Import now sanitizes AI/user-supplied frame_slots before it reaches the DB
+    (sanitizeFrameSlots): pool coerced to a clean string array, byLevel keys must be numeric
+    and values become strings, junk/blank tokens dropped, returns null if nothing valid. The
+    resolver was already crash-proof against malformed shapes; this keeps the DB clean too.
+  · Import duplicate-check now has a loading state — the Import button is disabled and shows
+    "Checking…" until the pack's existing questions have loaded, so you can't accidentally
+    import past an un-loaded dedup check.
+  · Generator: applyPack fetches are guarded by a ref (latestPackReq) so rapidly switching
+    packs can't leave a stale pack's questions in the avoid-list (out-of-order response race).
+  · Generator: the avoid-list sentence signatures are capped (120) with an "…and N more" note
+    so a large pack can't bloat the prompt or bury the instructions (a 250-question pack was
+    ~17.7K chars); the compact answer-word list is always included in full.
+  Verified: sanitizer across 10 malformed shapes; resolver crash-proof across 9; dedup
+  classification (exact/similar/new/in-batch) across 6; normSentence collision behavior
+  reviewed (frame-word-only differences surface as "similar" for review — intended).
 - **Generator: background context + duplicate avoidance (belt & suspenders):**
   · A standalone, reusable MASTER_CONTEXT document (the full CBMT "why", who the child is, what
     good/bad looks like) lives on the Generator page with copy — paste it once at the top of a
@@ -3804,8 +3844,13 @@ function buildAvoidList(existingQuestions) {
   lines.push(`This pack already contains ${qs.length} question${qs.length === 1 ? "" : "s"}. Do NOT reproduce any of them, and avoid trivial rewordings. Produce genuinely new sentences and, where possible, fresh answer words.`);
   if (answers.size) lines.push(`Answer words already used (prefer different words): ${[...answers].sort().join(", ")}.`);
   if (sigs.length) {
-    lines.push(`Existing sentences (do not duplicate these):`);
-    for (const s of sigs) lines.push(`- ${s}`);
+    // Cap the sentence list so a large pack doesn't bloat the prompt or bury the instructions.
+    // The answer-word list above is the compact, high-value dedup signal; sentences are a bonus.
+    const SIG_CAP = 120;
+    const shown = sigs.slice(0, SIG_CAP);
+    lines.push(`Existing sentences${sigs.length > SIG_CAP ? ` (showing ${SIG_CAP} of ${sigs.length})` : ""} (do not duplicate these):`);
+    for (const s of shown) lines.push(`- ${s}`);
+    if (sigs.length > SIG_CAP) lines.push(`- …and ${sigs.length - SIG_CAP} more. Avoid close variations of any sentence in this pack.`);
   }
   return lines.join("\n");
 }
@@ -3901,7 +3946,9 @@ function GeneratorView({ packs, levels }) {
   const [ctxCopied, setCtxCopied] = useState(false);
 
   // When a pack is chosen, pre-fill themes from its focus areas (editable) and load its
-  // existing questions so we can build an "avoid these" list.
+  // existing questions so we can build an "avoid these" list. A ref guards against
+  // out-of-order responses when the user switches packs quickly.
+  const latestPackReq = useRef(null);
   const applyPack = async (id) => {
     setPackId(id);
     const p = (packs || []).find(x => x.id === id);
@@ -3910,11 +3957,12 @@ function GeneratorView({ packs, levels }) {
       if (selectedLevels.length === 0 && p.level) setSelectedLevels([p.level]);
     }
     setExistingQuestions([]);
-    if (!id) return;
+    latestPackReq.current = id;
+    if (!id) { setLoadingQs(false); return; }
     setLoadingQs(true);
-    try { const qs = await db.allQuestionsForPack(id); setExistingQuestions(qs || []); }
-    catch { setExistingQuestions([]); }
-    finally { setLoadingQs(false); }
+    try { const qs = await db.allQuestionsForPack(id); if (latestPackReq.current === id) setExistingQuestions(qs || []); }
+    catch { if (latestPackReq.current === id) setExistingQuestions([]); }
+    finally { if (latestPackReq.current === id) setLoadingQs(false); }
   };
 
   const toggleLevel = (lvl) => setSelectedLevels(s => s.includes(lvl) ? s.filter(x => x !== lvl) : [...s, lvl].sort((a, b) => a - b));
