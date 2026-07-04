@@ -2456,6 +2456,10 @@ config → data layer → design tokens → hooks → primitives → feature vie
   \`rest()\` and \`rpc()\` wrap PostgREST; both auto-refresh the auth token and retry once
   on 401, then drop to login if refresh fails (via \`authEvents\`). \`restAll()\` paginates
   in 1000-row batches to defeat the PostgREST cap.
+- **Live sync (realtime.jsx):** a lean websocket client subscribes to postgres_changes on
+  the UI tables; \`useRealtimeRefresh(tables, cb)\` debounce-refreshes affected lists. Any
+  table a feature reads and expects to stay live must be in the Realtime publication AND in
+  realtime.jsx's TABLES list. On background token refresh, call \`realtime.updateToken()\`.
 - **Design tokens:** \`C\` (colors, as CSS variables), \`S\` (spacing), \`R\` (radius),
   \`SH\` (shadows), \`FONT\`. Colors resolve to \`var(--name)\`; \`THEMES\` holds the light/dark
   values injected by GlobalStyle. \`data-theme\` on <html> flips the palette instantly.
@@ -2907,7 +2911,9 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    panel on the pack page, edit them in the pack editor, and expose them in the field mapper
    so they can be exported to the game. Offer an AI "draft" button (via a server-side edge
    function proxying Anthropic) that generates a first draft grounded in the pack's name,
-   theme, and words, which the user then edits.
+   theme, and words, which the user then edits. Surface the purpose at a glance on the Library
+   pack cards too — reveal Purpose + Focus areas on hover (desktop) or via an ⓘ toggle (touch),
+   without opening the pack; keep the card compact by default.
 14. **Live sync (realtime):** open sessions across devices/browsers must update automatically
    when anyone edits data — no manual refresh, so simultaneous editors don't work off stale
    views or duplicate effort. Connect to Supabase Realtime (a lean websocket client is fine;
