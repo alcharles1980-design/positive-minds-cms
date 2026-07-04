@@ -589,6 +589,138 @@ const Skeleton = ({ h = 16, w = "100%", r = 8, style }) => (
   <div style={{ height: h, width: w, borderRadius: r, background: `linear-gradient(90deg, ${C.lineSoft} 25%, ${C.line} 50%, ${C.lineSoft} 75%)`, backgroundSize: "200% 100%", animation: "pm-shimmer 1.3s infinite", ...style }} />
 );
 
+// ===== realtime.jsx =====
+// ============================================================
+// Realtime — live sync via Supabase Realtime (Postgres changes).
+// Lean websocket client (no Supabase SDK): connects to the Realtime
+// endpoint, subscribes to postgres_changes on our tables, and emits
+// events so open sessions refresh when anyone edits data.
+// ============================================================
+const realtime = (() => {
+  let ws = null;
+  let ref = 0;
+  let heartbeat = null;
+  let reconnectTimer = null;
+  let connected = false;
+  let intentionalClose = false;
+  const listeners = new Set();       // fns called on any relevant change: (payload) => {}
+  const statusListeners = new Set(); // fns called on connection status change: (isConnected) => {}
+  const TOPIC = "realtime:pm";
+
+  const TABLES = ["pm_packs", "pm_questions", "pm_levels", "pm_question_levels", "pm_export_profiles", "pm_sync_targets", "pm_activity"];
+
+  const nextRef = () => String(++ref);
+
+  const send = (event, payload, joinRef) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ topic: TOPIC, event, payload, ref: nextRef(), join_ref: joinRef }));
+  };
+
+  const emitStatus = (val) => { connected = val; statusListeners.forEach(fn => { try { fn(val); } catch {} }); };
+
+  const join = () => {
+    const joinRef = nextRef();
+    // Subscribe to all our tables via postgres_changes config.
+    const changes = TABLES.map(t => ({ event: "*", schema: "public", table: t }));
+    ws.send(JSON.stringify({
+      topic: TOPIC,
+      event: "phx_join",
+      payload: { config: { postgres_changes: changes, broadcast: { self: false }, presence: { key: "" } }, access_token: session.token || CFG.key },
+      ref: nextRef(), join_ref: joinRef,
+    }));
+    // Heartbeat every 25s keeps the socket alive.
+    clearInterval(heartbeat);
+    heartbeat = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ topic: "phoenix", event: "heartbeat", payload: {}, ref: nextRef() }));
+    }, 25000);
+  };
+
+  const connect = () => {
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+    intentionalClose = false;
+    const wsUrl = CFG.url.replace(/^http/, "ws") + `/realtime/v1/websocket?apikey=${encodeURIComponent(CFG.key)}&vsn=1.0.0`;
+    try { ws = new WebSocket(wsUrl); } catch { scheduleReconnect(); return; }
+
+    ws.onopen = () => { join(); };
+    ws.onmessage = (e) => {
+      let msg; try { msg = JSON.parse(e.data); } catch { return; }
+      if (msg.event === "phx_reply" && msg.payload?.status === "ok" && !connected) emitStatus(true);
+      if (msg.event === "postgres_changes") {
+        const data = msg.payload?.data;
+        if (data) {
+          const info = { table: data.table, type: data.type, record: data.record, old: data.old_record };
+          listeners.forEach(fn => { try { fn(info); } catch {} });
+        }
+      }
+      if (msg.event === "phx_error" || msg.event === "phx_close") { emitStatus(false); }
+    };
+    ws.onerror = () => { emitStatus(false); };
+    ws.onclose = () => { emitStatus(false); clearInterval(heartbeat); if (!intentionalClose) scheduleReconnect(); };
+  };
+
+  const scheduleReconnect = () => {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(() => { if (!intentionalClose) connect(); }, 3000);
+  };
+
+  const disconnect = () => {
+    intentionalClose = true;
+    clearInterval(heartbeat); clearTimeout(reconnectTimer);
+    if (ws) { try { ws.close(); } catch {} ws = null; }
+    emitStatus(false);
+  };
+
+  return {
+    connect, disconnect,
+    onChange: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
+    onStatus: (fn) => { statusListeners.add(fn); return () => statusListeners.delete(fn); },
+    isConnected: () => connected,
+  };
+})();
+
+// Hook: manage the realtime connection lifecycle + a live status flag.
+function useRealtime(authed) {
+  const [live, setLive] = useState(false);
+  useEffect(() => {
+    if (!authed) { realtime.disconnect(); setLive(false); return; }
+    const offStatus = realtime.onStatus(setLive);
+    realtime.connect();
+    // Reconnect when the tab becomes visible again (mobile/browsers suspend sockets).
+    const onVis = () => { if (document.visibilityState === "visible") realtime.connect(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { offStatus(); document.removeEventListener("visibilitychange", onVis); realtime.disconnect(); };
+  }, [authed]);
+  return live;
+}
+
+// Hook: subscribe to changes on specific tables and run a (debounced) refresh.
+// `tables` is an array of table names; `onRelevant` is called when any fires.
+function useRealtimeRefresh(tables, onRelevant, deps = []) {
+  const savedCb = useRef(onRelevant);
+  savedCb.current = onRelevant;
+  useEffect(() => {
+    let timer = null;
+    const off = realtime.onChange((info) => {
+      if (!tables.includes(info.table)) return;
+      clearTimeout(timer);
+      timer = setTimeout(() => savedCb.current && savedCb.current(info), 350); // debounce bursts
+    });
+    return () => { off(); clearTimeout(timer); };
+    // eslint-disable-next-line
+  }, deps);
+}
+
+// Small "Live" pill for the header.
+function LiveBadge({ live }) {
+  return (
+    <span title={live ? "Live sync on — changes from other devices appear automatically" : "Reconnecting…"}
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11.5, fontWeight: 700, padding: "3px 10px", borderRadius: R.pill, background: live ? C.goodSoft : C.lineSoft, color: live ? C.goodInk : C.faint, whiteSpace: "nowrap" }}>
+      <span style={{ width: 7, height: 7, borderRadius: 99, background: live ? C.good : C.faint, boxShadow: live ? `0 0 0 3px ${C.good}22` : "none", animation: live ? "pm-pulse 2s ease-in-out infinite" : "none" }} />
+      {live ? "Live" : "Offline"}
+    </span>
+  );
+}
+
 // ===== engine.jsx =====
 // ============================================================
 // Transformation Engine (client) — identical logic to the edge fn.
@@ -2425,6 +2557,15 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Live sync (realtime):** open sessions now update automatically when anyone edits data,
+  so multiple people on multiple devices don't work off stale views. A lean websocket client
+  (realtime.jsx, no Supabase SDK) connects to Supabase Realtime and subscribes to
+  postgres_changes on the 7 UI tables; a debounced refresh reloads the affected lists
+  (packs, questions, per-pack question list, global search, levels). A "Live" badge in the
+  header shows connection status; it auto-reconnects and re-subscribes on tab focus. Realtime
+  is enabled on the publication for pm_packs, pm_questions, pm_levels, pm_question_levels,
+  pm_export_profiles, pm_sync_targets, pm_activity. (Note: auth is still a single shared
+  account — per-user accounts are a separate future step.)
 - **Pack purpose at a glance:** Library pack cards reveal the pack's Purpose + Focus areas
   on hover (desktop) or via an ⓘ toggle (touch), without opening the pack; the Overview
   pack-index tooltip also includes the purpose.
@@ -2707,6 +2848,14 @@ Anon publishable key authorizes reads only.
    so they can be exported to the game. Offer an AI "draft" button (via a server-side edge
    function proxying Anthropic) that generates a first draft grounded in the pack's name,
    theme, and words, which the user then edits.
+14. **Live sync (realtime):** open sessions across devices/browsers must update automatically
+   when anyone edits data — no manual refresh, so simultaneous editors don't work off stale
+   views or duplicate effort. Connect to Supabase Realtime (a lean websocket client is fine;
+   no SDK required) and subscribe to postgres_changes on the content tables; on a change,
+   debounce and reload the affected lists (pack overview, the open pack's question list, the
+   global question search, levels). Show a "Live/Offline" status badge in the header, and
+   auto-reconnect (and re-subscribe) when the tab regains focus. Enable the Realtime
+   publication on those tables server-side.
 
 ## UX / cross-cutting
 - Dark mode (light/dark/system, persisted, CSS variables). Command palette (⌘/Ctrl-K):
@@ -3389,6 +3538,14 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
   }, [pack.id, page]);
   useEffect(() => { load(); }, [load]);
 
+  // Live sync: if another device changes a question in THIS pack (or its per-level
+  // overrides), reload the list. Filter to this pack to avoid needless reloads.
+  useRealtimeRefresh(["pm_questions", "pm_question_levels"], (info) => {
+    const rec = info.record || info.old || {};
+    if (info.table === "pm_questions" && rec.pack_id && rec.pack_id !== pack.id) return;
+    load();
+  }, [load, pack.id]);
+
   const afterChange = async () => { await load(); refreshPacks(); setSel(new Set()); };
 
   const saveQ = async (payload, id) => { id ? await db.updateQuestion(id, payload) : await db.createQuestion(payload); await afterChange(); notify(id ? "Question updated" : "Question added"); };
@@ -3572,6 +3729,9 @@ function AllQuestions({ onOpenPack, levels }) {
   }, [debounced, diff, stat, lvl, page]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { setPage(0); }, [debounced, diff, stat, lvl]);
+
+  // Live sync: refresh the global search when questions change anywhere.
+  useRealtimeRefresh(["pm_questions", "pm_question_levels"], () => load(), [load]);
 
   const pages = Math.ceil(total / CFG.pageSize);
 
@@ -3759,6 +3919,11 @@ function App() {
   const levelsState = useAsync(() => db_levels.list(), [authed]);
   const levels = levelsState.data || [];
 
+  // Live sync: connect when authed, refresh lists when others change data.
+  const live = useRealtime(authed);
+  useRealtimeRefresh(["pm_packs", "pm_questions", "pm_question_levels"], () => reloadPacks(), [reloadPacks]);
+  useRealtimeRefresh(["pm_levels"], () => levelsState.reload(), [levelsState.reload]);
+
   // history-based back button
   const goPack = useCallback((p) => { setActive(p); window.history.pushState({ v: "pack", id: p.id }, ""); }, []);
   const closePack = useCallback(() => {
@@ -3910,6 +4075,8 @@ function App() {
             </button>
           )}
           <div style={{ flex: 1 }} />
+          {!bp.isTablet && <div style={{ marginBottom: 10, display: "flex", justifyContent: "center" }}><LiveBadge live={live} /></div>}
+          {bp.isTablet && <div style={{ marginBottom: 8, display: "flex", justifyContent: "center" }}><span title={live ? "Live sync on" : "Reconnecting…"} style={{ width: 9, height: 9, borderRadius: 99, background: live ? C.good : C.faint, boxShadow: live ? `0 0 0 3px ${C.good}22` : "none" }} /></div>}
           {!bp.isTablet && <div style={{ marginBottom: 10 }}><ThemeToggle theme={theme} /></div>}
           <div style={{ display: "grid", gap: 4 }}>
             {bp.isTablet && <button onClick={() => setPaletteOpen(true)} title="Quick actions (⌘K)" style={sideBtn(true)}><span style={{ fontSize: 16 }}>⌕</span></button>}
@@ -3928,6 +4095,7 @@ function App() {
               <div style={{ width: 34, height: 34, borderRadius: 10, background: `linear-gradient(135deg, ${C.brand}, ${C.brand2})`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flexShrink: 0 }}>🧠</div>
               <div style={{ fontSize: 15.5, fontWeight: 800 }}>Positive Minds</div>
               <div style={{ flex: 1 }} />
+              <LiveBadge live={live} />
               <div style={{ position: "relative" }}>
                 <button onClick={() => setMenuOpen(o => !o)} aria-label="Menu" style={{ background: "none", border: "1px solid " + C.line, borderRadius: R.md, padding: "8px 12px", fontSize: 18, lineHeight: 1, cursor: "pointer", color: C.ink2 }}>⋯</button>
                 {menuOpen && (<>
@@ -4022,6 +4190,7 @@ function GlobalStyle() {
     button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,[tabindex]:focus-visible{ outline:2px solid ${C.brand}; outline-offset:2px; }
 
     @keyframes pm-spin{ to{ transform:rotate(360deg);} }
+    @keyframes pm-pulse{ 0%,100%{ opacity:1; } 50%{ opacity:0.45; } }
     @keyframes pm-shimmer{ 0%{ background-position:200% 0;} 100%{ background-position:-200% 0;} }
     @keyframes pm-toast-in{ from{ transform:translateY(10px); opacity:0;} to{ transform:translateY(0); opacity:1;} }
 
