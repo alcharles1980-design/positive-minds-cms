@@ -17,6 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
+  build: "2026.07.04-3", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -2952,6 +2953,19 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **CRITICAL — the build was silently broken; recent "deploys" shipped a STALE bundle.** The
+  earlier pack-undo edit (preserving all pack fields on Undo) left a brace mismatch — the onClick
+  arrow closed with a stray \`}\` and the \`action\`/\`notify\` closers were dropped — so assemble.cjs's
+  Babel compile threw and never rewrote app.compiled.js. build_html.cjs kept wrapping the OLD
+  compiled file, and \`node --check app.compiled.js\` passed because it was checking the old valid
+  file — so several commits (docs, generator mechanic, Play-mode fixes) never actually reached the
+  deployed bundle. Fixed the braces; assemble now compiles and writes a fresh bundle (index.html
+  jumped ~388KB→399KB, confirming how far behind it was). LESSON: after every build, verify
+  assemble.cjs printed its success summary AND that app.compiled.js was newly written (check its
+  mtime / grep a just-added string) — do NOT trust \`node --check app.compiled.js\` alone, since a
+  failed assemble leaves a stale-but-valid file.
+- **Added a visible build stamp** (CFG.build, shown small in the sidebar footer) so a stale cached
+  build is obvious at a glance — bump it on every deploy.
 - **Game mechanic corrected — it's a SPELLING puzzle, not a meaning test:** earlier docs/prompt
   said "both words positive but only the primary FITS THE MEANING of the sentence". That was
   wrong. The real mechanic: the sentence shows a word with some letters revealed and some blank;
@@ -5002,7 +5016,8 @@ function App() {
       logActivity("pack", p.id, p.name, "delete", `${p.total_questions || 0} questions removed`);
       notify("Pack deleted", { action: { label: "Undo", onClick: async () => {
         await db.createPack({ slug: p.slug, name: p.name, emoji: p.emoji, description: p.description, color: p.color, difficulty: p.difficulty, status: p.status, is_custom: p.is_custom, sort_order: p.sort_order, level: p.level ?? 1, purpose: p.purpose ?? null, focus_areas: p.focus_areas ?? null, style_approach: p.style_approach ?? null, example_objectives: p.example_objectives ?? null });
-        await reloadPacks(); notify("Pack restored"); }
+        await reloadPacks(); notify("Pack restored");
+      } } });
     } catch (e) { packsState.setData(snapshot); notify("Couldn't delete: " + e.message, { kind: "error" }); }
   };
   const reorderPacks = async (updates) => { try { await db.reorderPacks(updates); } catch (e) { notify("Reorder failed", { kind: "error" }); reloadPacks(); } };
@@ -5139,6 +5154,7 @@ function App() {
             <button onClick={() => setChangePw(true)} title="Change password" style={sideBtn(bp.isTablet)}><span style={{ fontSize: 16 }}>⚙</span>{!bp.isTablet && "Password"}</button>
             <button onClick={() => { auth.logout(); setAuthed(false); setActive(null); }} title="Sign out" style={{ ...sideBtn(bp.isTablet), color: C.danger }}><span style={{ fontSize: 16 }}>⏻</span>{!bp.isTablet && "Sign out"}</button>
           </div>
+          {!bp.isTablet && <div style={{ marginTop: 8, textAlign: "center", fontSize: 9.5, color: C.faint, fontWeight: 600, letterSpacing: 0.3 }} title="App build — if this differs from the latest deploy, your browser is showing a cached version">build {CFG.build}</div>}
         </aside>
       )}
 
