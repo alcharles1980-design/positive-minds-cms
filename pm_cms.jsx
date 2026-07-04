@@ -667,7 +667,7 @@ const withMeta = (spec, body, counts) => {
 };
 
 // Field names available to map from
-const PACK_SOURCE_FIELDS = ["slug", "name", "emoji", "description", "color", "difficulty", "status", "is_custom", "tags"];
+const PACK_SOURCE_FIELDS = ["slug", "name", "emoji", "description", "color", "difficulty", "status", "is_custom", "tags", "level", "purpose", "focus_areas", "style_approach", "example_objectives"];
 const QUESTION_SOURCE_FIELDS = ["template", "answer", "alt_answer", "letters_hidden", "difficulty", "status", "notes", "level", "effective_level", "letter_position", "letter_grouping"];
 
 const emptySpec = () => ({
@@ -867,12 +867,35 @@ function PackEditor({ pack, levels, onSave, onClose }) {
     description: pack?.description || "", color: pack?.color || C.brand,
     difficulty: pack?.difficulty || "basic", status: pack?.status || "draft", is_custom: pack?.is_custom || false,
     level: pack?.level || 1,
+    purpose: pack?.purpose || "", focus_areas: pack?.focus_areas || "",
+    style_approach: pack?.style_approach || "", example_objectives: pack?.example_objectives || "",
     tags: pack?.tags || [],
   });
   const [slugTouched, setSlugTouched] = useState(!isNew);
   const [busy, setBusy] = useState(false);
   const [errs, setErrs] = useState({});
+  const [aiBusy, setAiBusy] = useState(false);
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+
+  const suggestDetails = async () => {
+    setAiBusy(true);
+    try {
+      const words = pack?.id ? "" : ""; // words come from questions; the fn can work from name/theme alone
+      const res = await fetch(`${CFG.url}/functions/v1/pack-describe`, {
+        method: "POST",
+        headers: { apikey: CFG.key, Authorization: `Bearer ${session.token || CFG.key}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ name: f.name, emoji: f.emoji, difficulty: f.difficulty, words, templates: "" }),
+      });
+      const d = await res.json();
+      if (!res.ok || d.error) {
+        notify(d.error === "no_key" ? "AI drafting isn't configured yet (server needs an Anthropic API key)." : "Couldn't draft details: " + (d.message || res.status), { kind: "error" });
+        return;
+      }
+      setF(p => ({ ...p, purpose: d.purpose || p.purpose, focus_areas: d.focus_areas || p.focus_areas, style_approach: d.style_approach || p.style_approach, example_objectives: d.example_objectives || p.example_objectives }));
+      notify("Draft filled in — review and edit as needed");
+    } catch (e) { notify("Couldn't reach the drafting service", { kind: "error" }); }
+    finally { setAiBusy(false); }
+  };
 
   const submit = async () => {
     const e = {};
@@ -912,6 +935,30 @@ function PackEditor({ pack, levels, onSave, onClose }) {
         <Field label="Description" hint="Short blurb shown on the pack card">
           <Textarea value={f.description} onChange={(e) => set("description", e.target.value)} rows={2} placeholder="Believe in yourself and take pride in what you do." />
         </Field>
+
+        {/* Structured pack description */}
+        <div style={{ borderTop: "1px solid " + C.line, paddingTop: S.md, marginTop: 2 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: S.sm }}>
+            <span style={{ fontSize: 13, fontWeight: 800, color: C.ink, letterSpacing: 0.2, textTransform: "uppercase" }}>Pack details</span>
+            <span style={{ fontSize: 12, color: C.sub }}>· purpose, focus, approach & objectives</span>
+            <div style={{ flex: 1 }} />
+            <Btn variant="soft" size="sm" disabled={aiBusy || !f.name} onClick={suggestDetails} icon="✦">{aiBusy ? "Drafting…" : "AI draft"}</Btn>
+          </div>
+          <div style={{ display: "grid", gap: S.md }}>
+            <Field label="Purpose" hint="What this pack is for — its objective">
+              <Textarea value={f.purpose} onChange={(e) => set("purpose", e.target.value)} rows={2} placeholder="Help children build a stable sense of self-belief…" />
+            </Field>
+            <Field label="Focus areas" hint="Key themes and skills it covers">
+              <Textarea value={f.focus_areas} onChange={(e) => set("focus_areas", e.target.value)} rows={2} placeholder="Self-worth, personal strengths, trying new things" />
+            </Field>
+            <Field label="Style & approach" hint="Tone and how it teaches">
+              <Textarea value={f.style_approach} onChange={(e) => set("style_approach", e.target.value)} rows={2} placeholder="Warm and encouraging; every word choice is a positive trait…" />
+            </Field>
+            <Field label="Example objectives" hint="Concrete goals a child works toward">
+              <Textarea value={f.example_objectives} onChange={(e) => set("example_objectives", e.target.value)} rows={2} placeholder="A child can name two of their own strengths; feels able to try something new…" />
+            </Field>
+          </div>
+        </div>
         <Field label="Tags" hint="Enter or comma to add — for cross-cutting organization">
           <TagInput tags={f.tags} onChange={(t) => set("tags", t)} suggestions={PACK_TAG_SUGGESTIONS} />
         </Field>
@@ -2263,7 +2310,8 @@ config → data layer → design tokens → hooks → primitives → feature vie
 **Tables:**
 - \`pm_packs\` — id, slug (unique), name, emoji, description, color, difficulty
   (basic/advanced/mixed), status (draft/published/archived), sort_order, is_custom,
-  tags text[], content_version, released_version, released_at, timestamps.
+  tags text[], content_version, released_version, released_at, level, and structured
+  descriptive fields: purpose, focus_areas, style_approach, example_objectives. timestamps.
 - \`pm_questions\` — id, pack_id (FK cascade), template (with \`{blank}\`), answer,
   alt_answer, letters_hidden, difficulty (basic/advanced), status (active/inactive),
   sort_order, notes, timestamps.
@@ -2377,6 +2425,11 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Structured pack descriptions:** each pack now has purpose, focus_areas, style_approach,
+  and example_objectives (shown as an "About this pack" panel on the pack page, editable in
+  the pack editor, exportable via the field mapper). An AI "draft" button calls a new
+  pack-describe edge function (Anthropic; needs ANTHROPIC_API_KEY server secret) to fill a
+  first draft the user then edits. All 14 existing packs were seeded with grounded drafts.
 - **Export pipeline reviewed for levels + XML added:** the 3 starter profiles were updated
   to carry the real effective_level (Flat API had mislabeled difficulty as "level"); a new
   "Full game export (with levels)" starter emits the complete 10-level structure
@@ -2645,6 +2698,12 @@ Anon publishable key authorizes reads only.
    (a toXml serializer with sane singular tags + escaping); the pull-feed accepts ?format=xml.
    The client engine and the edge function must stay byte-identical (maskWord, buildLevelVariants,
    toXml, the expand logic) — this parity is a hard invariant.
+13. **Structured pack descriptions:** each pack has purpose, focus_areas, style_approach,
+   and example_objectives (beyond the short card blurb). Show them as an "About this pack"
+   panel on the pack page, edit them in the pack editor, and expose them in the field mapper
+   so they can be exported to the game. Offer an AI "draft" button (via a server-side edge
+   function proxying Anthropic) that generates a first draft grounded in the pack's name,
+   theme, and words, which the user then edits.
 
 ## UX / cross-cutting
 - Dark mode (light/dark/system, persisted, CSS variables). Command palette (⌘/Ctrl-K):
@@ -3358,6 +3417,18 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
         </div>
       </div>
 
+      {(pack.purpose || pack.focus_areas || pack.style_approach || pack.example_objectives) && (
+        <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg, marginBottom: S.lg }}>
+          <div style={{ fontSize: 12, fontWeight: 800, color: C.brandInk, letterSpacing: 0.4, textTransform: "uppercase", marginBottom: S.md }}>About this pack</div>
+          <div className="pm-about-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: S.md }}>
+            {pack.purpose && <AboutItem label="Purpose" value={pack.purpose} />}
+            {pack.focus_areas && <AboutItem label="Focus areas" value={pack.focus_areas} />}
+            {pack.style_approach && <AboutItem label="Style & approach" value={pack.style_approach} />}
+            {pack.example_objectives && <AboutItem label="Example objectives" value={pack.example_objectives} />}
+          </div>
+        </div>
+      )}
+
       {sel.size > 0 ? (
         <div style={{ display: "flex", alignItems: "center", gap: S.md, marginBottom: S.md + 2, background: C.brandSoft, borderRadius: R.md, padding: `${S.sm + 2}px ${S.md + 2}px`, flexWrap: "wrap" }}>
           <span style={{ fontSize: 13.5, fontWeight: 700, color: C.brandInk }}>{sel.size} selected</span>
@@ -3540,6 +3611,13 @@ const useDebounced = (value, ms) => {
   useEffect(() => { const t = setTimeout(() => setV(value), ms); return () => clearTimeout(t); }, [value, ms]);
   return v;
 };
+
+const AboutItem = ({ label, value }) => (
+  <div style={{ background: C.bg, borderRadius: R.md, padding: "11px 13px" }}>
+    <div style={{ fontSize: 10.5, fontWeight: 800, color: C.faint, letterSpacing: 0.3, textTransform: "uppercase", marginBottom: 3 }}>{label}</div>
+    <div style={{ fontSize: 13.5, color: C.ink2, lineHeight: 1.5 }}>{value}</div>
+  </div>
+);
 
 // ===== shell.jsx =====
 // ============================================================
@@ -3972,6 +4050,7 @@ function GlobalStyle() {
       .pm-search{ width:100%; order:-1; flex-basis:100%; }
       .pm-grow{ flex-basis:100%; height:0; }
       .pm-qrow-sentence{ font-size:16px; }
+      .pm-about-grid{ grid-template-columns:1fr !important; }
       .pm-modal-backdrop{ align-items:flex-end; padding:0; }
       .pm-modal-card{ max-width:100% !important; border-radius:20px 20px 0 0; max-height:94vh; overflow-y:auto; animation:pm-sheet .22s ease-out; }
       @keyframes pm-sheet{ from{ transform:translateY(100%);} to{ transform:translateY(0);} }
