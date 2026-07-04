@@ -1405,6 +1405,7 @@ function BulkImport({ packId, onDone, onClose }) {
         return arr.map(o => ({
           template: o.template || "", answer: (o.answer || "").toUpperCase(),
           alt_answer: (o.alt_answer || o.alt || "").toUpperCase(),
+          frame_slots: (o.frame_slots && typeof o.frame_slots === "object") ? o.frame_slots : null,
           ok: (o.template || "").includes("{blank}") && !!o.answer,
         }));
       } catch { return [{ template: "Invalid JSON", answer: "", alt_answer: "", ok: false }]; }
@@ -1421,7 +1422,7 @@ function BulkImport({ packId, onDone, onClose }) {
     if (!valid.length) { setErr("Nothing valid to import yet."); return; }
     setBusy(true); setErr("");
     try {
-      await onDone(valid.map((v, i) => ({ pack_id: packId, template: v.template, answer: v.answer, alt_answer: v.alt_answer, difficulty: "basic", letters_hidden: 2, status: "active", sort_order: 100 + i })));
+      await onDone(valid.map((v, i) => ({ pack_id: packId, template: v.template, answer: v.answer, alt_answer: v.alt_answer, difficulty: "basic", letters_hidden: 2, status: "active", sort_order: 100 + i, ...(v.frame_slots ? { frame_slots: v.frame_slots } : {}) })));
       onClose();
     } catch (e) { setErr(e.message); setBusy(false); }
   };
@@ -2563,6 +2564,7 @@ all cross-file components are \`function\` declarations so they hoist):
     firebase2.jsx   FirebaseTargetEditor, CloudFnDocs
     publish2.jsx    PublishHub, ChannelsPanel, SyncHistory, FeedRow
     devnotes.jsx    Developer Notes page + embedded docs (this file)
+    generator.jsx   Content Generator (AI prompt builder): GeneratorView, buildGeneratorPrompt, OUTPUT_FORMATS
     views1.jsx      Dashboard, Library, PackCard
     views2.jsx      PackDetail, AllQuestions, Pager
     shell.jsx       Login, ChangePassword, CloneDialog, App (nav/routing/state), GlobalStyle
@@ -2722,6 +2724,17 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Content Generator page (prompt builder):** a new "Generator" nav page (generator.jsx,
+  GeneratorView) that assembles a ready-to-paste AI prompt for authoring a batch of questions
+  in our format. Controls: pack picker (pre-fills themes from the pack's focus_areas/purpose,
+  all editable), a multi-select of target levels (chips), a themes field, a count, an
+  output-format picker (JSON import-ready / pipe / markdown table — chosen each time), an
+  optional "include frame-word variations" toggle (teaches the AI the {token} pool + byLevel
+  system), and an extra-instructions field. The generated prompt teaches the CBMT philosophy,
+  the {blank}-target + both-positive-words rules, level context, and the exact output shape
+  with a concrete example; it live-updates and has a copy button. Also: the Bulk importer now
+  carries frame_slots from imported JSON (was dropping it), so the generate → import loop works
+  end-to-end for frame-word questions. Prompt output verified valid + importable.
 - **Export now carries the target word + frame structure explicitly (self-describing):**
   each per-level variant gained a \`target\` object (word, altWord, blankShape, wholeWord,
   lettersHidden, position, grouping) so the game never parses the sentence to find the guess
@@ -3101,6 +3114,17 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    whole word (e.g. "…things get {hard}" → difficult/stressful/challenging across levels). The
    question editor auto-detects {tokens} and offers a pool editor + per-level pin grid. Keep
    the resolver byte-identical between the client engine and the game-feed edge function.
+16. **Content Generator (AI prompt builder):** a page that assembles a ready-to-paste prompt
+   for an external AI tool to author a batch of questions in the app's format. The user picks a
+   pack (which pre-fills themes from the pack's focus/purpose, all editable), selects which
+   levels to target, describes themes, sets a count, chooses the output format each time (an
+   import-ready JSON, a simple pipe format, or a review table), and optionally toggles
+   frame-word instructions on. The generated prompt must teach the CBMT philosophy, the
+   {blank}-target rule, the both-words-positive rule, the chosen level context, the frame-word
+   {token} system (when toggled), and end with the exact output shape plus a concrete example.
+   It live-updates as controls change and offers one-click copy. The bulk importer must accept
+   the same JSON shape (including frame_slots) so the generate → paste-into-AI → import loop is
+   closed.
 
 ## UX / cross-cutting
 - Dark mode (light/dark/system, persisted, CSS variables). Command palette (⌘/Ctrl-K):
@@ -3553,6 +3577,264 @@ function QuestionLevelEditor({ question, variant, onSave, onClose }) {
         <Btn onClick={submit} disabled={busy}>{busy ? "Saving…" : "Save this level"}</Btn>
       </ModalFoot>
     </>
+  );
+}
+
+// ===== generator.jsx =====
+// ============================================================
+// Content Generator — builds a ready-to-paste AI prompt for creating
+// a batch of questions in our exact format, based on the selected
+// pack, levels, themes, output format, and options.
+// ============================================================
+
+const miniLink = { background: "none", border: "none", padding: "2px 4px", cursor: "pointer", color: C.brandInk, fontSize: 12, fontWeight: 700 };
+
+// Output-format templates. Each returns the instruction text + a concrete example
+// so the AI knows precisely what to emit. Import-ready formats mirror BulkImport.
+const OUTPUT_FORMATS = {
+  json: {
+    label: "JSON (import-ready)",
+    hint: "A JSON array — paste straight into Bulk import.",
+    instruct: (withFrames) => withFrames
+      ? `Return ONLY a JSON array (no prose, no markdown fences). Each item:
+{
+  "template": "sentence with {blank} for the guess word, and optional {token} words to vary",
+  "answer": "PRIMARYWORD",
+  "alt_answer": "SECONDWORD",
+  "frame_slots": {
+    "token": { "pool": ["word1","word2","word3"], "byLevel": { "7": "word1", "8": "word2" } }
+  }
+}
+Omit "frame_slots" for questions with no swappable words.`
+      : `Return ONLY a JSON array (no prose, no markdown fences). Each item:
+{ "template": "sentence with {blank} where the guess word goes", "answer": "PRIMARYWORD", "alt_answer": "SECONDWORD" }`,
+    example: (withFrames) => withFrames
+      ? `[
+  {
+    "template": "I stay {blank} even when things are {hard}.",
+    "answer": "CALM",
+    "alt_answer": "CENTERED",
+    "frame_slots": { "hard": { "pool": ["hard","difficult","stressful","challenging"], "byLevel": { "7":"difficult","8":"stressful","9":"challenging" } } }
+  },
+  { "template": "I am {blank} when I try new things.", "answer": "BRAVE", "alt_answer": "BOLD" }
+]`
+      : `[
+  { "template": "I am {blank} when I try new things.", "answer": "BRAVE", "alt_answer": "BOLD" },
+  { "template": "Being {blank} helps me make friends.", "answer": "KIND", "alt_answer": "CARING" }
+]`,
+  },
+  pipe: {
+    label: "Pipe (simple)",
+    hint: "One line each: sentence | ANSWER | ALT. Easiest to read; import-ready.",
+    instruct: () => `Return ONLY plain lines, one question per line, in this exact shape:
+Sentence with {blank} | PRIMARYWORD | SECONDWORD
+No numbering, no bullet points, no extra prose.`,
+    example: () => `I am {blank} when I try new things. | BRAVE | BOLD
+Being {blank} helps me make friends. | KIND | CARING
+It feels good to be {blank} to others. | HELPFUL | HONEST`,
+  },
+  table: {
+    label: "Table (review-friendly)",
+    hint: "A markdown table you can eyeball before converting.",
+    instruct: () => `Return ONLY a markdown table with columns: Sentence | Primary word | Second word.
+The Sentence must contain {blank} where the guess word goes.`,
+    example: () => `| Sentence | Primary word | Second word |
+|---|---|---|
+| I am {blank} when I try new things. | BRAVE | BOLD |
+| Being {blank} helps me make friends. | KIND | CARING |`,
+  },
+};
+
+// The core: assemble the full prompt from the chosen options.
+function buildGeneratorPrompt({ pack, levels, selectedLevels, themes, count, format, withFrames, extraNotes }) {
+  const fmt = OUTPUT_FORMATS[format] || OUTPUT_FORMATS.json;
+  const levelDefs = (levels || []).filter(l => selectedLevels.includes(l.level)).sort((a, b) => a.level - b.level);
+
+  const lines = [];
+  lines.push(`You are helping author content for "Positive Minds", a Cognitive Bias Modification Therapy (CBMT) word game for children roughly aged 5–12.`);
+  lines.push("");
+  lines.push(`THE GAME MECHANIC: each question is a short, affirming sentence with one missing word. The child fills in the blank by choosing between TWO words — and BOTH words are positive. There is never a "wrong feeling" option; the child always affirms something good about themselves. The missing word is written as {blank} in the sentence.`);
+  lines.push("");
+
+  // Pack context
+  lines.push(`PACK: ${pack?.name || "(unspecified)"}`);
+  if (pack?.emoji) lines.push(`Theme emoji: ${pack.emoji}`);
+  if (themes?.trim()) lines.push(`Focus / themes to cover: ${themes.trim()}`);
+  if (pack?.purpose) lines.push(`Pack purpose: ${pack.purpose}`);
+  if (pack?.style_approach) lines.push(`Tone & approach: ${pack.style_approach}`);
+  lines.push("");
+
+  // Level guidance
+  if (levelDefs.length) {
+    lines.push(`TARGET LEVELS: write questions suitable across these developmental levels:`);
+    for (const l of levelDefs) {
+      const bits = [`Level ${l.level}${l.name ? ` (${l.name})` : ""}`];
+      if (l.theme) bits.push(l.theme);
+      if (l.age_hint) bits.push(`ages ${l.age_hint}`);
+      lines.push(`- ${bits.join(" — ")}`);
+    }
+    lines.push(`The same affirmation works across levels; the game itself controls how much of the word is hidden per level, so you do NOT need to vary the blank difficulty — just write good, level-appropriate sentences and words.`);
+    lines.push("");
+  }
+
+  // Rules
+  lines.push(`RULES (important):`);
+  lines.push(`1. Every sentence must contain exactly one {blank}.`);
+  lines.push(`2. Provide TWO answer words. Both must be genuinely positive, age-appropriate, and both must fit the sentence naturally. They should be near-synonyms or equally-valid positive choices (e.g. BRAVE / BOLD, KIND / CARING).`);
+  lines.push(`3. Answer words are single words, UPPERCASE, no punctuation. Prefer common words a child would know; keep them short enough to spell.`);
+  lines.push(`4. Sentences are warm, simple, first-person ("I am…", "I feel…", "Being…"), and self-affirming.`);
+  lines.push(`5. Avoid anything scary, negative, clinical, or that references the child doing something wrong.`);
+  lines.push(`6. No duplicates; vary the sentence structure.`);
+
+  if (withFrames) {
+    lines.push("");
+    lines.push(`FRAME WORDS (optional variation): besides {blank}, a sentence may include other words in braces, like {hard}, that are NOT guessed but can be swapped for variety. For any such word, provide a "frame_slots" entry: a "pool" of positive-appropriate alternatives, and optionally a "byLevel" map pinning a specific alternative to specific levels (useful so higher levels feel more advanced). Example: "…when things are {hard}" with pool ["hard","difficult","stressful","challenging"]. Only add frame words where they genuinely add value; most questions won't need them.`);
+  }
+
+  if (extraNotes?.trim()) {
+    lines.push("");
+    lines.push(`ADDITIONAL INSTRUCTIONS: ${extraNotes.trim()}`);
+  }
+
+  lines.push("");
+  lines.push(`HOW MANY: produce ${count} questions.`);
+  lines.push("");
+  lines.push(`OUTPUT FORMAT:`);
+  lines.push(fmt.instruct(withFrames));
+  lines.push("");
+  lines.push(`EXAMPLE OF THE EXACT OUTPUT SHAPE:`);
+  lines.push(fmt.example(withFrames));
+
+  return lines.join("\n");
+}
+
+function GeneratorView({ packs, levels }) {
+  const realLevels = (levels && levels.length) ? levels : Array.from({ length: 10 }, (_, i) => ({ level: i + 1, name: "" }));
+  const [packId, setPackId] = useState("");
+  const pack = (packs || []).find(p => p.id === packId) || null;
+
+  const [selectedLevels, setSelectedLevels] = useState([]);
+  const [themes, setThemes] = useState("");
+  const [count, setCount] = useState(15);
+  const [format, setFormat] = useState("json");
+  const [withFrames, setWithFrames] = useState(false);
+  const [extraNotes, setExtraNotes] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  // When a pack is chosen, pre-fill themes from its focus areas (editable).
+  const applyPack = (id) => {
+    setPackId(id);
+    const p = (packs || []).find(x => x.id === id);
+    if (p) {
+      setThemes(p.focus_areas || p.purpose || "");
+      // Default the level selection to the pack's own level if nothing chosen yet.
+      if (selectedLevels.length === 0 && p.level) setSelectedLevels([p.level]);
+    }
+  };
+
+  const toggleLevel = (lvl) => setSelectedLevels(s => s.includes(lvl) ? s.filter(x => x !== lvl) : [...s, lvl].sort((a, b) => a - b));
+  const allLevels = () => setSelectedLevels(realLevels.map(l => l.level));
+  const noLevels = () => setSelectedLevels([]);
+
+  const prompt = useMemo(
+    () => buildGeneratorPrompt({ pack, levels: realLevels, selectedLevels, themes, count, format, withFrames, extraNotes }),
+    [pack, realLevels, selectedLevels, themes, count, format, withFrames, extraNotes]
+  );
+
+  const copyPrompt = async () => {
+    try { await navigator.clipboard.writeText(prompt); setCopied(true); setTimeout(() => setCopied(false), 1800); notify("Prompt copied"); }
+    catch { notify("Couldn't copy — select and copy manually", { kind: "error" }); }
+  };
+
+  return (
+    <div>
+      <div style={{ marginBottom: S.lg }}>
+        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Content generator</h1>
+        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5, lineHeight: 1.5, maxWidth: 640 }}>
+          Build a ready-to-paste prompt for an AI tool. Pick a pack, choose levels and themes, and copy the prompt — the AI returns a batch of questions in a format you can bulk-import.
+        </p>
+      </div>
+
+      <div className="pm-gen-grid" style={{ display: "grid", gridTemplateColumns: "minmax(320px, 420px) 1fr", gap: S.lg, alignItems: "start" }}>
+        {/* Controls */}
+        <div style={{ display: "grid", gap: S.lg }}>
+          <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg, display: "grid", gap: S.md }}>
+            <Field label="Pack" hint="Pre-fills themes and context from the pack">
+              <Select value={packId} onChange={(e) => applyPack(e.target.value)}>
+                <option value="">Choose a pack…</option>
+                {(packs || []).map(p => <option key={p.id} value={p.id}>{p.emoji ? p.emoji + " " : ""}{p.name}</option>)}
+              </Select>
+            </Field>
+
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7 }}>
+                <span style={{ fontSize: 12.5, fontWeight: 700, color: C.ink2 }}>Levels to target</span>
+                <div style={{ flex: 1 }} />
+                <button type="button" onClick={allLevels} style={miniLink}>All</button>
+                <button type="button" onClick={noLevels} style={miniLink}>None</button>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {realLevels.map(l => {
+                  const on = selectedLevels.includes(l.level);
+                  return (
+                    <button key={l.level} type="button" onClick={() => toggleLevel(l.level)} title={l.name || `Level ${l.level}`}
+                      style={{ padding: "5px 11px", borderRadius: R.pill, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                        border: "1px solid " + (on ? (l.color || C.brand) : C.line),
+                        background: on ? (l.color || C.brand) + "1E" : "transparent",
+                        color: on ? (l.color || C.brandInk) : C.sub }}>
+                      L{l.level}
+                    </button>
+                  );
+                })}
+              </div>
+              {selectedLevels.length === 0 && <div style={{ fontSize: 12, color: C.faint, marginTop: 6 }}>No levels selected — the prompt will target the pack generally.</div>}
+            </div>
+
+            <Field label="Themes / focus" hint="What these questions should be about — edit freely">
+              <Textarea value={themes} onChange={(e) => setThemes(e.target.value)} rows={2} placeholder="e.g. self-worth, trying new things, personal strengths" />
+            </Field>
+
+            <div className="pm-form-2">
+              <Field label="How many">
+                <Input type="number" min={1} max={100} value={count} onChange={(e) => setCount(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))} />
+              </Field>
+              <Field label="Output format" hint={OUTPUT_FORMATS[format]?.hint}>
+                <Select value={format} onChange={(e) => setFormat(e.target.value)}>
+                  {Object.entries(OUTPUT_FORMATS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                </Select>
+              </Field>
+            </div>
+
+            <label style={{ display: "flex", alignItems: "flex-start", gap: 9, cursor: "pointer" }}>
+              <input type="checkbox" checked={withFrames} onChange={(e) => setWithFrames(e.target.checked)} style={{ width: 16, height: 16, accentColor: C.brand, marginTop: 2 }} />
+              <span style={{ fontSize: 13.5, color: C.ink, fontWeight: 600 }}>Include frame-word variations
+                <div style={{ fontSize: 12, color: C.sub, fontWeight: 500, marginTop: 1 }}>Teach the AI the swappable {"{token}"} system so higher levels can differ.</div>
+              </span>
+            </label>
+
+            <Field label="Extra instructions" hint="Optional — anything specific to add to the prompt">
+              <Textarea value={extraNotes} onChange={(e) => setExtraNotes(e.target.value)} rows={2} placeholder="e.g. avoid words with silent letters; keep answers under 6 letters" />
+            </Field>
+          </div>
+        </div>
+
+        {/* Prompt output */}
+        <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, overflow: "hidden", position: "sticky", top: S.lg }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: `${S.md}px ${S.lg}px`, borderBottom: "1px solid " + C.line }}>
+            <span style={{ fontSize: 13, fontWeight: 800, color: C.ink }}>Generated prompt</span>
+            <span style={{ fontSize: 12, color: C.faint }}>{prompt.length.toLocaleString()} chars</span>
+            <div style={{ flex: 1 }} />
+            <Btn size="sm" onClick={copyPrompt} icon={copied ? "✓" : "⧉"}>{copied ? "Copied" : "Copy"}</Btn>
+          </div>
+          <Textarea readOnly value={prompt} rows={22}
+            onFocus={(e) => e.target.select()}
+            style={{ border: "none", borderRadius: 0, fontFamily: "ui-monospace, monospace", fontSize: 12.5, lineHeight: 1.55, resize: "vertical", background: C.bg }} />
+          <div style={{ padding: `${S.sm + 2}px ${S.lg}px`, borderTop: "1px solid " + C.line, fontSize: 12.5, color: C.sub, lineHeight: 1.5 }}>
+            Paste this into your AI tool, then bring the result back via <b>a pack → Import</b>{format === "table" ? " (convert the table to pipe/JSON first)" : ""}.
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -4143,6 +4425,7 @@ const NAV = [
   { id: "dashboard", label: "Overview", icon: "◈" },
   { id: "library", label: "Packs", icon: "▦" },
   { id: "questions", label: "Questions", icon: "⌕" },
+  { id: "generator", label: "Generator", icon: "✦" },
   { id: "levels", label: "Levels", icon: "▲" },
   { id: "health", label: "Health", icon: "◉" },
   { id: "publish", label: "Publishing", icon: "⇧" },
@@ -4277,6 +4560,7 @@ function App() {
       { id: "nav-dashboard", label: "Go to Overview", icon: "◈", section: "Go", keywords: ["home", "dashboard"], run: () => goNav("dashboard") },
       { id: "nav-library", label: "Go to Packs", icon: "▦", section: "Go", keywords: ["library", "packs"], run: () => goNav("library") },
       { id: "nav-questions", label: "Search all questions", icon: "⌕", section: "Go", keywords: ["find", "questions"], run: () => goNav("questions") },
+      { id: "nav-generator", label: "Go to Content generator", icon: "✦", section: "Go", keywords: ["generate", "prompt", "ai", "create", "batch"], run: () => goNav("generator") },
       { id: "nav-health", label: "Go to Content health", icon: "◉", section: "Go", keywords: ["lint", "issues", "duplicates"], run: () => goNav("health") },
       { id: "nav-publish", label: "Go to Publishing", icon: "⇧", section: "Go", keywords: ["sync", "export", "profile", "feed", "game"], run: () => goNav("publish") },
       { id: "nav-activity", label: "Go to Activity log", icon: "≡", section: "Go", keywords: ["history", "changes"], run: () => goNav("activity") },
@@ -4402,6 +4686,8 @@ function App() {
             <AllQuestions onOpenPack={openPackById} levels={levels} />
           ) : nav === "levels" ? (
             <LevelsView />
+          ) : nav === "generator" ? (
+            <GeneratorView packs={packs} levels={levels} />
           ) : nav === "health" ? (
             <HealthView onOpenPack={openPackById} />
           ) : nav === "publish" ? (
@@ -4518,6 +4804,7 @@ function GlobalStyle() {
       .pm-grow{ flex-basis:100%; height:0; }
       .pm-qrow-sentence{ font-size:16px; }
       .pm-about-grid{ grid-template-columns:1fr !important; }
+      .pm-gen-grid{ grid-template-columns:1fr !important; }
       .pm-modal-backdrop{ align-items:flex-end; padding:0; }
       .pm-modal-card{ max-width:100% !important; border-radius:20px 20px 0 0; max-height:94vh; overflow-y:auto; animation:pm-sheet .22s ease-out; }
       @keyframes pm-sheet{ from{ transform:translateY(100%);} to{ transform:translateY(0);} }
