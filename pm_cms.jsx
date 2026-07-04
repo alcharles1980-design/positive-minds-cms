@@ -612,6 +612,33 @@ const projectRow = (row, fields, vm) => {
   return out;
 };
 
+// Convert a built output object/array into pretty XML. Keys become tags;
+// arrays repeat a singularized item tag; primitives become text nodes.
+const XML_ESC = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const singular = (k) => k === "levels" ? "levelVariant" : k.endsWith("ies") ? k.slice(0, -3) + "y" : k.endsWith("s") ? k.slice(0, -1) : k;
+const safeTag = (k) => /^[a-zA-Z_][\w.-]*$/.test(k) ? k : "item";
+const toXmlNode = (key, val, indent) => {
+  const pad = "  ".repeat(indent);
+  const tag = safeTag(key);
+  if (val === null || val === undefined) return `${pad}<${tag}/>`;
+  if (Array.isArray(val)) {
+    const item = singular(tag);
+    if (val.length === 0) return `${pad}<${tag}/>`;
+    return `${pad}<${tag}>\n` + val.map(v => toXmlNode(item, v, indent + 1)).join("\n") + `\n${pad}</${tag}>`;
+  }
+  if (typeof val === "object") {
+    const inner = Object.entries(val).map(([k, v]) => toXmlNode(k, v, indent + 1)).join("\n");
+    return `${pad}<${tag}>\n${inner}\n${pad}</${tag}>`;
+  }
+  return `${pad}<${tag}>${XML_ESC(val)}</${tag}>`;
+};
+const toXml = (obj, rootTag = "gameContent") => {
+  const body = Array.isArray(obj)
+    ? obj.map(v => toXmlNode("item", v, 1)).join("\n")
+    : Object.entries(obj).map(([k, v]) => toXmlNode(k, v, 1)).join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<${rootTag}>\n${body}\n</${rootTag}>`;
+};
+
 // packs: array; byPack: { [packId or slug]: questions[] }; keyField tells which key byPack uses
 const buildOutput = (spec, packs, byPack, keyField = "id") => {
   const vm = spec.value_maps || {};
@@ -1891,19 +1918,21 @@ function PublishHub({ packs, onSynced }) {
   };
 
   // Build + download a file through a profile
-  const exportFile = async (profile) => {
+  const exportFile = async (profile, format = "json") => {
     setBusyId(profile.id);
     try {
       const content = await fetchAllContent(profile.spec.filters || {}, { expandLevels: !!profile.spec.expand_levels });
       const spec = { ...profile.spec, __name: profile.name };
       const body = buildOutput(spec, content.packs, content.byPack, "id");
       const out = withMeta(spec, body, { packs: content.packs.length, questions: content.questionCount });
-      const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
+      const isXml = format === "xml";
+      const text = isXml ? toXml(out, "gameContent") : JSON.stringify(out, null, 2);
+      const blob = new Blob([text], { type: isXml ? "application/xml" : "application/json" });
       const url = URL.createObjectURL(blob); const a = document.createElement("a");
-      a.href = url; a.download = `game-content-${slugify(profile.name)}-${Date.now()}.json`; a.click(); URL.revokeObjectURL(url);
-      await db_sync.log({ profile_id: profile.id, profile_name: profile.name, channel: "file", mode: "manual", status: "success", pack_count: content.packs.length, question_count: content.questionCount });
-      logActivity("profile", profile.id, profile.name, "import", `exported ${content.packs.length} packs to file`);
-      notify(`Exported ${content.packs.length} packs`);
+      a.href = url; a.download = `game-content-${slugify(profile.name)}-${Date.now()}.${isXml ? "xml" : "json"}`; a.click(); URL.revokeObjectURL(url);
+      await db_sync.log({ profile_id: profile.id, profile_name: profile.name, channel: "file", mode: "manual", status: "success", pack_count: content.packs.length, question_count: content.questionCount, detail: format.toUpperCase() });
+      logActivity("profile", profile.id, profile.name, "import", `exported ${content.packs.length} packs to ${format.toUpperCase()} file`);
+      notify(`Exported ${content.packs.length} packs (${format.toUpperCase()})`);
     } catch (e) { notify("Export failed: " + e.message, { kind: "error" }); }
     finally { setBusyId(null); }
   };
@@ -1978,7 +2007,8 @@ function PublishHub({ packs, onSynced }) {
                       </div>
                       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                         <Btn variant="ghost" size="sm" onClick={() => setEditProfile(p)}>Edit</Btn>
-                        <Btn variant="ghost" size="sm" disabled={busyId === p.id} onClick={() => exportFile(p)} icon="⭱">File</Btn>
+                        <Btn variant="ghost" size="sm" disabled={busyId === p.id} onClick={() => exportFile(p, "json")} icon="⭱">JSON</Btn>
+                        <Btn variant="ghost" size="sm" disabled={busyId === p.id} onClick={() => exportFile(p, "xml")} icon="⭱">XML</Btn>
                         <Btn variant="soft" size="sm" disabled={busyId === p.id} onClick={() => pushToGame(p)} icon="⇧">{busyId === p.id ? "…" : "Push"}</Btn>
                         {!p.is_builtin && <Btn variant="danger" size="sm" onClick={() => deleteProfile(p)}>Delete</Btn>}
                       </div>
@@ -2296,8 +2326,12 @@ a consumer needs. A profile's \`spec\` (jsonb) describes:
 envelope. The engine exists in TWO places that MUST stay in sync: the client (engine.jsx)
 and the \`game-feed\` edge function (server-side mirror).
 
-Three seeded starter profiles: **Firebase (nested)**, **Flat API (question list)**,
-**Unity (keyed dictionary)**.
+Four seeded starter profiles: **Firebase (nested)**, **Flat API (question list)**,
+**Unity (keyed dictionary)** — all now include the real \`effective_level\` — and
+**Full game export (with levels)**, which turns on \`expand_levels\` to emit the complete
+10-level structure per question (the reference profile to point the game at).
+Output is available as JSON or XML: the file download offers both buttons, and the
+game-feed accepts \`?format=xml\` (mirrored toXml on client + edge).
 
 ## 8. Publishing channels
 All emit through a chosen profile:
@@ -2343,6 +2377,13 @@ that network-first caches GETs).
   recreate pm_pack_overview rather than CREATE OR REPLACE.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Export pipeline reviewed for levels + XML added:** the 3 starter profiles were updated
+  to carry the real effective_level (Flat API had mislabeled difficulty as "level"); a new
+  "Full game export (with levels)" starter emits the complete 10-level structure
+  (expand_levels on) — verified via the live feed. Added XML output everywhere: a toXml
+  serializer (client + edge, kept identical), JSON/XML buttons on the file download, and
+  ?format=xml on the game-feed. All four channels (file, feed, push, Firebase) carry level
+  data because they share fetchAllContent(expandLevels) + buildOutput.
 - **Level filters + audit:** the question bank (global search), the in-pack question list,
   and the Library now all have a Level filter (pm_search_questions gained an \`lvl\` param
   matching effective level). Fixed three mislabeled "All levels" dropdowns that were really
