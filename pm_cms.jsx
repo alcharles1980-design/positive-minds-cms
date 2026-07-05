@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.04-19", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.04-20", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -2868,6 +2868,11 @@ config → data layer → design tokens → hooks → primitives → feature vie
 - \`pm_sync_log\` — profile/target/channel/mode/status/counts/detail, created_at.
 - \`pm_sync_targets\` — id, name, channel, profile_id, config (jsonb), enabled.
 - \`pm_dev_notes\` — singleton row (id=1) holding the editable Developer-Notes scratchpad.
+- \`pm_deletions\` — deletion tombstones for incremental sync (a "changed since" query can't see
+  rows that no longer exist). Columns: id, entity_type ('pack'|'question'), entity_id, pack_id,
+  slug, deleted_at. Written ONLY by SECURITY DEFINER before-delete triggers (trg_tombstone_pack,
+  trg_tombstone_question); anon/authenticated may SELECT, nobody may write directly. Consumed by
+  the content-api's \`?since=\` deletions array.
 - \`pm_levels\` — the game's progression structure (levels 1–10, editable): level (PK),
   name, tagline, letters_rule, word_rule, theme, age_hint,
   hidden_mode, letters_hidden_default, letter_position (start/middle/end/random),
@@ -2915,6 +2920,12 @@ was revoked on the admin/write ones, so these are authenticated-only in practice
 - \`pm_log(...)\` — append an activity row.
 - \`pm_mark_released(pack_ids uuid[])\` — set released_version = content_version
   (null = all published) so "pending changes" clears after a sync.
+- \`pm_content_manifest()\` — (SECURITY DEFINER, published-only) the lightweight sync manifest
+  for the content-api: global_version (epoch of newest change across packs/questions/levels +
+  deletions), levels_version, pack_count, question_count, and per-pack version rows. Lets a
+  client check what changed without transferring content.
+- Tombstone triggers \`pm_tombstone_pack\` / \`pm_tombstone_question\` (SECURITY DEFINER,
+  before-delete) write to pm_deletions so incremental sync can report removals.
 
 **RLS model:** anon = READ-ONLY (published/active content, profiles, logs, targets, notes);
 authenticated = full write. Anon write policies were dropped and the lockdown verified.
@@ -2950,6 +2961,27 @@ Four seeded starter profiles: **Firebase (nested)**, **Flat API (question list)*
 10-level structure per question (the reference profile to point the game at).
 Output is available as JSON or XML: the file download offers both buttons, and the
 game-feed accepts \`?format=xml\` (mirrored toXml on client + edge).
+
+## 7b. Sync API for external backends (content-api edge function)
+A dedicated \`content-api\` edge function (separate from game-feed; verify_jwt=false) is the
+full sync API for an external backend (e.g. Firebase) to pull content on demand. One clean,
+well-designed shape (NOT the profile-projection system) plus everything needed to sync efficiently:
+- \`?manifest=1\` — lightweight version manifest: global_version (epoch of the newest change
+  anywhere, incl. deletions), levels_version, per-pack {slug, content_version, active_questions,
+  version}. A client polls this and only pulls content when global_version changed.
+- (default) — full published content: levels (definitions/rules) + packs, each with its questions,
+  each question carrying its 10 rendered level-variations (same engine as game-feed).
+- \`?since=<iso|epoch>\` — INCREMENTAL: only packs that changed (a pack counts as changed if it OR
+  any of its questions changed since the cursor; returns that pack's full current question set for a
+  wholesale replace) PLUS a \`deletions\` array (from pm_deletions) so the client knows what to remove.
+- \`?packs=slug1,slug2\` and \`?levels=1,2,3\` — filter the payload.
+- \`?format=xml\` — XML instead of JSON. \`?health=1\` — liveness.
+- ETag on every response (hash of global_version + the exact query shape); \`If-None-Match\` →
+  304 Not Modified. The match is tolerant of the platform's weak-validator \`W/\` prefix.
+- Optional auth: set the CONTENT_API_KEY secret to require a key (X-API-Key header or ?key=);
+  unset = public. Works both server-to-server and from the client (CORS *).
+Backed by the \`pm_content_manifest()\` RPC (SECURITY DEFINER, published-only) and the pm_deletions
+tombstone table. Source lives in the repo at edge-functions/content-api.ts.
 
 ## 8. Publishing channels
 All emit through a chosen profile:
@@ -3017,6 +3049,20 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **New content-api edge function: a full sync API for external backends (Firebase).** Separate
+  from game-feed; verify_jwt=false. Endpoints: \`?manifest=1\` (version manifest — global +
+  per-pack), default (full published content with levels expanded), \`?since=<iso|epoch>\`
+  (incremental — only changed packs + a deletions array), \`?packs=\`/\`?levels=\` filters,
+  \`?format=xml\`, \`?health=1\`. ETag on every response with \`If-None-Match\`→304 (tolerant of the
+  platform's \`W/\` weak-validator prefix — a bug caught and fixed during testing: our bare ETag
+  was wrapped as W/"..." so the first 304 attempt returned 200). Optional API-key auth via the
+  CONTENT_API_KEY secret (X-API-Key header or ?key=); unset = public. Added the pm_deletions
+  tombstone table + before-delete triggers (so deletions are reportable) and the
+  pm_content_manifest() RPC (global/per-pack versions). Verified live end-to-end: health, manifest
+  (+ETag), full content, 304 on unchanged, incremental since-now returns 0 packs, since-past
+  returns changed + deletions, pack filter returns just that pack, and a create→delete→sync cycle
+  surfaced the tombstone in the deletions array; BRAVE renders BRA_E→_____ identically to the game
+  feed (engine parity preserved across all three consumers). Source: edge-functions/content-api.ts.
 - **Full audit pass (no bugs found; one architectural invariant documented).** Rendered all 20
   components (the single "failure" was a wrong-props test artifact — QuestionLevelEditor takes a
   \`variant\` prop, which its real caller passes correctly). Verified: no duplicate component/const
@@ -3712,6 +3758,22 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
      released_version → "pending changes"; a successful sync calls pm_mark_released to clear it.
    - Sync history log of every file/feed/push.
    - IMPORTANT: mirror the transform engine in the edge function; keep them identical.
+6b. **Sync API for external backends (content-api edge function):** a SEPARATE edge function
+   (verify_jwt off) that is the on-demand sync API for a Firebase-style backend. ONE clean shape
+   (not the profile projection). Endpoints: \`?manifest=1\` (global_version + levels_version +
+   per-pack version rows — a client polls this and only pulls when global_version changed);
+   default (full published content: level definitions + packs with questions, each question's 10
+   variations rendered by the SAME engine); \`?since=<iso|epoch>\` (incremental — packs where the
+   pack OR any question changed since, returning that pack's full current questions for wholesale
+   replace, PLUS a \`deletions\` array); \`?packs=\`/\`?levels=\` filters; \`?format=xml\`; \`?health=1\`.
+   Put an ETag (hash of global_version + query shape) on every response and honour If-None-Match →
+   304 — normalise the weak-validator \`W/\` prefix when comparing (the platform wraps bare ETags).
+   Optional API-key auth via a CONTENT_API_KEY secret (X-API-Key header or ?key=); unset = public;
+   CORS *. Requires: (a) a \`pm_deletions\` tombstone table (entity_type/entity_id/pack_id/slug/
+   deleted_at; anon+authenticated SELECT only) written by SECURITY DEFINER before-delete triggers on
+   pm_packs + pm_questions; (b) a \`pm_content_manifest()\` SECURITY DEFINER RPC (published-only)
+   returning the global/per-pack versions. The rendering engine (maskWord/resolveSlots/
+   resolveFrameMap/buildLevelVariants) MUST stay byte-identical to the client and game-feed.
 7. **Activity log:** every mutation recorded (who/what/when) via pm_log.
 8. **Developer Notes page:** hardcoded architecture doc + CLAUDE.md + this build prompt,
    each viewable with copy + download, plus an editable scratchpad saved to pm_dev_notes.
