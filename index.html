@@ -85,7 +85,7 @@ const {
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.05-02",
+  build: "2026.07.05-03",
   // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
@@ -759,7 +759,14 @@ const resolveFrameMap = (template, frameSlots, level) => {
 const buildLevelVariants = (q, levels, overrides = {}) => {
   return (levels || []).map(lvl => {
     const ov = overrides[lvl.level] || {};
-    const hasOv = Object.keys(ov).filter(k => !["question_id", "level", "updated_at"].includes(k) && ov[k] != null).length > 0;
+    // "Edited" means the override actually changes something. A row that only carries the default
+    // enabled=true (e.g. a derived word-level handle) is a no-op and should NOT read as edited.
+    const hasOv = Object.keys(ov).filter(k => {
+      if (["question_id", "level", "updated_at"].includes(k)) return false;
+      if (ov[k] == null) return false;
+      if (k === "enabled" && ov[k] === true) return false; // default value, not a customization
+      return true;
+    }).length > 0;
     const template = ov.template ?? q.template;
     const answer = ov.answer ?? q.answer;
     const alt = ov.alt_answer ?? q.alt_answer;
@@ -6613,6 +6620,14 @@ was revoked on the admin/write ones, so these are authenticated-only in practice
   re-entering the live set deletes the stale tombstone so a resync doesn't both add and remove
   it. Without these, unpublishing/deactivating would be invisible to sync (the manifest's
   global_version is computed only over published/active rows).
+- Level-delete cleanup trigger \`pm_level_delete_cleanup\` (SECURITY DEFINER, BEFORE DELETE on
+  pm_levels): there is no FK from pm_questions.level / pm_question_levels.level to pm_levels
+  (level is a plain int), so deleting a level could leave a pinned question or an override row
+  pointing at a level that no longer exists (a stale effective_level pointer — not content loss,
+  since the engine renders every EXISTING level for every question regardless of the pinned level).
+  The trigger un-pins such questions (sets level = null → they fall back to the pack default) and
+  deletes override rows at the removed level, atomically. Verified under load (removing a level
+  with 11 derived override rows cleaned all of them).
 
 **RLS model:** anon = READ-ONLY (published/active content, profiles, logs, targets, notes);
 authenticated = full write. Anon write policies were dropped and the lockdown verified.
@@ -6737,6 +6752,30 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Audit pass over the expandable-levels work — four real bugs fixed, three improvements, all
+  verified live.** (1) DANGLING LEVEL REFS: deleting a level left pm_questions.level and
+  pm_question_levels rows pointing at a gone level (there's no FK — level is a plain int), leaving a
+  stale effective_level pointer. Fixed with a SECURITY DEFINER BEFORE DELETE trigger
+  pm_level_delete_cleanup that un-pins affected questions (→ null → pack default) and drops override
+  rows at that level; verified it cleaned 11 derived override rows when a test level was removed.
+  (2) DERIVE URL OVERFLOW: db_qlevels.overridesForPackLevel put every question id in one in.(...)
+  URL — a large pack would exceed URL-length limits. Now chunked at 150 ids/request (the upsert was
+  already chunked at 200). (3) DERIVE FROZE WORD-LEVEL LETTER COUNT: for a whole-word level, derive
+  pinned letters_hidden = answer.length, which would silently stop being whole-word if the word was
+  later edited (pm_question_levels has no hidden_mode column). Fixed: word-level derived rows leave
+  letters_hidden/position/grouping null (the level already forces whole-word); only letters-level
+  derives pin concrete values. (4) ADD-LEVEL AT CEILING: the "Add level" button wasn't disabled at
+  100, so clicking would try to create 101 and hit a raw CHECK error — now disabled with a tooltip.
+  Improvements: (5) LevelsView fetched its own levels copy separate from the shell's realtime-backed
+  shared state (a staleness gap where another device's level edit wouldn't refresh this page); it now
+  uses the shared levels + reload passed from the shell, so all views share one source of truth.
+  (6) Added a friendly client-side min<=max word-length guard before the DB CHECK. (7) Refined the
+  CMS "edited" flag (hasOv) so a no-op enabled-only override row (e.g. a word-level derive handle)
+  no longer reads as edited. Confirmed clean: maskWord parity client↔edge still byte-identical (720
+  cases, 0 mismatches); a real letters-mode Level 11 derived across the confidence pack rendered
+  B___E / P_T_E_T / S_R__G etc. through the live feed, then cleaned up; RLS still enforced; grant
+  posture clean (new triggers are inert, only pm_content_manifest is callable and anon can't); prod
+  left pristine (10 levels, 11 questions, 0 overrides, 0 tombstones).
 - **Expandable levels: add new levels above the current top with their own rules, generate/derive
   questions for them, and have them flow through publish/export/both feeds automatically.** Schema:
   raised the level CHECK from 1..20 to 1..100 on pm_levels, pm_questions, and pm_question_levels;
@@ -7283,6 +7322,9 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    enough for that level to render everywhere; NEVER infer a level's mode/difficulty from its NUMBER
    (no "level>=N ⇒ whole word" shortcuts anywhere, including preview fallbacks) — always read the
    level row. The game client must handle however many levels the feed reports, not assume 10.
+   Because level is a plain int (no FK to pm_levels), deleting a level MUST clean up references via
+   the pm_level_delete_cleanup BEFORE DELETE trigger (un-pin questions → null, drop override rows at
+   that level); never remove that trigger or you leave stale effective_level pointers.
 5. **View column order.** pm_pack_overview uses \`p.*\`. Adding a column to pm_packs shifts
    positions and CREATE OR REPLACE VIEW will error — DROP and recreate the view instead.
 6. **Auth/session.** Access tokens expire ~1hr. rest()/rpc() auto-refresh + retry once on
@@ -7557,7 +7599,20 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    in-band yet differ in length so only one fits). DERIVING for existing content: a "Derive level"
    pack action materializes editable pm_question_levels rows for a chosen level across all active
    questions (apply that level's masking rule to each word; skip-or-overwrite existing rows; chunk
-   the upserts), for when concrete per-question rows are wanted to hand-tune.
+   BOTH the existence-check query — ids in in.(...) at ~150/request to stay under URL limits — AND
+   the upserts at ~200/request), for when concrete per-question rows are wanted to hand-tune. IMPORTANT
+   derive nuance: pm_question_levels has NO hidden_mode column, so for a WORD-mode level leave
+   letters_hidden/position/grouping null (the level already forces whole-word; pinning a number would
+   freeze to the word's current length and break if the word is later edited); only for a LETTERS-mode
+   level pin the computed letters_hidden/position/grouping. DELETING a level: there is no FK from
+   pm_questions.level / pm_question_levels.level to pm_levels, so a BEFORE DELETE trigger on pm_levels
+   MUST un-pin questions at that level (set level = null) and delete override rows at that level, or
+   you leave a stale effective_level pointer. Guard the delete UI so only the highest level is
+   removable and disable the "Add level" control at the 100 ceiling. STATE: the Levels page must use
+   the app's shared levels state (the same realtime-backed source the pack/generator views use) rather
+   than its own fetch, so an edit on one device refreshes every view consistently. Validate min<=max
+   word length client-side before the DB CHECK. The CMS "edited" indicator must treat a lone
+   enabled=true override as a no-op (not edited).
 10. **Blank-shape control:** each level (and per-question override) also controls WHERE the
    missing letters sit (letter_position: start/middle/end/random) and whether multiple hidden
    letters are grouped or spread (letter_grouping). A single maskWord(word, letters, position,
@@ -7972,10 +8027,16 @@ const db_qlevels = {
     method: "DELETE"
   }),
   // Which questions in a pack already have an override row at this level (so derive can skip them).
-  overridesForPackLevel: (questionIds, level) => {
-    if (!questionIds.length) return Promise.resolve([]);
-    const list = questionIds.join(",");
-    return rest(`pm_question_levels?level=eq.${level}&question_id=in.(${list})&select=question_id&limit=10000`).then(r => r.data || []);
+  // Chunk the id list so a large pack doesn't blow past URL-length limits.
+  overridesForPackLevel: async (questionIds, level) => {
+    const out = [];
+    for (let i = 0; i < questionIds.length; i += 150) {
+      const list = questionIds.slice(i, i + 150).join(",");
+      if (!list) continue;
+      const r = await rest(`pm_question_levels?level=eq.${level}&question_id=in.(${list})&select=question_id&limit=10000`);
+      out.push(...(r.data || []));
+    }
+    return out;
   }
 };
 
@@ -8020,20 +8081,26 @@ function LevelChip({
 // ============================================================
 // Levels management page
 // ============================================================
-function LevelsView() {
-  const {
-    loading,
-    error,
-    data,
-    reload
-  } = useAsync(() => db_levels.list(), []);
+function LevelsView({
+  levels: levelsProp,
+  reload: reloadProp
+}) {
+  // Prefer the shell's shared levels state (kept fresh via the pm_levels realtime subscription) so
+  // this page never diverges from what PackDetail/Generator see. Fall back to a local fetch only if
+  // rendered standalone without props. (useAsync always runs its fn, so when props are supplied the
+  // fn returns them directly instead of hitting the network.)
+  const usingShared = Array.isArray(levelsProp);
+  const local = useAsync(() => usingShared ? Promise.resolve(levelsProp) : db_levels.list(), [usingShared]);
+  const loading = usingShared ? false : local.loading;
+  const error = usingShared ? null : local.error;
+  const levels = usingShared ? levelsProp : local.data || [];
+  const reload = usingShared ? reloadProp || (() => {}) : local.reload;
   const [edit, setEdit] = useState(null); // an existing level being edited
   const [creating, setCreating] = useState(null); // a new (unsaved) level draft
   if (error) return /*#__PURE__*/React.createElement(ErrorState, {
     error: error,
     onRetry: reload
   });
-  const levels = data || [];
   const topLevel = levels.length ? Math.max(...levels.map(l => l.level)) : 0;
   const nextLevel = topLevel + 1;
   const save = async (level, patch) => {
@@ -8122,7 +8189,9 @@ function LevelsView() {
       fontSize: 14.5
     }
   }, "The game's progression structure. Each level defines how words are hidden, which words to use, and its theme. Add levels above the current top to extend the ladder.")), /*#__PURE__*/React.createElement(Btn, {
-    onClick: startCreate
+    onClick: startCreate,
+    disabled: nextLevel > 100,
+    title: nextLevel > 100 ? "Maximum of 100 levels reached" : ""
   }, "+ Add level ", nextLevel <= 100 ? nextLevel : "")), /*#__PURE__*/React.createElement("div", {
     style: {
       background: C.brandSoft,
@@ -8406,6 +8475,13 @@ function LevelEditor({
   const submit = async () => {
     setBusy(true);
     try {
+      const minV = f.min_word_len === "" || f.min_word_len == null ? null : parseInt(f.min_word_len);
+      const maxV = f.max_word_len === "" || f.max_word_len == null ? null : parseInt(f.max_word_len);
+      if (minV != null && maxV != null && minV > maxV) {
+        setBusy(false);
+        notify("Min word length can't be greater than max word length.", "error");
+        return;
+      }
       await onSave(level.level, {
         name: f.name,
         tagline: f.tagline,
@@ -8418,8 +8494,8 @@ function LevelEditor({
         letter_position: f.letter_position,
         letter_grouping: f.letter_grouping,
         color: f.color,
-        min_word_len: f.min_word_len === "" || f.min_word_len == null ? null : parseInt(f.min_word_len),
-        max_word_len: f.max_word_len === "" || f.max_word_len == null ? null : parseInt(f.max_word_len),
+        min_word_len: minV,
+        max_word_len: maxV,
         allow_multiword: !!f.allow_multiword,
         vocab_rule: f.vocab_rule || "",
         ...(isNew ? {
@@ -9019,20 +9095,23 @@ function DeriveLevelDialog({
         skipIds = new Set(existing.map(r => r.question_id));
       }
       const targets = activeQs.filter(q => !skipIds.has(q.id));
-      // Build override rows: pin the computed letters/position/grouping so the row is concrete
-      // and editable, but leave template/answer/alt null so they still inherit the concept.
+      const isWordLevel = lvlDef.hidden_mode === "word";
+      // Build override rows. For a LETTERS level we pin the computed letter count/position/grouping
+      // so the row is concrete and editable. For a WORD level we intentionally leave letters_hidden
+      // null (the level already forces whole-word); pinning a fixed number would freeze to the
+      // word's current length and silently break if the word is later edited. template/answer/alt
+      // stay null so the concept's own text still flows through.
       const rows = targets.map(q => {
         const v = buildLevelVariants(q, [lvlDef], {})[0];
-        const whole = v?.target?.wholeWord;
         return {
           question_id: q.id,
           level: targetLevel,
           template: null,
           answer: null,
           alt_answer: null,
-          letters_hidden: whole ? (q.answer || "").length : v?.letters ?? lvlDef.letters_hidden_default ?? 1,
-          letter_position: lvlDef.letter_position || null,
-          letter_grouping: lvlDef.letter_grouping || null,
+          letters_hidden: isWordLevel ? null : v?.letters ?? lvlDef.letters_hidden_default ?? 1,
+          letter_position: isWordLevel ? null : lvlDef.letter_position || null,
+          letter_grouping: isWordLevel ? null : lvlDef.letter_grouping || null,
           enabled: true
         };
       });
@@ -12865,7 +12944,10 @@ function App() {
     onOpenPack: openPackById,
     levels: levels,
     packs: packs
-  }) : nav === "levels" ? /*#__PURE__*/React.createElement(LevelsView, null) : nav === "generator" ? /*#__PURE__*/React.createElement(GeneratorView, {
+  }) : nav === "levels" ? /*#__PURE__*/React.createElement(LevelsView, {
+    levels: levels,
+    reload: levelsState.reload
+  }) : nav === "generator" ? /*#__PURE__*/React.createElement(GeneratorView, {
     packs: packs,
     levels: levels
   }) : nav === "health" ? /*#__PURE__*/React.createElement(HealthView, {
