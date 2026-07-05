@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.05-03", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.05-04", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -1516,7 +1516,7 @@ function sanitizeFrameSlots(fs) {
   return Object.keys(out).length ? out : null;
 }
 
-function BulkImport({ packId, onDone, onClose }) {
+function BulkImport({ packId, onDone, onClose, levels, packLevel }) {
   const [raw, setRaw] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -1524,6 +1524,21 @@ function BulkImport({ packId, onDone, onClose }) {
   const [loadingExisting, setLoadingExisting] = useState(true);
   const [skipIds, setSkipIds] = useState(() => new Set()); // row indices the user chose to skip
   const [userTouched, setUserTouched] = useState(() => new Set()); // rows the user manually toggled
+
+  // Vocabulary guidance from the pack's level (imported questions inherit the pack level). Purely
+  // advisory — a word outside the band gets a soft warning, never blocks import.
+  const levelDef = useMemo(() => (levels || []).find(l => l.level === (packLevel ?? 1)) || null, [levels, packLevel]);
+  const bandCheck = (word) => {
+    if (!levelDef) return null;
+    const w = (word || "").replace(/\s+/g, "");
+    const len = w.length;
+    if (!len) return null;
+    const wordCount = (word || "").trim().split(/\s+/).filter(Boolean).length;
+    if (levelDef.min_word_len && len < levelDef.min_word_len) return `shorter than L${levelDef.level}'s ${levelDef.min_word_len}-letter minimum`;
+    if (levelDef.max_word_len && len > levelDef.max_word_len) return `longer than L${levelDef.level}'s ${levelDef.max_word_len}-letter maximum`;
+    if (wordCount > 1 && !levelDef.allow_multiword) return `L${levelDef.level} doesn't allow multi-word answers`;
+    return null;
+  };
 
   // Load the pack's existing questions so we can flag duplicates.
   useEffect(() => {
@@ -1584,9 +1599,9 @@ function BulkImport({ packId, onDone, onClose }) {
       let dup = "none";
       if (exactExisting || inBatchDup) dup = "exact";
       else if (sentenceHits.length || answerHits.length) dup = "near";
-      return { ...r, dup, dupInfo: dup === "exact" ? (inBatchDup ? "duplicate within this batch" : "already in this pack") : (sentenceHits.length ? "same sentence exists" : "answer word already used") };
+      return { ...r, dup, bandWarn: bandCheck(r.answer), dupInfo: dup === "exact" ? (inBatchDup ? "duplicate within this batch" : "already in this pack") : (sentenceHits.length ? "same sentence exists" : "answer word already used") };
     });
-  }, [raw, existingIndex]);
+  }, [raw, existingIndex, levelDef]);
 
   // Default skip: exact duplicates are skipped unless the user un-skips them.
   useEffect(() => {
@@ -1624,6 +1639,9 @@ function BulkImport({ packId, onDone, onClose }) {
         <div style={{ fontSize: 12.5, color: C.sub, background: C.lineSoft, padding: "8px 12px", borderRadius: R.sm, lineHeight: 1.5 }}>
           <b>Pipe:</b> <code>Sentence with {"{blank}"} | ANSWER | ALT</code><br />
           <b>JSON:</b> <code>{'[{"template":"…{blank}…","answer":"BRAVE","alt_answer":"BOLD"}]'}</code>
+          {levelDef && (levelDef.min_word_len || levelDef.max_word_len || levelDef.allow_multiword) && (
+            <><br /><span style={{ color: C.faint }}>Pack level {levelDef.level} suggests {levelDef.min_word_len && levelDef.max_word_len ? `${levelDef.min_word_len}–${levelDef.max_word_len}-letter` : levelDef.min_word_len ? `${levelDef.min_word_len}+ letter` : levelDef.max_word_len ? `≤${levelDef.max_word_len}-letter` : ""} words{levelDef.allow_multiword ? ", multi-word ok" : ""}. Out-of-range words get a soft “Length” flag (still importable).</span></>
+          )}
         </div>
         <Textarea value={raw} onChange={(e) => setRaw(e.target.value)} rows={7} autoFocus placeholder={"I am {blank} when I try something new. | BRAVE | BOLD\nBeing {blank} helps me make friends. | KIND | CARING"} style={{ fontFamily: "ui-monospace, monospace", fontSize: 13 }} />
         {raw.trim() && (
@@ -1644,6 +1662,7 @@ function BulkImport({ packId, onDone, onClose }) {
                   <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textDecoration: skipped ? "line-through" : "none" }}>{p.template.replace(/\{blank\}/g, "___").replace(/\{([a-zA-Z][\w-]*)\}/g, "$1") || <em>empty</em>}</span>
                   {p.ok && <span style={{ color: C.brandInk, fontWeight: 700, fontSize: 12 }}>{[p.answer, p.alt_answer].filter(Boolean).join(" / ")}</span>}
                   {ds && <span title={p.dupInfo} style={{ color: ds.fg, fontWeight: 700, fontSize: 11, padding: "1px 7px", borderRadius: R.pill, border: "1px solid " + ds.fg + "66", whiteSpace: "nowrap" }}>{ds.label}</span>}
+                  {p.ok && p.bandWarn && <span title={p.bandWarn} style={{ color: C.warn, fontWeight: 700, fontSize: 11, padding: "1px 7px", borderRadius: R.pill, border: "1px solid " + C.warn + "66", whiteSpace: "nowrap" }}>Length</span>}
                   {p.ok && p.dup !== "none" && (
                     <button type="button" onClick={() => toggleSkip(i)} style={{ background: "none", border: "1px solid " + C.line, borderRadius: R.sm, padding: "2px 8px", fontSize: 11, fontWeight: 700, cursor: "pointer", color: C.sub, whiteSpace: "nowrap" }}>
                       {skipped ? "Keep" : "Skip"}
@@ -2949,13 +2968,16 @@ was revoked on the admin/write ones, so these are authenticated-only in practice
   it. Without these, unpublishing/deactivating would be invisible to sync (the manifest's
   global_version is computed only over published/active rows).
 - Level-delete cleanup trigger \`pm_level_delete_cleanup\` (SECURITY DEFINER, BEFORE DELETE on
-  pm_levels): there is no FK from pm_questions.level / pm_question_levels.level to pm_levels
-  (level is a plain int), so deleting a level could leave a pinned question or an override row
-  pointing at a level that no longer exists (a stale effective_level pointer — not content loss,
-  since the engine renders every EXISTING level for every question regardless of the pinned level).
-  The trigger un-pins such questions (sets level = null → they fall back to the pack default) and
-  deletes override rows at the removed level, atomically. Verified under load (removing a level
-  with 11 derived override rows cleaned all of them).
+  pm_levels): there is no FK from pm_packs.level / pm_questions.level / pm_question_levels.level to
+  pm_levels (level is a plain int), so deleting a level could leave references pointing at a level
+  that no longer exists (a stale pointer — not content loss, since the engine renders every EXISTING
+  level for every question regardless of the pinned level). The trigger fixes ALL THREE reference
+  types atomically: PACKS pinned to the removed level are reset to the highest REMAINING level (a
+  pack's level is its questions' fallback and can't be null; since the UI only deletes the highest
+  level, this drops affected packs to the next-highest); QUESTIONS pinned to it are un-pinned (level
+  = null → they inherit the pack default); OVERRIDE rows at that level are deleted. Verified under
+  load (a test level with a pinned pack + pinned question + override → pack reset to next level,
+  question nulled, override removed).
 
 **RLS model:** anon = READ-ONLY (published/active content, profiles, logs, targets, notes);
 authenticated = full write. Anon write policies were dropped and the lockdown verified.
@@ -3080,6 +3102,24 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Deeper audit pass — one real gap fixed, one enhancement added.** GAP (fixed): the
+  pm_level_delete_cleanup trigger handled questions and override rows pinned to a deleted level, but
+  NOT packs — a pack pinned to the deleted level was left as a stale pointer (a pack's level can't be
+  null, it's the question fallback). Extended the trigger to also reset such packs to the highest
+  REMAINING level (verified: a test level with a pinned pack + pinned question + override → pack
+  reset to the next level, question nulled, override dropped, all atomically). ENHANCEMENT: Bulk
+  import now surfaces the pack level's vocabulary rules — imported answer words outside the level's
+  length band (or multi-word when the level disallows it) get a soft “Length” flag and a guidance
+  line, so the new per-level vocab rules are actionable at import time. It's advisory only (never
+  blocks import; imported questions still inherit the pack level). Band-check logic unit-tested (7/7:
+  too-short / in-range / too-long / multiword-not-allowed / multiword-allowed / empty / no-level).
+  Also confirmed clean this pass: game-feed's buildLevelVariants is level-count-agnostic like
+  content-api (maps over all pm_levels rows, no hardcoded 10) and its masking logic is identical to
+  content-api's (the only intentional difference is the output field shape — game-feed emits opts as
+  a joined string, content-api emits options as an array); levels are consistently ordered by
+  level.asc everywhere; PlayMode renders a chip per real level (no 10-cap); no pack/question is
+  currently mis-pinned to a nonexistent level; RLS + grant posture unchanged. Prod left pristine (10
+  levels, 14 packs, 11 questions, 0 overrides, 0 tombstones).
 - **Audit pass over the expandable-levels work — four real bugs fixed, three improvements, all
   verified live.** (1) DANGLING LEVEL REFS: deleting a level left pm_questions.level and
   pm_question_levels rows pointing at a gone level (there's no FK — level is a plain int), leaving a
@@ -3437,7 +3477,10 @@ that network-first caches GETs).
     normalized sentence + same answer, punctuation-insensitive; also catches repeats within the
     pasted batch) and SIMILAR (same sentence OR same answer word). Exact defaults to skip,
     similar defaults to keep-but-flagged; every flagged row has a per-row Skip/Keep toggle, and
-    only kept rows import. All verified against real pack data.
+    only kept rows import. It also soft-flags answer words that fall outside the PACK LEVEL's
+    vocabulary rules (length band / multi-word) with a “Length” badge + a guidance line — advisory
+    only, never blocks import (imported questions inherit the pack level). All verified against real
+    pack data.
 - **Content Generator page (prompt builder):** a new "Generator" nav page (generator.jsx,
   GeneratorView) that assembles a ready-to-paste AI prompt for authoring a batch of questions
   in our format. Controls: pack picker (pre-fills themes from the pack's focus_areas/purpose,
@@ -3651,9 +3694,10 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    enough for that level to render everywhere; NEVER infer a level's mode/difficulty from its NUMBER
    (no "level>=N ⇒ whole word" shortcuts anywhere, including preview fallbacks) — always read the
    level row. The game client must handle however many levels the feed reports, not assume 10.
-   Because level is a plain int (no FK to pm_levels), deleting a level MUST clean up references via
-   the pm_level_delete_cleanup BEFORE DELETE trigger (un-pin questions → null, drop override rows at
-   that level); never remove that trigger or you leave stale effective_level pointers.
+   Because level is a plain int (no FK to pm_levels), deleting a level MUST clean up ALL references
+   via the pm_level_delete_cleanup BEFORE DELETE trigger: reset pinned PACKS to the highest remaining
+   level (a pack's level can't be null), un-pin QUESTIONS (→ null), drop OVERRIDE rows at that level.
+   Never remove or narrow that trigger or you leave stale pointers.
 5. **View column order.** pm_pack_overview uses \`p.*\`. Adding a column to pm_packs shifts
    positions and CREATE OR REPLACE VIEW will error — DROP and recreate the view instead.
 6. **Auth/session.** Access tokens expire ~1hr. rest()/rpc() auto-refresh + retry once on
@@ -3935,13 +3979,15 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    letters_hidden/position/grouping null (the level already forces whole-word; pinning a number would
    freeze to the word's current length and break if the word is later edited); only for a LETTERS-mode
    level pin the computed letters_hidden/position/grouping. DELETING a level: there is no FK from
-   pm_questions.level / pm_question_levels.level to pm_levels, so a BEFORE DELETE trigger on pm_levels
-   MUST un-pin questions at that level (set level = null) and delete override rows at that level, or
-   you leave a stale effective_level pointer. Guard the delete UI so only the highest level is
-   removable and disable the "Add level" control at the 100 ceiling. STATE: the Levels page must use
-   the app's shared levels state (the same realtime-backed source the pack/generator views use) rather
-   than its own fetch, so an edit on one device refreshes every view consistently. Validate min<=max
-   word length client-side before the DB CHECK. The CMS "edited" indicator must treat a lone
+   pm_packs.level / pm_questions.level / pm_question_levels.level to pm_levels, so a BEFORE DELETE
+   trigger on pm_levels MUST fix ALL THREE: reset PACKS pinned to the level to the highest REMAINING
+   level (a pack's level can't be null — it's the question fallback), un-pin QUESTIONS at that level
+   (set level = null), and delete OVERRIDE rows at that level, or you leave stale pointers. Guard the
+   delete UI so only the highest level is removable and disable the "Add level" control at the 100
+   ceiling. STATE: the Levels page must use the app's shared levels state (the same realtime-backed
+   source the pack/generator views use) rather than its own fetch, so an edit on one device refreshes
+   every view consistently. Validate min<=max word length client-side before the DB CHECK. The CMS
+   "edited" indicator must treat a lone
    enabled=true override as a no-op (not edited).
 10. **Blank-shape control:** each level (and per-question override) also controls WHERE the
    missing letters sit (letter_position: start/middle/end/random) and whether multiple hidden
@@ -5566,7 +5612,7 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
         {qEdit !== null && <QuestionEditor question={qEdit.id ? qEdit : null} packId={pack.id} packLevel={pack.level} levels={levels} onSave={saveQ} onClose={() => setQEdit(null)} />}
       </Modal>
       <Modal open={bulk} onClose={() => setBulk(false)} labelledBy="pm-imp-title">
-        {bulk && <BulkImport packId={pack.id} onDone={importQ} onClose={() => setBulk(false)} />}
+        {bulk && <BulkImport packId={pack.id} levels={levels} packLevel={pack.level} onDone={importQ} onClose={() => setBulk(false)} />}
       </Modal>
       <Modal open={derive} onClose={() => setDerive(false)} width={560}>
         {derive && (
