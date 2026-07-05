@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.04-7", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.04-8", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -1338,15 +1338,8 @@ function QuestionEditor({ question, packId, packLevel, levels, onSave, onClose }
     // Only persist slots whose token still appears in the template.
     const cleanedSlots = {};
     for (const t of frameTokens) if (f.frame_slots[t]) cleanedSlots[t] = f.frame_slots[t];
-    // Derive legacy difficulty/letters_hidden from the question's base level so filters, pack
-    // pills and exports stay coherent — these are no longer edited directly (the level drives
-    // how much is hidden). difficulty mirrors whether the base level hides the whole word;
-    // letters_hidden mirrors its default (0 when the level hides the whole word).
-    const baseDef = levelList.find(l => l.level === baseLevel) || {};
-    const derivedDifficulty = baseDef.hidden_mode === "word" ? "advanced" : "basic";
-    const derivedLetters = baseDef.hidden_mode === "word" ? 0 : (baseDef.letters_hidden_default ?? 2);
     try {
-      await onSave({ ...f, frame_slots: cleanedSlots, pack_id: packId, difficulty: derivedDifficulty, letters_hidden: derivedLetters,
+      await onSave({ ...f, frame_slots: cleanedSlots, pack_id: packId,
         answer: f.answer.toUpperCase().trim(), alt_answer: f.alt_answer.toUpperCase().trim() }, question?.id);
       onClose();
     }
@@ -1579,8 +1572,8 @@ function BulkImport({ packId, onDone, onClose }) {
     if (!toImport.length) { setErr("Nothing selected to import."); return; }
     setBusy(true); setErr("");
     try {
-      // Imported questions inherit the pack's level (level=null) and let difficulty/letters_hidden
-      // fall to their DB defaults — the level system drives rendering, not these legacy fields.
+      // Imported questions inherit the pack's level (level=null). The level system drives
+      // rendering — there are no per-question difficulty/letters fields.
       await onDone(toImport.map((v, i) => ({ pack_id: packId, template: v.template, answer: v.answer, alt_answer: v.alt_answer, status: "active", sort_order: 100 + i, ...(v.frame_slots ? { frame_slots: v.frame_slots } : {}) })));
       onClose();
     } catch (e) { setErr(e.message); setBusy(false); }
@@ -1827,7 +1820,7 @@ function PlayMode({ pack, levels, onClose }) {
                     : <div style={{ marginTop: 20, fontSize: 16, fontWeight: 800, color: C.danger }}>Not quite — the answer is {correctAnswer}.</div>
                 )}
               </div>
-              <div style={{ fontSize: 12.5, color: C.faint, marginTop: 16 }}>Tip: both words are positive, but only the primary word is the correct fill for this sentence.</div>
+              <div style={{ fontSize: 12.5, color: C.faint, marginTop: 16 }}>Tip: both words are positive — the correct one is the word whose spelling fits the revealed letters.</div>
             </div>
           )}
       </div>
@@ -2839,9 +2832,9 @@ config → data layer → design tokens → hooks → primitives → feature vie
 - \`pm_questions\` — id, pack_id (FK cascade), template (with \`{blank}\` for the target, plus
   optional \`{token}\` frame-word slots), answer, alt_answer, status (active/inactive),
   sort_order, notes, level (nullable = inherit pack), letter_position, letter_grouping,
-  frame_slots (jsonb: per-token {pool, byLevel}), timestamps. (letters_hidden + difficulty
-  columns still exist but are DERIVED-LEGACY — auto-set from the level on save, not authored;
-  rendering ignores them and reads the level.)
+  frame_slots (jsonb: per-token {pool, byLevel}), timestamps. (There are NO per-question
+  difficulty or letters_hidden columns — the old derived-legacy ones were dropped; rendering
+  is driven entirely by the level + any pm_question_levels overrides.)
 - \`pm_activity\` — audit log: entity, entity_id, entity_name, action, actor, detail, created_at.
 - \`pm_export_profiles\` — id, name, description, spec (jsonb transform config), is_builtin.
 - \`pm_sync_log\` — profile/target/channel/mode/status/counts/detail, created_at.
@@ -2988,6 +2981,22 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Leftover cleanup pass (full app sweep for old-model remnants):**
+  · Dropped the two dead per-question columns \`pm_questions.difficulty\` and
+    \`pm_questions.letters_hidden\` — they were written on every save/clone and returned by the
+    search RPC, but NOTHING read them (rendering is driven by the level + pm_question_levels
+    overrides). Removed the derive-and-save code in the question editor, took them out of
+    \`pm_search_questions\`' return signature, and stopped \`pm_clone_pack\` from copying them.
+    (The pack-level \`difficulty\` tag and the live \`pm_question_levels.letters_hidden\` OVERRIDE are
+    unaffected — those stay.)
+  · Fixed a latent clone bug found on the way: \`pm_clone_pack\` wasn't copying \`frame_slots\`, so a
+    cloned pack lost its frame-word slots — now copied.
+  · Play-mode tip reworded from the old "only the primary word is the correct fill for this
+    sentence" (meaning framing) to the spelling framing ("the correct one is the word whose
+    spelling fits the revealed letters").
+  Verified: all affected components (QuestionEditor, PackEditor, BulkImport, PackDetail,
+  AllQuestions, PlayMode) render; search RPC still returns rows; columns confirmed dropped.
+  Remaining "difficulty" in the codebase is all legit pack-level difficulty or general help text.
 - **Overview: dropped the "Levels in use / of 10" box — it was measuring the wrong thing.** It
   counted the distinct DEFAULT levels questions are assigned to, but every question renders at ALL
   10 levels (that's the point of the level system), so "2 of 10" wrongly implied only 2 levels'
