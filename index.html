@@ -85,7 +85,7 @@ const {
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.04-20",
+  build: "2026.07.05-01",
   // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
@@ -6542,9 +6542,11 @@ config → data layer → design tokens → hooks → primitives → feature vie
 - \`pm_dev_notes\` — singleton row (id=1) holding the editable Developer-Notes scratchpad.
 - \`pm_deletions\` — deletion tombstones for incremental sync (a "changed since" query can't see
   rows that no longer exist). Columns: id, entity_type ('pack'|'question'), entity_id, pack_id,
-  slug, deleted_at. Written ONLY by SECURITY DEFINER before-delete triggers (trg_tombstone_pack,
-  trg_tombstone_question); anon/authenticated may SELECT, nobody may write directly. Consumed by
-  the content-api's \`?since=\` deletions array.
+  slug, deleted_at. Written ONLY by SECURITY DEFINER triggers — trg_tombstone_pack/
+  trg_tombstone_question (before DELETE) AND trg_pack_status_tombstone/
+  trg_question_status_tombstone (after status change: leaving published/active writes a
+  tombstone, re-entering clears it). anon/authenticated may SELECT, nobody may write directly.
+  Consumed by the content-api's \`?since=\` deletions array.
 - \`pm_levels\` — the game's progression structure (levels 1–10, editable): level (PK),
   name, tagline, letters_rule, word_rule, theme, age_hint,
   hidden_mode, letters_hidden_default, letter_position (start/middle/end/random),
@@ -6597,7 +6599,13 @@ was revoked on the admin/write ones, so these are authenticated-only in practice
   deletions), levels_version, pack_count, question_count, and per-pack version rows. Lets a
   client check what changed without transferring content.
 - Tombstone triggers \`pm_tombstone_pack\` / \`pm_tombstone_question\` (SECURITY DEFINER,
-  before-delete) write to pm_deletions so incremental sync can report removals.
+  before-delete) write to pm_deletions so incremental sync can report removals. Companion
+  status-transition triggers \`pm_pack_status_tombstone\` / \`pm_question_status_tombstone\`
+  (SECURITY DEFINER, after UPDATE OF status) handle the softer case: a pack leaving 'published'
+  (or a question leaving 'active') writes a tombstone AND advances global_version, while
+  re-entering the live set deletes the stale tombstone so a resync doesn't both add and remove
+  it. Without these, unpublishing/deactivating would be invisible to sync (the manifest's
+  global_version is computed only over published/active rows).
 
 **RLS model:** anon = READ-ONLY (published/active content, profiles, logs, targets, notes);
 authenticated = full write. Anon write policies were dropped and the lockdown verified.
@@ -6721,6 +6729,29 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Full pre-production audit of the content-api + sync layer; one real bug found and fixed.**
+  BUG: unpublishing a pack (published→draft/archived) or deactivating a question (active→inactive)
+  was invisible to sync — no tombstone was written (those triggers only fired on hard DELETE), and
+  the manifest computes global_version only over published/active rows, so the change could fail to
+  advance global_version. A client would keep serving now-unpublished content and never learn to
+  remove it. FIX: added SECURITY DEFINER after-UPDATE-OF-status triggers
+  (pm_pack_status_tombstone / pm_question_status_tombstone) — leaving the live set writes a
+  tombstone (which advances global_version via max(deleted_at) and shows up in ?since deletions);
+  re-entering the live set deletes the stale tombstone so a resync doesn't both add and remove the
+  item. Verified live: unpublish→global_version advanced + tombstone appeared; republish→
+  global_version advanced again + tombstone cleared; original state restored. Everything else
+  audited clean: incremental ?since boundary is safe (int cursor floors to before the change, so the
+  boundary row is re-sent, never missed); deactivation is covered because a question edit cascades
+  to bump the pack's updated_at (verified); RLS empirically enforced (anon cannot read drafts, anon
+  INSERT into pm_deletions returns 401 RLS violation, content-api hides drafts); grant posture clean
+  (only inert trigger fns are anon-executable, every callable RPC incl. pm_content_manifest is
+  authenticated-only); route==menu parity intact (9 nav ids, activity is fallthrough); the 1000-row
+  PostgREST cap is handled by restAll pagination; the assemble 'jsxDEV present' warning is the known
+  false alarm (only doc-string text, zero real jsxDEV imports/calls; output uses React.createElement);
+  all 12 major components render headless. NOTE: pg_net misreports XML Content-Type as text/plain,
+  but game-feed (long in production, identical xmlResp) reports the same via pg_net, so this is a
+  test-harness artifact, not an API bug — the code sets application/xml. NOTE: pm_deletions grows
+  unbounded (pg_cron unavailable on this project to auto-prune); harmless at CMS mutation rates.
 - **New content-api edge function: a full sync API for external backends (Firebase).** Separate
   from game-feed; verify_jwt=false. Endpoints: \`?manifest=1\` (version manifest — global +
   per-pack), default (full published content with levels expanded), \`?since=<iso|epoch>\`
@@ -7440,9 +7471,13 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    304 — normalise the weak-validator \`W/\` prefix when comparing (the platform wraps bare ETags).
    Optional API-key auth via a CONTENT_API_KEY secret (X-API-Key header or ?key=); unset = public;
    CORS *. Requires: (a) a \`pm_deletions\` tombstone table (entity_type/entity_id/pack_id/slug/
-   deleted_at; anon+authenticated SELECT only) written by SECURITY DEFINER before-delete triggers on
-   pm_packs + pm_questions; (b) a \`pm_content_manifest()\` SECURITY DEFINER RPC (published-only)
-   returning the global/per-pack versions. The rendering engine (maskWord/resolveSlots/
+   deleted_at; anon+authenticated SELECT only) written by SECURITY DEFINER triggers — before-DELETE
+   on pm_packs + pm_questions AND after-UPDATE-OF-status (a pack leaving 'published' / question
+   leaving 'active' writes a tombstone + bumps global_version; re-entering clears its tombstone).
+   This status-transition path is REQUIRED: global_version is computed only over published/active
+   rows, so without it an unpublish/deactivate would never reach a synced client. (b) a
+   \`pm_content_manifest()\` SECURITY DEFINER RPC (published-only) returning the global/per-pack
+   versions. The rendering engine (maskWord/resolveSlots/
    resolveFrameMap/buildLevelVariants) MUST stay byte-identical to the client and game-feed.
 7. **Activity log:** every mutation recorded (who/what/when) via pm_log.
 8. **Developer Notes page:** hardcoded architecture doc + CLAUDE.md + this build prompt,
