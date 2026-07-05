@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.04-16", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.04-17", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -3017,6 +3017,12 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Questions page: added a PACK filter (the one filter it was missing).** The global Questions
+  page could filter by text, level, status, when-added, and sort — but not by pack, which made no
+  sense for finding a specific pack's questions. Added an "All packs" dropdown (every pack,
+  alphabetised, with emoji) wired to the search RPC's existing \`pack\` param — so no backend change
+  was needed, just the frontend control + passing the packs list into AllQuestions. Verified the
+  RPC discriminates (an empty pack returns 0, Confidence returns 11).
 - **Levels page: the rules for each level are now legible at a glance (+ live preview).** The
   cards previously showed only the free-text rule prose; now each card also shows a plain-English
   summary of the ACTUAL mechanical rule (derived from hidden_mode/letters_hidden_default/
@@ -3647,10 +3653,11 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    pack at one chosen level (forcing every question to that level's blank difficulty) or "each own
    level" (default); changing it restarts the run.
 4. **All questions:** server-side global search across every pack, paginated, click-through
-   to the source pack. Filters: text, status, level, and WHEN-ADDED (created_at) — presets
-   (last 24h / 7d / 30d) or a custom date range — plus a sort (newest first / oldest first /
-   group by pack). Each row shows a compact relative "added" stamp (e.g. "3h ago", "2w ago",
-   or a date), full timestamp on hover.
+   to the source pack. Filters: text, PACK (a dropdown of every pack, alphabetised, "All packs"
+   default → the \`pack\` param on the search RPC), status, level, and WHEN-ADDED (created_at) —
+   presets (last 24h / 7d / 30d) or a custom date range — plus a sort (newest first / oldest
+   first / group by pack). Each row shows a compact relative "added" stamp (e.g. "3h ago",
+   "2w ago", or a date), full timestamp on hover.
 5. **Content health:** lint flags invalid templates (no {blank}), missing 2nd option,
    duplicates, thin packs (1–2 questions); links to fix.
 6. **Publishing pipeline — the core differentiator:**
@@ -5073,10 +5080,11 @@ const Pager = ({ page, pages, onPage }) => (
 // ============================================================
 // All questions — global search across every pack (server-side)
 // ============================================================
-function AllQuestions({ onOpenPack, levels }) {
+function AllQuestions({ onOpenPack, levels, packs }) {
   const [q, setQ] = useState("");
   const [stat, setStat] = useState("all");
   const [lvl, setLvl] = useState("all");
+  const [packF, setPackF] = useState("all"); // pack id or "all"
   const [datePreset, setDatePreset] = useState("all"); // all | 24h | 7d | 30d | custom
   const [fromDate, setFromDate] = useState(""); // yyyy-mm-dd (custom range)
   const [toDate, setToDate] = useState("");
@@ -5104,12 +5112,12 @@ function AllQuestions({ onOpenPack, levels }) {
   const load = useCallback(async () => {
     setErr("");
     try {
-      const r = await db.searchQuestions({ q: debounced, pack: null, stat: stat === "all" ? null : stat, lvl: lvl === "all" ? null : parseInt(lvl), lim: CFG.pageSize, off: page * CFG.pageSize, from_date: dateWindow.from, to_date: dateWindow.to, sort: sort === "pack" ? null : sort });
+      const r = await db.searchQuestions({ q: debounced, pack: packF === "all" ? null : packF, stat: stat === "all" ? null : stat, lvl: lvl === "all" ? null : parseInt(lvl), lim: CFG.pageSize, off: page * CFG.pageSize, from_date: dateWindow.from, to_date: dateWindow.to, sort: sort === "pack" ? null : sort });
       setRows(r || []); setTotal(r?.[0]?.total_count ? Number(r[0].total_count) : 0);
     } catch (e) { setErr(e.message); }
-  }, [debounced, stat, lvl, page, dateWindow, sort]);
+  }, [debounced, stat, lvl, packF, page, dateWindow, sort]);
   useEffect(() => { load(); }, [load]);
-  useEffect(() => { setPage(0); }, [debounced, stat, lvl, dateWindow, sort]);
+  useEffect(() => { setPage(0); }, [debounced, stat, lvl, packF, dateWindow, sort]);
 
   // Live sync: refresh the global search when questions change anywhere.
   useRealtimeRefresh(["pm_questions", "pm_question_levels"], () => load(), [load]);
@@ -5124,6 +5132,12 @@ function AllQuestions({ onOpenPack, levels }) {
       </div>
       <div className="pm-toolbar" style={{ marginBottom: S.lg }}>
         <SearchBox value={q} onChange={setQ} placeholder="Search all questions…" autoFocus />
+        <Select value={packF} onChange={(e) => setPackF(e.target.value)} style={{ minWidth: 160, padding: "8px 12px" }} title="Filter by pack">
+          <option value="all">All packs</option>
+          {[...(packs || [])].sort((a, b) => (a.name || "").localeCompare(b.name || "")).map(p => (
+            <option key={p.id} value={p.id}>{p.emoji ? p.emoji + " " : ""}{p.name}</option>
+          ))}
+        </Select>
         <Select value={lvl} onChange={(e) => setLvl(e.target.value)} style={{ minWidth: 140, padding: "8px 12px" }}>
           <option value="all">All levels</option>
           {(levels && levels.length ? levels : Array.from({ length: 10 }, (_, i) => ({ level: i + 1, name: "" }))).map(l => (
@@ -5586,7 +5600,7 @@ function App() {
               onOpen={goPack} onNew={() => setEditPack({})} onEdit={setEditPack} onExport={exportJSON} onImportFile={onImportFile}
               onDelete={deletePack} onClone={setClonePack} onReorder={reorderPacks} />
           ) : nav === "questions" ? (
-            <AllQuestions onOpenPack={openPackById} levels={levels} />
+            <AllQuestions onOpenPack={openPackById} levels={levels} packs={packs} />
           ) : nav === "levels" ? (
             <LevelsView />
           ) : nav === "generator" ? (
