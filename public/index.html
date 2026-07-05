@@ -85,7 +85,7 @@ const {
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.04-11",
+  build: "2026.07.04-12",
   // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
@@ -364,10 +364,27 @@ const db = {
   }))),
   questions: (packId, {
     page = 0,
-    size = CFG.pageSize
-  } = {}) => rest(`pm_questions?pack_id=eq.${packId}&order=sort_order.asc,created_at.asc`, {
-    range: [page * size, page * size + size - 1]
-  }),
+    size = CFG.pageSize,
+    fromDate = null,
+    toDate = null,
+    level = null,
+    packLevel = null,
+    sort = "order"
+  } = {}) => {
+    let path = `pm_questions?pack_id=eq.${packId}`;
+    if (fromDate) path += `&created_at=gte.${encodeURIComponent(fromDate)}`;
+    if (toDate) path += `&created_at=lt.${encodeURIComponent(toDate)}`;
+    if (level != null) {
+      // A question's effective level = its own level, or the pack's level if null.
+      // So "level X" must include inheritors (level IS NULL) when X equals the pack's level.
+      path += packLevel != null && level === packLevel ? `&or=(level.eq.${level},level.is.null)` : `&level=eq.${level}`;
+    }
+    const order = sort === "recent" ? "created_at.desc" : sort === "oldest" ? "created_at.asc" : "sort_order.asc,created_at.asc";
+    path += `&order=${order}`;
+    return rest(path, {
+      range: [page * size, page * size + size - 1]
+    });
+  },
   // All questions for a pack (paginated past the 1000-row cap) — for the generator avoid-list
   // and import de-duplication. Returns the full array.
   allQuestionsForPack: packId => restAll(`pm_questions?pack_id=eq.${packId}&order=sort_order.asc`),
@@ -6666,6 +6683,15 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Pack-detail filters moved SERVER-SIDE (span the whole pack, not just the loaded page).** The
+  per-pack "when added" / level / sort filters were initially client-side (page-only). db.questions
+  now takes fromDate/toDate/level/packLevel/sort and builds the PostgREST query, so filtering +
+  sorting cover every question in the pack and the count/pagination stay correct. The level filter
+  correctly includes inheritors: when the chosen level equals the pack's own level it uses
+  or=(level.eq.X,level.is.null); otherwise a plain level=eq.X. Verified the exact queries against
+  the live REST endpoint (incl. the or=() syntax → 200 with the right rows). Quick text search
+  stays client-side over the loaded page (a debounced nicety). The global Questions page already
+  did server-side date filtering; the two pages are now consistent.
 - **Pack-detail question bank: same "when added" filter, sort, and timestamps as the global
   Questions page.** The global page got these last change; the per-pack view (PackDetail) was
   missing them. Added a "when added" dropdown (any / 24h / 7d / 30d), a sort dropdown (default
@@ -7195,11 +7221,13 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    difficulty filters; drag-to-reorder; clone (duplicate pack + questions); delete with
    optimistic Undo; JSON import/export that round-trips the FULL model (pack level + purpose/
    focus/style, and per-question level/position/grouping/frame_slots).
-3. **Pack detail:** paginated question bank. Filters: text search, level, WHEN-ADDED
-   (any time / last 24h / 7d / 30d), and a sort (default order / newest first / oldest first);
-   each row shows a level chip, a compact relative "added" stamp (full timestamp on hover), and
-   a per-question "Levels" expander. (These list filters/sort operate on the loaded page, mirroring
-   the existing search/level behavior.) Add/edit questions. The question editor is LEVEL-BASED —
+3. **Pack detail:** paginated question bank. Filters: level, WHEN-ADDED (any / 24h / 7d / 30d),
+   and a sort (default order / newest first / oldest first) — all applied SERVER-SIDE in the
+   question query so they span the whole pack and paginate correctly (the level filter includes
+   inheritors via or=(level.eq.X,level.is.null) when X is the pack's own level). A quick text
+   search stays client-side over the loaded page. Each row shows a level chip, a compact relative
+   "added" stamp (full timestamp on hover), and a per-question "Levels" expander. Add/edit
+   questions. The question editor is LEVEL-BASED —
    it has NO difficulty or letters-hidden controls (those are derived from the level). It offers
    the sentence template, the two positive words, a Level selector (controls letters-vs-whole-
    word), position/grouping overrides that appear only when the previewed level hides letters,
@@ -9857,7 +9885,25 @@ function PackDetail({
   const [lvlF, setLvlF] = useState("all");
   const [datePreset, setDatePreset] = useState("all"); // all | 24h | 7d | 30d
   const [sortBy, setSortBy] = useState("order"); // order | recent | oldest
-
+  const dateWindow = useMemo(() => {
+    const now = Date.now();
+    if (datePreset === "24h") return {
+      from: new Date(now - 864e5).toISOString(),
+      to: null
+    };
+    if (datePreset === "7d") return {
+      from: new Date(now - 7 * 864e5).toISOString(),
+      to: null
+    };
+    if (datePreset === "30d") return {
+      from: new Date(now - 30 * 864e5).toISOString(),
+      to: null
+    };
+    return {
+      from: null,
+      to: null
+    };
+  }, [datePreset]);
   const load = useCallback(async () => {
     setErr("");
     try {
@@ -9865,17 +9911,25 @@ function PackDetail({
         data,
         total
       } = await db.questions(pack.id, {
-        page
+        page,
+        fromDate: dateWindow.from,
+        toDate: dateWindow.to,
+        level: lvlF === "all" ? null : parseInt(lvlF),
+        packLevel: pack.level,
+        sort: sortBy
       });
       setRows(data || []);
       setTotal(total || 0);
     } catch (e) {
       setErr(e.message);
     }
-  }, [pack.id, page]);
+  }, [pack.id, page, dateWindow, lvlF, sortBy]);
   useEffect(() => {
     load();
   }, [load]);
+  useEffect(() => {
+    setPage(0);
+  }, [dateWindow, lvlF, sortBy]);
 
   // Live sync: if another device changes a question in THIS pack (or its per-level
   // overrides), reload the list. Filter to this pack to avoid needless reloads.
@@ -9966,16 +10020,12 @@ function PackDetail({
       });
     }
   };
-  const dateCutoff = datePreset === "24h" ? Date.now() - 864e5 : datePreset === "7d" ? Date.now() - 7 * 864e5 : datePreset === "30d" ? Date.now() - 30 * 864e5 : null;
+
+  // Date filter, level filter, and sort are now applied server-side (in db.questions) so they
+  // span the whole pack and paginate correctly. Only the quick text search stays client-side.
   const shown = (rows || []).filter(q => {
-    if (lvlF !== "all" && (q.level || pack.level) !== parseInt(lvlF)) return false;
     if (search && !`${q.template} ${q.answer} ${q.alt_answer}`.toLowerCase().includes(search.toLowerCase())) return false;
-    if (dateCutoff && (!q.created_at || new Date(q.created_at).getTime() < dateCutoff)) return false;
     return true;
-  }).sort((a, b) => {
-    if (sortBy === "recent") return new Date(b.created_at || 0) - new Date(a.created_at || 0);
-    if (sortBy === "oldest") return new Date(a.created_at || 0) - new Date(b.created_at || 0);
-    return 0; // "order" keeps the server sort_order
   });
   const allSelected = shown.length > 0 && shown.every(q => sel.has(q.id));
   const toggleSel = id => setSel(s => {
