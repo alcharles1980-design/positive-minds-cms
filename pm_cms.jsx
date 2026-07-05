@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.04-10", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.04-11", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -2998,6 +2998,13 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Pack-detail question bank: same "when added" filter, sort, and timestamps as the global
+  Questions page.** The global page got these last change; the per-pack view (PackDetail) was
+  missing them. Added a "when added" dropdown (any / 24h / 7d / 30d), a sort dropdown (default
+  order / newest / oldest), and a relative "added" stamp on every row (full timestamp on hover).
+  db.questions already selects created_at, so no data-layer change was needed. Note: like the
+  existing text/level filters here, these operate client-side on the loaded page (the global
+  Questions page does true server-side date filtering across everything).
 - **Questions page: filter & sort by when a question was added.** pm_questions already had a
   populated created_at (every question is timestamped on insert), so this was purely surfacing +
   filtering it. pm_search_questions gained from_date/to_date (a [from, to) window on created_at)
@@ -3522,8 +3529,11 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    difficulty filters; drag-to-reorder; clone (duplicate pack + questions); delete with
    optimistic Undo; JSON import/export that round-trips the FULL model (pack level + purpose/
    focus/style, and per-question level/position/grouping/frame_slots).
-3. **Pack detail:** paginated question bank (filter by level; each row shows a level chip and
-   a per-question "Levels" expander); add/edit questions. The question editor is LEVEL-BASED —
+3. **Pack detail:** paginated question bank. Filters: text search, level, WHEN-ADDED
+   (any time / last 24h / 7d / 30d), and a sort (default order / newest first / oldest first);
+   each row shows a level chip, a compact relative "added" stamp (full timestamp on hover), and
+   a per-question "Levels" expander. (These list filters/sort operate on the loaded page, mirroring
+   the existing search/level behavior.) Add/edit questions. The question editor is LEVEL-BASED —
    it has NO difficulty or letters-hidden controls (those are derived from the level). It offers
    the sentence template, the two positive words, a Level selector (controls letters-vs-whole-
    word), position/grouping overrides that appear only when the previewed level hides letters,
@@ -4730,6 +4740,8 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
   const toggleExpand = (id) => setExpanded(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const [search, setSearch] = useState("");
   const [lvlF, setLvlF] = useState("all");
+  const [datePreset, setDatePreset] = useState("all"); // all | 24h | 7d | 30d
+  const [sortBy, setSortBy] = useState("order"); // order | recent | oldest
 
   const load = useCallback(async () => {
     setErr("");
@@ -4767,10 +4779,16 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
   };
   const bulkStatus = async (status) => { const ids = [...sel]; try { await db.setQuestionsStatus(ids, status); await afterChange(); notify(`${ids.length} set to ${status}`); } catch (e) { notify("Bulk update failed: " + e.message, { kind: "error" }); } };
 
+  const dateCutoff = datePreset === "24h" ? Date.now() - 864e5 : datePreset === "7d" ? Date.now() - 7 * 864e5 : datePreset === "30d" ? Date.now() - 30 * 864e5 : null;
   const shown = (rows || []).filter(q => {
     if (lvlF !== "all" && (q.level || pack.level) !== parseInt(lvlF)) return false;
     if (search && !`${q.template} ${q.answer} ${q.alt_answer}`.toLowerCase().includes(search.toLowerCase())) return false;
+    if (dateCutoff && (!q.created_at || new Date(q.created_at).getTime() < dateCutoff)) return false;
     return true;
+  }).sort((a, b) => {
+    if (sortBy === "recent") return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+    if (sortBy === "oldest") return new Date(a.created_at || 0) - new Date(b.created_at || 0);
+    return 0; // "order" keeps the server sort_order
   });
   const allSelected = shown.length > 0 && shown.every(q => sel.has(q.id));
   const toggleSel = (id) => setSel(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -4831,6 +4849,17 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
               <option key={l.level} value={l.level}>Level {l.level}{l.name ? ` — ${l.name}` : ""}</option>
             ))}
           </Select>
+          <Select value={datePreset} onChange={(e) => setDatePreset(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }} title="Filter by when the question was added">
+            <option value="all">Any time added</option>
+            <option value="24h">Added last 24h</option>
+            <option value="7d">Added last 7 days</option>
+            <option value="30d">Added last 30 days</option>
+          </Select>
+          <Select value={sortBy} onChange={(e) => setSortBy(e.target.value)} style={{ minWidth: 120, padding: "8px 12px" }} title="Sort order">
+            <option value="order">Default order</option>
+            <option value="recent">Newest first</option>
+            <option value="oldest">Oldest first</option>
+          </Select>
           <Btn variant="soft" size="sm" onClick={() => setBulk(true)} icon="⭳">Import</Btn>
           <Btn size="sm" onClick={() => setQEdit({})} icon="＋">Add</Btn>
         </div>
@@ -4864,6 +4893,7 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
                         <span style={{ transform: isOpen ? "rotate(90deg)" : "none", transition: "transform .15s", fontSize: 10 }}>▶</span>Levels
                       </button>
                       <LevelChip level={q.level || pack.level} levels={levels} size="xs" />
+                      {q.created_at && <span title={`Added ${new Date(q.created_at).toLocaleString()}`} style={{ fontSize: 11, color: C.faint, fontWeight: 600, whiteSpace: "nowrap" }}>{relativeTime(q.created_at)}</span>}
                       <button onClick={() => toggleQ(q)} title="Toggle active" style={{ background: "none", border: "none", cursor: "pointer", padding: 0 }}><Badge kind={q.status} /></button>
                     </div>
                     <div className="pm-qrow-actions">
