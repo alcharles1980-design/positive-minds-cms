@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.04-13", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.04-14", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -2974,7 +2974,13 @@ Questions (AllQuestions global search), Generator (Content Generator — builds 
 AI prompt), Levels (the 10-level progression structure — view/edit each level's rules),
 Health (lint), Publishing (profiles/targets/channels/history), Activity, Developer (three
 embedded docs + editable scratchpad).
-History-based back button (pushState) so browser Back moves within the app.
+URL-HASH ROUTING: the current view is encoded in the URL hash (#/questions, #/levels,
+#/pack/<id>, empty/#/ = dashboard). On load the app reads location.hash to set the initial
+section (so a REFRESH keeps you where you were, and pack URLs are deep-linkable/shareable);
+goNav writes the hash; a hashchange listener keeps state in sync so browser Back/Forward and
+manual hash edits all work. A pack id from the URL is resolved to the open pack once packs
+load (shows the library skeleton in the meantime). The browser tab title also tracks the
+current section/pack (document.title).
 Command palette (⌘/Ctrl-K): fuzzy nav/actions/theme/jump-to-pack.
 
 ## 10. Responsive & PWA
@@ -3011,6 +3017,16 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Fixed: refreshing the page always dumped you back on the dashboard (URL now reflects the
+  view).** nav was plain React state initialised to "dashboard" and never written to the URL, so
+  every reload lost your place. Added URL-hash routing: the current section (and open pack) live in
+  location.hash (#/questions, #/levels, #/pack/<id>, #/ = dashboard). On mount the app parses the
+  hash to seed the initial section; goNav/goPack write the hash; a hashchange listener re-derives
+  state so browser Back/Forward and manual edits work. A pack id from the URL resolves once packs
+  load (library skeleton shows meanwhile), which also makes pack views deep-linkable/shareable.
+  Verified: the App's initial nav state now derives from the hash for every route (#/questions →
+  "questions", etc.). Bonus: document.title now tracks the current section/pack, so browser tabs
+  and history are meaningful. (The old pushState back-button logic was replaced by this.)
 - **Comprehensive audit fixes (two real issues found + fixed):**
   · **Pack header count bug (introduced by the server-side pack filters):** the header showed the
     QUERY total, which is now the FILTERED count — so applying a date/level filter made it read
@@ -3712,7 +3728,9 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
 - Dark mode (light/dark/system, persisted, CSS variables). Command palette (⌘/Ctrl-K):
   fuzzy nav/actions/theme/jump-to-pack. Styled confirm dialogs (no native confirm()).
   Focus trap + Escape on modals, ARIA dialog roles, visible focus rings. Toasts with
-  actions, skeletons, empty/error states. History-based back button.
+  actions, skeletons, empty/error states. URL-HASH ROUTING (encode the current section +
+  open pack in location.hash; read it on load so a refresh restores the view and pack URLs
+  are deep-linkable; a hashchange listener drives Back/Forward). Sync document.title to the view.
 - **Accessibility:** every text color must meet WCAG AA against its background (don't use a
   grey lighter than ~4.5:1 for text). Inputs use the panel background (not hardcoded white,
   which breaks dark mode) with an explicit readable ::placeholder color so search fields are
@@ -5218,8 +5236,20 @@ function App() {
   const bp = useBreakpoint();
   const theme = useTheme();
   const [authed, setAuthed] = useState(() => !!session.load());
-  const [nav, setNav] = useState("dashboard");
-  const [active, setActive] = useState(null);     // open pack
+  // URL-hash routing so a refresh keeps you where you were (e.g. #/questions, #/pack/<id>).
+  const VALID_NAV = ["dashboard", "library", "questions", "generator", "levels", "health", "publish", "activity", "devnotes"];
+  const parseHash = () => {
+    const raw = (window.location.hash || "").replace(/^#\/?/, "").trim(); // "questions" | "pack/<id>" | ""
+    if (!raw) return { nav: "dashboard", packId: null };
+    const [head, id] = raw.split("/");
+    if (head === "pack" && id) return { nav: "library", packId: id };
+    if (VALID_NAV.includes(head)) return { nav: head, packId: null };
+    return { nav: "dashboard", packId: null };
+  };
+  const initial = parseHash();
+  const [nav, setNav] = useState(initial.nav);
+  const [active, setActive] = useState(null);     // open pack (hydrated from packId once packs load)
+  const pendingPackId = useRef(initial.packId);   // pack id from the URL, resolved when packs arrive
   const [editPack, setEditPack] = useState(null); // {} new | {...} edit
   const [clonePack, setClonePack] = useState(null);
   const [changePw, setChangePw] = useState(false);
@@ -5238,18 +5268,46 @@ function App() {
   useRealtimeRefresh(["pm_packs", "pm_questions", "pm_question_levels"], () => reloadPacks(), [reloadPacks]);
   useRealtimeRefresh(["pm_levels"], () => levelsState.reload(), [levelsState.reload]);
 
-  // history-based back button
-  const goPack = useCallback((p) => { setActive(p); window.history.pushState({ v: "pack", id: p.id }, ""); }, []);
+  // Hash routing: write the current view into the URL so refresh/back/forward all work.
+  const goPack = useCallback((p) => { setActive(p); window.location.hash = "#/pack/" + p.id; }, []);
   const closePack = useCallback(() => {
-    if (window.history.state?.v === "pack") window.history.back(); else setActive(null);
+    setActive(null);
+    // Return to the library hash (also pops the pack from browser history if we came via back).
+    window.location.hash = "#/library";
     reloadPacks();
   }, [reloadPacks]);
+
+  // React to browser back/forward and manual hash edits: re-derive nav + open pack from the URL.
   useEffect(() => {
-    if (!window.history.state) window.history.replaceState({ v: "root" }, "");
-    const onPop = () => { setActive(null); reloadPacks(); };
-    window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
-  }, [reloadPacks]);
+    const onHash = () => {
+      const { nav: n, packId } = parseHash();
+      setNav(n);
+      if (packId) {
+        const p = (packsState.data || []).find(x => x.id === packId);
+        if (p) setActive(p); else { pendingPackId.current = packId; setActive(null); }
+      } else {
+        setActive(null);
+      }
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, [packsState.data]);
+
+  // Once packs have loaded, resolve a pack id that came from the initial URL (deep link / refresh on a pack).
+  useEffect(() => {
+    if (pendingPackId.current && packsState.data) {
+      const p = packsState.data.find(x => x.id === pendingPackId.current);
+      pendingPackId.current = null;
+      if (p) setActive(p);
+    }
+  }, [packsState.data]);
+
+  // Keep the browser tab title in sync with the current view (helps with multiple tabs + history).
+  useEffect(() => {
+    const NAV_TITLES = { dashboard: "Overview", library: "Packs", questions: "Questions", generator: "Generator", levels: "Levels", health: "Content health", publish: "Publishing", activity: "Activity", devnotes: "Developer notes" };
+    const label = active ? active.name : (NAV_TITLES[nav] || "");
+    document.title = label ? `${label} · Positive Minds` : "Positive Minds — Pack Content Manager";
+  }, [nav, active]);
 
   // open a pack by id (from global search)
   const openPackById = useCallback((id) => {
@@ -5324,7 +5382,11 @@ function App() {
     } catch (err) { notify("Import failed: " + err.message, { kind: "error" }); }
   };
 
-  const goNav = (id) => { setActive(null); setNav(id); setMenuOpen(false); };
+  const goNav = (id) => {
+    setActive(null); setNav(id); setMenuOpen(false);
+    const target = id === "dashboard" ? "#/" : "#/" + id;
+    if (window.location.hash !== target) window.location.hash = target; // updates URL; hashchange keeps state in sync
+  };
 
   // Command palette entries
   const commands = useMemo(() => {
