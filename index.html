@@ -85,7 +85,7 @@ const {
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.04-14",
+  build: "2026.07.04-15",
   // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
@@ -6689,6 +6689,16 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Doc verification pass (all three docs checked against the live system).** Confirmed all 9
+  tables, 9 functions (exact signatures), and the view are documented; the pm_questions /
+  pm_levels / pm_question_levels schemas match reality (no dropped columns claimed, live override
+  columns present); the nav section lists all 9 pages incl. Generator and describes the URL-hash
+  routing; and the RPC/feature specs are current. Filled two real gaps found in the golden-rules +
+  build docs: (1) the RPC-grant footgun — DROP+CREATE on a function silently restores the PUBLIC
+  execute grant, so anon regains call access unless you revoke from PUBLIC (added to CLAUDE.md
+  invariants + the Build Prompt's grant instruction); (2) the URL-hash routing invariant — don't
+  revert nav to plain constant-initialised state or you reintroduce the refresh-loses-your-place
+  bug (added to CLAUDE.md).
 - **Fixed: refreshing the page always dumped you back on the dashboard (URL now reflects the
   view).** nav was plain React state initialised to "dashboard" and never written to the URL, so
   every reload lost your place. Added URL-hash routing: the current section (and open pack) live in
@@ -7110,6 +7120,11 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    (faint is already the minimum readable grey; don't go lighter for text). Never hardcode
    a hex where a token exists (dark mode + contrast depend on it). Inputs use C.panel bg and
    the ::placeholder rule — don't reintroduce white input backgrounds.
+9. **URL-hash routing (don't break refresh-persistence).** The current view lives in
+   location.hash (#/questions, #/pack/<id>, #/ = dashboard). nav state is SEEDED from parseHash()
+   at mount, goNav/goPack WRITE the hash, and a hashchange listener re-derives state. If you add a
+   nav section, add its id to VALID_NAV and give it a hash. Never revert nav to plain state
+   initialised to a constant — that reintroduces the "refresh always dumps you on the dashboard" bug.
 
 ## Data access
 - The \`db\` object (core.jsx) is the ONLY way to touch data. Add new queries there.
@@ -7136,6 +7151,14 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
   pool-pick, or the CMS preview and the exported target/frames won't match what the game renders.
   If you add a column to pm_packs, DROP+recreate pm_pack_overview (it uses p.*).
 - RLS: anon read-only, authenticated full write. Never add anon write policies.
+- RPC grant footgun: recreating a function with DROP+CREATE (needed when its signature/return
+  changes) silently RESTORES the default PUBLIC execute grant — so anon regains the ability to CALL
+  it. After any such recreate, \`revoke execute on function fn(exact_sig) from public, anon;\` (revoke
+  from PUBLIC, not just anon — the grant flows through PUBLIC) and \`grant ... to authenticated;\`.
+  Intended posture: ONLY the two trigger functions (pm_bump_pack_version, pm_touch_updated_at) are
+  anon-executable, and those are inert (trigger fns can't be called as RPCs). All real RPCs are
+  authenticated-only. (Because every RPC is SECURITY INVOKER, a stray grant is posture-not-breach —
+  RLS still blocks writes and scopes reads — but keep the posture correct.)
 
 ## Editing / build workflow
 - Edit the modular files in /v2/, NOT the compiled output.
@@ -7234,6 +7257,9 @@ is the authoring + publishing layer; a separate game backend consumes the conten
 - Triggers: touch updated_at; bump pack content_version on any question change
 - RPCs: pm_dashboard_stats, pm_search_questions(q,pack,stat,lvl,lim,off,from_date,to_date,sort) [paginated, date-filter+sort],
   pm_clone_pack(src,slug,name), pm_lint + pm_lint_details, pm_log, pm_mark_released(uuid[])
+- All RPCs SECURITY INVOKER. Grants: REVOKE EXECUTE ... FROM public, anon on every real RPC and
+  GRANT ... TO authenticated (only the two trigger functions stay anon-executable, and they're inert).
+  Note: DROP+CREATE on a function re-grants PUBLIC by default, so re-revoke after any recreate.
 - CRITICAL: paginate all list reads in 1000-row batches (restAll) — PostgREST caps at 1000.
 
 ## Auth
