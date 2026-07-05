@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.04-17", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.04-18", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -3017,6 +3017,16 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Audit-pass UX fixes on the global Questions page:** (1) the empty-state was misleading — it
+  said "Start typing to search…" even when a non-text filter (pack/level/status/date) had matched
+  zero, implying nothing was happening; now it's filter-aware ("No questions match these filters"
+  vs "No questions yet"). (2) Added a "Clear filters" button that appears whenever any of the six
+  filters is active and resets them all — with pack + level + status + date + sort + text it's easy
+  to narrow to nothing, so one-click reset matters. Verified via full audit: all 18 components
+  render; RLS confirmed live (a draft pack's active question returns [] to the anon API — no leak);
+  security posture intact (only the 2 inert trigger fns are anon-callable); client/edge maskWord
+  parity holds (504 cases incl. edge-case words, 0 mismatches); game feed renders BRAVE L1→L10; no
+  service-role key/PAT in the shipped client (only the safe publishable key).
 - **Questions page: added a PACK filter (the one filter it was missing).** The global Questions
   page could filter by text, level, status, when-added, and sort — but not by pack, which made no
   sense for finding a specific pack's questions. Added an "All packs" dropdown (every pack,
@@ -3657,7 +3667,9 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    default → the \`pack\` param on the search RPC), status, level, and WHEN-ADDED (created_at) —
    presets (last 24h / 7d / 30d) or a custom date range — plus a sort (newest first / oldest
    first / group by pack). Each row shows a compact relative "added" stamp (e.g. "3h ago",
-   "2w ago", or a date), full timestamp on hover.
+   "2w ago", or a date), full timestamp on hover. A "Clear filters" button appears whenever any
+   filter is active (resets all six). Empty state is filter-aware: distinguishes "no questions
+   match these filters" (when any filter is set) from "no questions yet" (a genuinely empty library).
 5. **Content health:** lint flags invalid templates (no {blank}), missing 2nd option,
    duplicates, thin packs (1–2 questions); links to fix.
 6. **Publishing pipeline — the core differentiator:**
@@ -5159,6 +5171,9 @@ function AllQuestions({ onOpenPack, levels, packs }) {
           <option value="oldest">Oldest first</option>
           <option value="pack">Group by pack</option>
         </Select>
+        {(q || packF !== "all" || lvl !== "all" || stat !== "all" || datePreset !== "all" || sort !== "recent") && (
+          <Btn variant="ghost" size="sm" onClick={() => { setQ(""); setPackF("all"); setLvl("all"); setStat("all"); setDatePreset("all"); setFromDate(""); setToDate(""); setSort("recent"); }} title="Clear all filters">Clear filters</Btn>
+        )}
       </div>
       {datePreset === "custom" && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: S.md, padding: "10px 12px", background: C.panel, border: "1px solid " + C.line, borderRadius: R.md }}>
@@ -5171,7 +5186,11 @@ function AllQuestions({ onOpenPack, levels, packs }) {
       )}
       {err ? <ErrorState error={err} onRetry={load} />
         : rows === null ? <div style={{ display: "grid", gap: 10 }}>{[0,1,2,3,4].map(i => <Skeleton key={i} h={58} r={12} />)}</div>
-        : rows.length === 0 ? <EmptyState icon="🔍" title="No matches" body={debounced ? `Nothing found for "${debounced}".` : "Start typing to search across all your questions."} />
+        : rows.length === 0 ? <EmptyState icon="🔍" title="No matches" body={
+            (debounced || packF !== "all" || lvl !== "all" || stat !== "all" || datePreset !== "all")
+              ? "No questions match these filters. Try widening or clearing them."
+              : "No questions yet. Add some to a pack to see them here."
+          } />
         : (
           <>
             <div style={{ display: "grid", gap: 10 }}>
