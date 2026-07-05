@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.04-15", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.04-16", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -3017,6 +3017,16 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Levels page: the rules for each level are now legible at a glance (+ live preview).** The
+  cards previously showed only the free-text rule prose; now each card also shows a plain-English
+  summary of the ACTUAL mechanical rule (derived from hidden_mode/letters_hidden_default/
+  letter_position/letter_grouping via a new describeLevelRule helper — e.g. "Hides 3 letters
+  toward the middle, spread apart" / "Hides the whole word") and a live "Looks like" sample word
+  masked through the real maskWord engine (sampleMask helper), so you see the true shape without
+  opening the editor. Intro reworded to make clear the rules are LIVE (they drive the game) and
+  editable via the per-level Edit button (which already exposes every field). Full editing was
+  already available; this is about visibility. (Also fixed a stale "Basic ≈ 1–6 / Advanced ≈ 7–10"
+  tier reference in the Architecture levels section — the tier concept was removed.)
 - **Doc verification pass (all three docs checked against the live system).** Confirmed all 9
   tables, 9 functions (exact signatures), and the view are documented; the pm_questions /
   pm_levels / pm_question_levels schemas match reality (no dropped columns claimed, live override
@@ -3371,11 +3381,15 @@ that network-first caches GETs).
   Question-level overrides fall back to the level default (in buildLevelVariants). Defaults were
   seeded to match the concept deck (b__ve style = middle/grouped for the gentle levels).
 - **10-level progression structure:** a \`pm_levels\` table defines levels 1–10, each with
-  letter-hiding rules, word-length/complexity, emotional theme, and age hint (grounded in
-  the concept deck: Basic ≈ levels 1–6 partial letters, Advanced ≈ 7–10 whole word). Packs
-  carry a default \`level\`; questions can override (null = inherit). A dedicated Levels page
-  lets you view/edit each definition; LevelChip shows the level on cards and question rows;
-  the pack/question editors have level selectors. pm_search_questions returns the effective
+  letter-hiding rules, word-length/complexity, emotional theme, and age hint. The level NUMBER
+  is the difficulty — low levels hide one or two letters, high levels (hidden_mode='word') hide
+  the whole word; there is no separate basic/advanced tier. Packs carry a default \`level\`;
+  questions can override (null = inherit). A dedicated Levels page lets you view/edit each
+  definition; each level card shows a plain-English summary of the ACTUAL mechanical rule
+  (derived from hidden_mode/letters_hidden_default/position/grouping — e.g. "Hides 3 letters
+  toward the middle, spread apart") plus a live "Looks like" sample masked through the real
+  engine, so the rules are legible at a glance. LevelChip shows the level on cards and question
+  rows; the pack/question editors have level selectors. pm_search_questions returns the effective
   level (coalesce question→pack).
 - **Contrast/accessibility pass:** every text color WCAG-checked; 'faint' darkened
   (2.57 → 4.88 on white) and brightened in dark mode; inputs now use the panel token
@@ -3670,10 +3684,14 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    letters with simple self-affirmation themes; high levels ≈ hide more, up to the whole word,
    with nuanced themes. Packs carry a default \`level\`; questions
    have a nullable \`level\` override (null = inherit the pack). Build a dedicated Levels page
-   to view/edit each definition, a level chip shown on pack cards and question rows, and level
-   selectors in the pack and question editors. The question-search RPC returns the effective
-   level (coalesce question→pack). Add a Level filter to the question bank, the in-pack list,
-   and the pack library.
+   to view/edit each definition. Each level card must make the rule LEGIBLE: a plain-English
+   summary derived from the actual mechanical fields (hidden_mode/letters_hidden_default/
+   letter_position/letter_grouping — e.g. "Hides 3 letters toward the middle, spread apart" or
+   "Hides the whole word") AND a live "Looks like" sample word masked through the real maskWord
+   engine, so the reader sees the true shape without opening the editor. Also a level chip on
+   pack cards and question rows, and level selectors in the pack and question editors. The
+   question-search RPC returns the effective level (coalesce question→pack). Add a Level filter
+   to the question bank, the in-pack list, and the pack library.
 10. **Blank-shape control:** each level (and per-question override) also controls WHERE the
    missing letters sit (letter_position: start/middle/end/random) and whether multiple hidden
    letters are grouped or spread (letter_grouping). A single maskWord(word, letters, position,
@@ -3950,7 +3968,7 @@ function LevelsView() {
       </div>
 
       <div style={{ background: C.brandSoft, borderRadius: R.md, padding: "12px 16px", marginBottom: S.lg, fontSize: 13, color: C.brandInk, lineHeight: 1.5 }}>
-        Levels combine two things: <b>mechanical difficulty</b> (how much of the word is hidden, word length) and <b>emotional depth</b> (from simple "I am kind" up to nuanced self-regulation). A pack has a default level; individual questions can override it.
+        These rules are <b>live</b> — they control exactly how every question is hidden in the game at each level. Each level sets <b>how much of the word is hidden</b> (one letter → the whole word), <b>where</b> the gaps sit, and its <b>emotional theme</b>. A pack has a default level; individual questions can override it. Hit <b>Edit</b> on any level to change its rules.
       </div>
 
       {loading ? <div style={{ display: "grid", gap: 10 }}>{Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} h={84} r={12} />)}</div>
@@ -3966,6 +3984,13 @@ function LevelsView() {
                     <span style={{ fontSize: 12.5, color: C.faint }}>{l.age_hint}</span>
                   </div>
                   {l.tagline && <div style={{ fontSize: 13.5, color: C.sub, marginTop: 3, fontStyle: "italic" }}>“{l.tagline}”</div>}
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+                    <div style={{ fontSize: 13, color: C.ink, fontWeight: 600 }}>{describeLevelRule(l)}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 7, background: C.bg, borderRadius: R.sm, padding: "5px 11px" }}>
+                      <span style={{ fontSize: 10.5, fontWeight: 800, color: C.faint, letterSpacing: 0.3, textTransform: "uppercase" }}>Looks like</span>
+                      <span style={{ fontFamily: "ui-monospace, Menlo, monospace", fontSize: 14, fontWeight: 800, color: l.color, letterSpacing: 2 }}>{sampleMask(l)}</span>
+                    </div>
+                  </div>
                   <div className="pm-level-rules" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginTop: 12 }}>
                     <Rule label="Letters" value={l.letters_rule} />
                     <Rule label="Words" value={l.word_rule} />
@@ -3992,6 +4017,23 @@ const Rule = ({ label, value }) => (
     <div style={{ fontSize: 12.5, color: C.ink2, marginTop: 2, lineHeight: 1.4 }}>{value || "—"}</div>
   </div>
 );
+
+// Plain-English description of what a level ACTUALLY does mechanically (from the real fields the
+// engine uses, not the free-text rule prose). This is the "rule" in one legible sentence.
+function describeLevelRule(l) {
+  if (l.hidden_mode === "word") return "Hides the whole word — the child spells it from scratch.";
+  const n = l.letters_hidden_default ?? 1;
+  const where = { start: "toward the start", middle: "toward the middle", end: "toward the end", random: "in random spots" }[l.letter_position] || "toward the middle";
+  const how = n >= 2 ? (l.letter_grouping === "spread" ? ", spread apart" : ", grouped together") : "";
+  return `Hides ${n} letter${n === 1 ? "" : "s"} ${where}${how}.`;
+}
+// A concrete sample rendered exactly as the game would mask it at this level, so you see the shape.
+function sampleMask(l) {
+  const sample = "STRONG"; // 6 letters — long enough to show position/spread differences
+  if (l.hidden_mode === "word") return "_".repeat(sample.length);
+  const n = Math.min(l.letters_hidden_default ?? 1, sample.length - 1);
+  return maskWord(sample, n, l.letter_position, l.letter_grouping);
+}
 
 function LevelEditor({ level, onSave, onClose }) {
   const [f, setF] = useState({ ...level });
