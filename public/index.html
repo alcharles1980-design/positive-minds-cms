@@ -85,7 +85,7 @@ const {
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.04-8",
+  build: "2026.07.04-9",
   // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
@@ -6448,7 +6448,8 @@ all cross-file components are \`function\` declarations so they hoist):
     publish1.jsx    ProfileBuilder (visual + JSON + preview), ValueMapEditor, FieldMapRow
     firebase2.jsx   FirebaseTargetEditor, CloudFnDocs
     publish2.jsx    PublishHub, ChannelsPanel, SyncHistory, FeedRow
-    devnotes.jsx    Developer Notes page + embedded docs (this file)
+    devdocs.jsx     the three embedded docs as template-literal strings (this Architecture doc, CLAUDE.md, Build Prompt)
+    devnotes.jsx    Developer Notes page — renders the three docs + an editable scratchpad
     generator.jsx   Content Generator (AI prompt builder): GeneratorView, buildGeneratorPrompt, buildAvoidList, OUTPUT_FORMATS, MASTER_CONTEXT
     levels.jsx      LevelsView, LevelEditor, LevelChip, QuestionLevelsPanel, QuestionLevelEditor (the 10-level UI + per-question level overrides)
     views1.jsx      Dashboard, Library, PackCard
@@ -6602,9 +6603,10 @@ sync calls pm_mark_released to clear it.
 ## 9. Navigation & views
 Sidebar (desktop) / icon rail (tablet) / bottom-tab bar (phone). Routes:
 Overview (Dashboard, incl. an at-a-glance one-line index of every pack), Packs (Library),
-Questions (AllQuestions global search), Health (lint), Publishing (profiles/targets/
-channels/history), Activity, Developer (three embedded docs + editable scratchpad),
-Levels (the 10-level progression structure — view/edit each level's rules).
+Questions (AllQuestions global search), Generator (Content Generator — builds a paste-ready
+AI prompt), Levels (the 10-level progression structure — view/edit each level's rules),
+Health (lint), Publishing (profiles/targets/channels/history), Activity, Developer (three
+embedded docs + editable scratchpad).
 History-based back button (pushState) so browser Back moves within the app.
 Command palette (⌘/Ctrl-K): fuzzy nav/actions/theme/jump-to-pack.
 
@@ -6767,8 +6769,9 @@ that network-first caches GETs).
   whole-CMS JSON backup was also MODERNIZED (v3): it now exports/imports level, letter_position,
   letter_grouping, frame_slots and the pack's purpose/focus/style fields (previously it carried
   the dead letters_hidden/difficulty and silently DROPPED levels + frame words on restore).
-  NOTE: pack-level difficulty (basic/advanced/mixed) is a real pack tag and was kept; the
-  letters_hidden/difficulty COLUMNS remain (derived-legacy) so nothing downstream breaks.
+  NOTE: pack-level difficulty (basic/advanced/mixed) is a real pack tag and was kept. (The
+  per-question letters_hidden/difficulty columns were left as derived-legacy at the time of this
+  change, then fully dropped in a later cleanup — see the top of this changelog.)
 - **Question editor reconciled with the level system (bug fix):** the editor still exposed the
   OLD model — a per-question "Difficulty" (basic/advanced) toggle and a "Letters hidden" number
   — but rendering has long been driven by the LEVEL (hidden_mode, letters_hidden_default,
@@ -7125,8 +7128,8 @@ is the authoring + publishing layer; a separate game backend consumes the conten
   timestamps)
 - pm_questions(id, pack_id FK cascade, template with {blank} + optional {token} frame slots,
   answer, alt_answer, status [active/inactive], sort_order, notes, level, letter_position,
-  letter_grouping, frame_slots jsonb, timestamps; letters_hidden/difficulty are derived-legacy
-  columns — set from the level on save, not authored)
+  letter_grouping, frame_slots jsonb, timestamps). No per-question difficulty or letters_hidden
+  columns — the level (+ any pm_question_levels override) fully drives how much is hidden.
 - pm_activity (audit log), pm_export_profiles(spec jsonb, is_builtin), pm_sync_log,
   pm_sync_targets(config jsonb), pm_dev_notes (singleton id=1)
 - View pm_pack_overview: packs + active_questions + total_questions + has_pending_changes
