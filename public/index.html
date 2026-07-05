@@ -85,7 +85,7 @@ const {
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.04-18",
+  build: "2026.07.04-19",
   // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
@@ -6689,6 +6689,18 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Full audit pass (no bugs found; one architectural invariant documented).** Rendered all 20
+  components (the single "failure" was a wrong-props test artifact — QuestionLevelEditor takes a
+  \`variant\` prop, which its real caller passes correctly). Verified: no duplicate component/const
+  definitions (the apparent dups were prefix-match false positives — DOC_*, NAV/NAV_PHONE,
+  PACK_SOURCE_FIELDS/PACK_TAG_SUGGESTIONS are distinct); no leftover console.log/debugger/TODO in
+  shipped code; all RPCs work; only the 2 inert trigger fns are anon-callable; 0 tables without RLS;
+  0 dropped columns lingering; client/edge maskWord parity holds (304 cases, 0 mismatches); the live
+  game feed renders BRAVE L1 BRA_E → L4 B___E → L10 _____ (confirming earlier live level-sync tests
+  were fully reverted — data untouched). Documented a previously-implicit invariant (#4a in
+  CLAUDE.md): questions are never pre-rendered — their 10 level-variations are computed on demand
+  from pm_levels every render/request, so a level edit propagates live to every inheriting question
+  in the CMS and the game; never add a cached per-question variation store.
 - **Audit-pass UX fixes on the global Questions page:** (1) the empty-state was misleading — it
   said "Start typing to search…" even when a non-text filter (pack/level/status/date) had matched
   zero, implying nothing was happening; now it's filter-aware ("No questions match these filters"
@@ -7138,6 +7150,15 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    the edge function didn't, so a question with its own letter_position rendered differently
    in-game than in the CMS.) After any engine edit, diff the two by fetching the deployed edge
    function and comparing, or run a parity test with a question that has its own overrides.
+4a. **Questions are never pre-rendered — level rules propagate live.** A question row stores only
+   its template + answer/alt + optional own overrides. Its 10 level-variations (masked blanks) are
+   COMPUTED ON DEMAND by buildLevelVariants from the current pm_levels rows every time — in the CMS
+   (previews recompute on each render from the levels prop, which the shell keeps fresh via the
+   pm_levels realtime subscription) AND in the game feed (the edge fn fetches pm_levels per request).
+   So editing a level's rule on the Levels page instantly changes that level's variation for EVERY
+   inheriting question, everywhere, with no re-save/republish. Do NOT introduce a cached/materialised
+   per-question variation store — it would break this and desync the game from the CMS. Precedence
+   still applies: a per-question pm_question_levels override wins over the level default (intended).
 5. **View column order.** pm_pack_overview uses \`p.*\`. Adding a column to pm_packs shifts
    positions and CREATE OR REPLACE VIEW will error — DROP and recreate the view instead.
 6. **Auth/session.** Access tokens expire ~1hr. rest()/rpc() auto-refresh + retry once on
