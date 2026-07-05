@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.04-9", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.04-10", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -292,6 +292,20 @@ const uid = () => Math.random().toString(36).slice(2, 9);
 // Mask a word by hiding `letters` characters, controlling WHERE they sit
 // (start/middle/end/random) and whether multiple hidden letters are grouped
 // together or spread apart.
+// Compact relative time for "added" stamps: "just now", "5m", "3h", "2d", "3w", or a date.
+const relativeTime = (iso) => {
+  if (!iso) return "";
+  const then = new Date(iso).getTime();
+  if (isNaN(then)) return "";
+  const s = Math.floor((Date.now() - then) / 1000);
+  if (s < 45) return "just now";
+  const m = Math.floor(s / 60); if (m < 60) return m + "m ago";
+  const h = Math.floor(m / 60); if (h < 24) return h + "h ago";
+  const d = Math.floor(h / 24); if (d < 7) return d + "d ago";
+  const w = Math.floor(d / 7); if (w < 5) return w + "w ago";
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+};
+
 const maskWord = (word, letters, position = "end", grouping = "grouped") => {
   word = (word || "____").toUpperCase();
   const n = word.length;
@@ -2877,9 +2891,10 @@ was revoked on the admin/write ones, so these are authenticated-only in practice
   total/active questions, distinct_levels_used (how many of the 10 levels have questions),
   questions_by_level (a {level: count} map for the distribution), empty_packs, and
   avg_questions_per_pack. No tier/difficulty counts (those concepts were removed).
-- \`pm_search_questions(q,pack,stat,lvl,lim,off)\` — global paginated question search.
-  Returns the effective level + resolved letter_position/letter_grouping + frame_slots.
-  (The legacy \`diff\` param was removed.)
+- \`pm_search_questions(q,pack,stat,lvl,lim,off,from_date,to_date,sort)\` — global paginated
+  question search. Returns the effective level + resolved letter_position/letter_grouping +
+  frame_slots + created_at/updated_at. from_date/to_date filter by created_at (a [from, to)
+  window); sort = 'recent' | 'oldest' | null (default keeps pack order).
 - \`pm_clone_pack(src,new_slug,new_name)\` — duplicate a pack + its questions (as draft).
 - \`pm_lint()\` / \`pm_lint_details()\` — content health checks (invalid templates,
   missing 2nd option, duplicates, thin packs, revealed answer [the effective LEVEL hides 0
@@ -2983,6 +2998,14 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Questions page: filter & sort by when a question was added.** pm_questions already had a
+  populated created_at (every question is timestamped on insert), so this was purely surfacing +
+  filtering it. pm_search_questions gained from_date/to_date (a [from, to) window on created_at)
+  and a sort param ('recent' newest-first / 'oldest' / null keeps pack order), and now returns
+  created_at + updated_at. The All-questions page got a "when added" dropdown (last 24h / 7d /
+  30d / custom range with two date pickers) and a sort dropdown, and each row shows a compact
+  relative "added" stamp (relativeTime helper in core.jsx: "just now" / "5m" / "3h" / "2d" /
+  "3w" / date), full timestamp on hover.
 - **Leftover cleanup pass (full app sweep for old-model remnants):**
   · Dropped the two dead per-question columns \`pm_questions.difficulty\` and
     \`pm_questions.letters_hidden\` — they were written on every save/clone and returned by the
@@ -3477,7 +3500,7 @@ is the authoring + publishing layer; a separate game backend consumes the conten
   (content_version > released_version). Create it with security_invoker=true so it respects
   the caller's RLS (otherwise anon can read draft packs via the public API).
 - Triggers: touch updated_at; bump pack content_version on any question change
-- RPCs: pm_dashboard_stats, pm_search_questions(q,pack,stat,lvl,lim,off) [paginated],
+- RPCs: pm_dashboard_stats, pm_search_questions(q,pack,stat,lvl,lim,off,from_date,to_date,sort) [paginated, date-filter+sort],
   pm_clone_pack(src,slug,name), pm_lint + pm_lint_details, pm_log, pm_mark_released(uuid[])
 - CRITICAL: paginate all list reads in 1000-row batches (restAll) — PostgREST caps at 1000.
 
@@ -3517,7 +3540,10 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    pack at one chosen level (forcing every question to that level's blank difficulty) or "each own
    level" (default); changing it restarts the run.
 4. **All questions:** server-side global search across every pack, paginated, click-through
-   to the source pack.
+   to the source pack. Filters: text, status, level, and WHEN-ADDED (created_at) — presets
+   (last 24h / 7d / 30d) or a custom date range — plus a sort (newest first / oldest first /
+   group by pack). Each row shows a compact relative "added" stamp (e.g. "3h ago", "2w ago",
+   or a date), full timestamp on hover.
 5. **Content health:** lint flags invalid templates (no {blank}), missing 2nd option,
    duplicates, thin packs (1–2 questions); links to fix.
 6. **Publishing pipeline — the core differentiator:**
@@ -4884,21 +4910,39 @@ function AllQuestions({ onOpenPack, levels }) {
   const [q, setQ] = useState("");
   const [stat, setStat] = useState("all");
   const [lvl, setLvl] = useState("all");
+  const [datePreset, setDatePreset] = useState("all"); // all | 24h | 7d | 30d | custom
+  const [fromDate, setFromDate] = useState(""); // yyyy-mm-dd (custom range)
+  const [toDate, setToDate] = useState("");
+  const [sort, setSort] = useState("recent"); // recent | oldest | pack
   const [page, setPage] = useState(0);
   const [rows, setRows] = useState(null);
   const [total, setTotal] = useState(0);
   const [err, setErr] = useState("");
   const debounced = useDebounced(q, 250);
 
+  // Resolve the date preset to an actual [from, to) window (ISO strings or null).
+  const dateWindow = useMemo(() => {
+    const now = Date.now();
+    if (datePreset === "24h") return { from: new Date(now - 864e5).toISOString(), to: null };
+    if (datePreset === "7d") return { from: new Date(now - 7 * 864e5).toISOString(), to: null };
+    if (datePreset === "30d") return { from: new Date(now - 30 * 864e5).toISOString(), to: null };
+    if (datePreset === "custom") return {
+      from: fromDate ? new Date(fromDate + "T00:00:00").toISOString() : null,
+      // inclusive end-of-day: add a day so the whole toDate is included
+      to: toDate ? new Date(new Date(toDate + "T00:00:00").getTime() + 864e5).toISOString() : null,
+    };
+    return { from: null, to: null };
+  }, [datePreset, fromDate, toDate]);
+
   const load = useCallback(async () => {
     setErr("");
     try {
-      const r = await db.searchQuestions({ q: debounced, pack: null, stat: stat === "all" ? null : stat, lvl: lvl === "all" ? null : parseInt(lvl), lim: CFG.pageSize, off: page * CFG.pageSize });
+      const r = await db.searchQuestions({ q: debounced, pack: null, stat: stat === "all" ? null : stat, lvl: lvl === "all" ? null : parseInt(lvl), lim: CFG.pageSize, off: page * CFG.pageSize, from_date: dateWindow.from, to_date: dateWindow.to, sort: sort === "pack" ? null : sort });
       setRows(r || []); setTotal(r?.[0]?.total_count ? Number(r[0].total_count) : 0);
     } catch (e) { setErr(e.message); }
-  }, [debounced, stat, lvl, page]);
+  }, [debounced, stat, lvl, page, dateWindow, sort]);
   useEffect(() => { load(); }, [load]);
-  useEffect(() => { setPage(0); }, [debounced, stat, lvl]);
+  useEffect(() => { setPage(0); }, [debounced, stat, lvl, dateWindow, sort]);
 
   // Live sync: refresh the global search when questions change anywhere.
   useRealtimeRefresh(["pm_questions", "pm_question_levels"], () => load(), [load]);
@@ -4922,7 +4966,28 @@ function AllQuestions({ onOpenPack, levels }) {
         <Select value={stat} onChange={(e) => setStat(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
           <option value="all">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option>
         </Select>
+        <Select value={datePreset} onChange={(e) => setDatePreset(e.target.value)} style={{ minWidth: 140, padding: "8px 12px" }} title="Filter by when the question was added">
+          <option value="all">Any time added</option>
+          <option value="24h">Added last 24 hours</option>
+          <option value="7d">Added last 7 days</option>
+          <option value="30d">Added last 30 days</option>
+          <option value="custom">Custom date range…</option>
+        </Select>
+        <Select value={sort} onChange={(e) => setSort(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }} title="Sort order">
+          <option value="recent">Newest first</option>
+          <option value="oldest">Oldest first</option>
+          <option value="pack">Group by pack</option>
+        </Select>
       </div>
+      {datePreset === "custom" && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: S.md, padding: "10px 12px", background: C.panel, border: "1px solid " + C.line, borderRadius: R.md }}>
+          <span style={{ fontSize: 12.5, fontWeight: 700, color: C.sub }}>Added between</span>
+          <Input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} style={{ width: 160, padding: "7px 10px" }} />
+          <span style={{ fontSize: 12.5, color: C.faint }}>and</span>
+          <Input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} style={{ width: 160, padding: "7px 10px" }} />
+          {(fromDate || toDate) && <Btn variant="ghost" size="sm" onClick={() => { setFromDate(""); setToDate(""); }}>Clear</Btn>}
+        </div>
+      )}
       {err ? <ErrorState error={err} onRetry={load} />
         : rows === null ? <div style={{ display: "grid", gap: 10 }}>{[0,1,2,3,4].map(i => <Skeleton key={i} h={58} r={12} />)}</div>
         : rows.length === 0 ? <EmptyState icon="🔍" title="No matches" body={debounced ? `Nothing found for "${debounced}".` : "Start typing to search across all your questions."} />
@@ -4943,6 +5008,7 @@ function AllQuestions({ onOpenPack, levels }) {
                     </div>
                     <div className="pm-qrow-meta">
                       {r.level && <LevelChip level={r.level} levels={levels} size="xs" />}
+                      {r.created_at && <span title={`Added ${new Date(r.created_at).toLocaleString()}`} style={{ fontSize: 11, color: C.faint, fontWeight: 600, whiteSpace: "nowrap" }}>{relativeTime(r.created_at)}</span>}
                       <Badge kind={r.status} />
                     </div>
                   </div>
