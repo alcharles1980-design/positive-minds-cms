@@ -341,6 +341,8 @@ Deno.serve(async (req) => {
         level: l.level, name: l.name, tagline: l.tagline, theme: l.theme, age_hint: l.age_hint,
         hidden_mode: l.hidden_mode, letters_hidden_default: l.letters_hidden_default,
         letter_position: l.letter_position, letter_grouping: l.letter_grouping, color: l.color,
+        min_word_len: l.min_word_len, max_word_len: l.max_word_len,
+        allow_multiword: l.allow_multiword, vocab_rule: l.vocab_rule,
         updated_at: l.updated_at,
       })),
       packs: packsOut,

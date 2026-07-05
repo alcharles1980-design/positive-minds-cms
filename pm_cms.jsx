@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.05-01", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.05-02", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -446,7 +446,9 @@ const buildLevelVariants = (q, levels, overrides = {}) => {
 const previewAtLevel = (q, levels, packLevel) => {
   const lvlNum = q?.level ?? packLevel ?? 1;
   let def = (levels || []).find(l => l.level === lvlNum);
-  if (!def) def = { level: lvlNum, hidden_mode: lvlNum >= 7 ? "word" : "letters", letters_hidden_default: 2, letter_position: "end", letter_grouping: "grouped" };
+  // Fallback only when the full level list isn't loaded yet. Neutral default (letters mode) —
+  // never infer whole-word from the number, since levels/rules are fully data-driven now.
+  if (!def) def = { level: lvlNum, hidden_mode: "letters", letters_hidden_default: 2, letter_position: "end", letter_grouping: "grouped" };
   const v = buildLevelVariants(q, [def], {})[0];
   return v ? { sentence: v.sentence, opts: v.opts, blank: v.blank, letters: v.letters } : { sentence: q?.template || "", opts: "" };
 };
@@ -2875,17 +2877,22 @@ config → data layer → design tokens → hooks → primitives → feature vie
   trg_question_status_tombstone (after status change: leaving published/active writes a
   tombstone, re-entering clears it). anon/authenticated may SELECT, nobody may write directly.
   Consumed by the content-api's \`?since=\` deletions array.
-- \`pm_levels\` — the game's progression structure (levels 1–10, editable): level (PK),
-  name, tagline, letters_rule, word_rule, theme, age_hint,
-  hidden_mode, letters_hidden_default, letter_position (start/middle/end/random),
-  letter_grouping (grouped/spread), color. The LEVEL NUMBER is the difficulty — there is
-  no separate basic/advanced tier concept (that was removed as redundant). Packs have a
-  \`level\` (default); questions have nullable \`level\`, \`letter_position\`, \`letter_grouping\`
-  (null = inherit).
-  The blank SHAPE is computed by maskWord(word, letters, position, grouping) and the
-  effective settings resolve question-override → level-default (via buildLevelVariants).
+- \`pm_levels\` — the game's progression structure (levels 1–100, editable; ships with 1–10
+  but you can add more above the top): level (PK, CHECK 1..100), name, tagline, letters_rule,
+  word_rule, theme, age_hint, hidden_mode (letters/word), letters_hidden_default,
+  letter_position (start/middle/end/random), letter_grouping (grouped/spread), color, sort_order,
+  plus VOCABULARY-RULE columns that shape which ANSWER words a level uses (they drive the
+  generator + show intent; the masking engine ignores them): min_word_len (int, nullable),
+  max_word_len (int, nullable), allow_multiword (bool, default false), vocab_rule (free text).
+  CHECK pm_levels_wordlen_band ensures min<=max when both set. The LEVEL NUMBER is the difficulty
+  — no separate basic/advanced tier (removed as redundant). Packs have a \`level\` (default);
+  questions have nullable \`level\`, \`letter_position\`, \`letter_grouping\` (null = inherit).
+  The blank SHAPE is computed by maskWord(word, letters, position, grouping) and the effective
+  settings resolve question-override → level-default (via buildLevelVariants). Adding a level row
+  is enough for it to render everywhere (CMS previews + both feeds) — nothing is pre-materialized.
+  pm_questions.level and pm_question_levels.level share the same 1..100 CHECK.
 - \`pm_question_levels\` — per-question, per-level OVERRIDES. Every question is a single
-  "concept" that auto-renders all 10 levels (buildLevelVariants derives each level's blank
+  "concept" that auto-renders every level (buildLevelVariants derives each level's blank
   from the question + the level rules). A row exists here ONLY when a specific level's
   version was hand-edited (override template/answer/alt_answer/letters_hidden/letter_position/
   letter_grouping, or \`enabled=false\` to hide that level). In the question bank, each row has
@@ -2977,7 +2984,8 @@ well-designed shape (NOT the profile-projection system) plus everything needed t
 - \`?manifest=1\` — lightweight version manifest: global_version (epoch of the newest change
   anywhere, incl. deletions), levels_version, per-pack {slug, content_version, active_questions,
   version}. A client polls this and only pulls content when global_version changed.
-- (default) — full published content: levels (definitions/rules) + packs, each with its questions,
+- (default) — full published content: levels (definitions/rules — including the vocabulary-rule
+  fields min_word_len/max_word_len/allow_multiword/vocab_rule) + packs, each with its questions,
   each question carrying its 10 rendered level-variations (same engine as game-feed).
 - \`?since=<iso|epoch>\` — INCREMENTAL: only packs that changed (a pack counts as changed if it OR
   any of its questions changed since the cursor; returns that pack's full current question set for a
@@ -3057,6 +3065,31 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Expandable levels: add new levels above the current top with their own rules, generate/derive
+  questions for them, and have them flow through publish/export/both feeds automatically.** Schema:
+  raised the level CHECK from 1..20 to 1..100 on pm_levels, pm_questions, and pm_question_levels;
+  added vocabulary-rule columns to pm_levels — min_word_len, max_word_len, allow_multiword,
+  vocab_rule (free text) — that shape which ANSWER words a level uses (they drive the generator and
+  display intent; the masking engine ignores them; CHECK ensures min<=max). Levels page: an "Add
+  level N" button creates the next level pre-filled from the current top level's rules via the full
+  rule editor (now including the vocab fields), and the top level (highest only) can be deleted to
+  keep the ladder contiguous; cards show word-band / multi-word badges. Engine: the shared
+  buildLevelVariants already derives every level on demand from pm_levels, so a new level renders
+  everywhere (CMS previews + game-feed + content-api) with ZERO per-question work and nothing
+  pre-materialized — proven live by creating a real Level 11 (whole-word, spread, 8–14 letter band,
+  multiword) and confirming the content-api returned 11 level definitions with the vocab fields and
+  BRAVE rendered 11 variations (L11 blank _____), then removing it cleanly. Fixed a latent
+  number-based assumption: previewAtLevel's fallback used "level>=7 ⇒ whole word"; now neutral
+  (letters) — levels are fully data-driven, never inferred from the number. Generator: the prompt
+  now includes each target level's word-length band, multi-word allowance, and vocab_rule, plus a
+  reminder that both answers stay in-band yet differ in length, and rule #3 relaxes to allow
+  two-word answers when a selected level permits them. Derive: a new "Derive level" pack action
+  (DeriveLevelDialog, loads all active questions via db.allQuestionsForPack) materializes editable
+  pm_question_levels override rows for a chosen level across the pack — applying that level's masking
+  rule to each word, skip-or-overwrite existing, chunked upserts — for when concrete per-question
+  rows are wanted to hand-tune. content-api redeployed (v3) to expose the new level fields. All
+  three docs updated. NOTE: adding a level is purely additive; the game client must handle however
+  many levels the feed reports.
 - **Full pre-production audit of the content-api + sync layer; one real bug found and fixed.**
   BUG: unpublishing a pack (published→draft/archived) or deactivating a question (active→inactive)
   was invisible to sync — no tombstone was written (those triggers only fired on hard DELETE), and
@@ -3103,7 +3136,7 @@ that network-first caches GETs).
   0 dropped columns lingering; client/edge maskWord parity holds (304 cases, 0 mismatches); the live
   game feed renders BRAVE L1 BRA_E → L4 B___E → L10 _____ (confirming earlier live level-sync tests
   were fully reverted — data untouched). Documented a previously-implicit invariant (#4a in
-  CLAUDE.md): questions are never pre-rendered — their 10 level-variations are computed on demand
+  CLAUDE.md): questions are never pre-rendered — their level-variations are computed on demand
   from pm_levels every render/request, so a level edit propagates live to every inheriting question
   in the CMS and the game; never add a cached per-question variation store.
 - **Audit-pass UX fixes on the global Questions page:** (1) the empty-state was misleading — it
@@ -3473,7 +3506,7 @@ that network-first caches GETs).
   sync; verified via the feed). (2) pm_clone_pack now copies the pack level, question-level
   overrides, and pm_question_levels rows (was silently dropping them). (3) NaN guard on the
   per-level editor's letters_hidden.
-- **Questions are multi-level concepts:** each question auto-renders all 10 levels (same
+- **Questions are multi-level concepts:** each question auto-renders every level (same
   affirmation, blank difficulty derived per level via buildLevelVariants). The question bank
   keeps flat rows with a "Levels" expand toggle that reveals every level's version. Any level
   can be individually edited (override sentence/word/letters/position/grouping or disabled),
@@ -3485,15 +3518,25 @@ that network-first caches GETs).
   child sees it" preview, the question rows, PlayMode, and search all reflect it.
   Question-level overrides fall back to the level default (in buildLevelVariants). Defaults were
   seeded to match the concept deck (b__ve style = middle/grouped for the gentle levels).
-- **10-level progression structure:** a \`pm_levels\` table defines levels 1–10, each with
-  letter-hiding rules, word-length/complexity, emotional theme, and age hint. The level NUMBER
-  is the difficulty — low levels hide one or two letters, high levels (hidden_mode='word') hide
-  the whole word; there is no separate basic/advanced tier. Packs carry a default \`level\`;
-  questions can override (null = inherit). A dedicated Levels page lets you view/edit each
-  definition; each level card shows a plain-English summary of the ACTUAL mechanical rule
-  (derived from hidden_mode/letters_hidden_default/position/grouping — e.g. "Hides 3 letters
-  toward the middle, spread apart") plus a live "Looks like" sample masked through the real
-  engine, so the rules are legible at a glance. LevelChip shows the level on cards and question
+- **Expandable level progression (1–100):** a \`pm_levels\` table defines the levels (ships with
+  1–10; you can add more above the top, up to a CHECK ceiling of 100). Each level has letter-hiding
+  rules (hidden_mode letters/word, letters_hidden_default, letter_position, letter_grouping), a
+  color/theme/age hint, AND vocabulary rules — min_word_len, max_word_len, allow_multiword, and a
+  free-text vocab_rule — that shape which ANSWER words the level uses (they feed the generator and
+  display intent; the masking engine ignores them). The level NUMBER is the difficulty; no separate
+  basic/advanced tier. Packs carry a default \`level\`; questions can override (null = inherit).
+  The Levels page lets you view/edit each definition AND add a new level above the current top
+  ("Add level N", pre-filled from the current top level's rules) or delete the top level (only the
+  highest, to keep the ladder contiguous). Each level card shows a plain-English summary of the
+  ACTUAL mechanical rule plus a live "Looks like" sample masked through the real engine, and word-band
+  / multi-word badges. Adding a level row is sufficient for it to render everywhere (CMS previews and
+  BOTH feeds) with zero per-question work — nothing is pre-materialized; the shared engine derives
+  every level on demand. Questions for a new level come two ways: (1) the AI generator prompt now
+  includes each target level's word-length band, multi-word allowance, and vocab_rule (plus a
+  reminder that both answers stay in-band yet differ in length); (2) a "Derive level" action on a
+  pack materializes editable pm_question_levels override rows for a chosen level across all active
+  questions (applying that level's masking rule to each word; skip-or-overwrite existing), for when
+  you want concrete per-question rows to hand-tune. LevelChip shows the level on cards and question
   rows; the pack/question editors have level selectors. pm_search_questions returns the effective
   level (coalesce question→pack).
 - **Contrast/accessibility pass:** every text color WCAG-checked; 'faint' darkened
@@ -3557,7 +3600,7 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    in-game than in the CMS.) After any engine edit, diff the two by fetching the deployed edge
    function and comparing, or run a parity test with a question that has its own overrides.
 4a. **Questions are never pre-rendered — level rules propagate live.** A question row stores only
-   its template + answer/alt + optional own overrides. Its 10 level-variations (masked blanks) are
+   its template + answer/alt + optional own overrides. Its level-variations (masked blanks, one per pm_levels row) are
    COMPUTED ON DEMAND by buildLevelVariants from the current pm_levels rows every time — in the CMS
    (previews recompute on each render from the levels prop, which the shell keeps fresh via the
    pm_levels realtime subscription) AND in the game feed (the edge fn fetches pm_levels per request).
@@ -3565,6 +3608,10 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    inheriting question, everywhere, with no re-save/republish. Do NOT introduce a cached/materialised
    per-question variation store — it would break this and desync the game from the CMS. Precedence
    still applies: a per-question pm_question_levels override wins over the level default (intended).
+   Corollary: the level ladder is DATA-DRIVEN and expandable (1..100). Adding a pm_levels row is
+   enough for that level to render everywhere; NEVER infer a level's mode/difficulty from its NUMBER
+   (no "level>=N ⇒ whole word" shortcuts anywhere, including preview fallbacks) — always read the
+   level row. The game client must handle however many levels the feed reports, not assume 10.
 5. **View column order.** pm_pack_overview uses \`p.*\`. Adding a column to pm_packs shifts
    positions and CREATE OR REPLACE VIEW will error — DROP and recreate the view instead.
 6. **Auth/session.** Access tokens expire ~1hr. rest()/rpc() auto-refresh + retry once on
@@ -3596,7 +3643,7 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
   hard-default, and previewAtLevel wraps it for single rows. If you change how blanks render,
   update maskWord/buildLevelVariants in ONE place — every view (editor preview, rows, PlayMode,
   export) and the game feed mirror it.
-- Multi-level concepts: every question renders all 10 levels via buildLevelVariants (question
+- Multi-level concepts: every question renders every level via buildLevelVariants (question
   + level rules → per-level blank). Overrides live in pm_question_levels (one row per edited
   level; absent = auto-generated). The question-bank row expands to show all variants. Don't
   duplicate a question into 10 rows — it's ONE row, derived. To send levels to the game, a
@@ -3732,7 +3779,7 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    questions (active in subtitle), published packs (live in the game), and empty packs (need
    content) — plus a "questions by level" mini bar-chart showing the distribution across the 10
    levels in the Library-health card. Do NOT add a "levels in use / of 10" box: every question
-   renders at all 10 levels, so counting distinct assigned levels is misleading. All via one RPC;
+   renders at every level, so counting distinct assigned levels is misleading. All via one RPC;
    quick actions; and a compact at-a-glance index of ALL pack names (one line each, tap to open).
 2. **Library:** pack cards (emoji, color accent, status, question counts); search + status/
    difficulty filters; drag-to-reorder; clone (duplicate pack + questions); delete with
@@ -3813,22 +3860,34 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
 8. **Developer Notes page:** hardcoded architecture doc + CLAUDE.md + this build prompt,
    each viewable with copy + download, plus an editable scratchpad saved to pm_dev_notes.
    These docs MUST be kept in sync with the app on every subsequent change.
-9. **Levels (progression structure):** a pm_levels table defining levels 1–10, each with a
-   name, tagline, letter-hiding rule, word-length/complexity rule, emotional theme, age hint,
-   hidden_mode (hide some letters vs the whole word), letters_hidden_default, letter_position,
-   letter_grouping, and color. The LEVEL NUMBER itself is the difficulty — do NOT add a separate
-   basic/advanced tier. Ground the progression in the game concept: low levels ≈ hide one or two
-   letters with simple self-affirmation themes; high levels ≈ hide more, up to the whole word,
-   with nuanced themes. Packs carry a default \`level\`; questions
-   have a nullable \`level\` override (null = inherit the pack). Build a dedicated Levels page
-   to view/edit each definition. Each level card must make the rule LEGIBLE: a plain-English
-   summary derived from the actual mechanical fields (hidden_mode/letters_hidden_default/
-   letter_position/letter_grouping — e.g. "Hides 3 letters toward the middle, spread apart" or
-   "Hides the whole word") AND a live "Looks like" sample word masked through the real maskWord
-   engine, so the reader sees the true shape without opening the editor. Also a level chip on
-   pack cards and question rows, and level selectors in the pack and question editors. The
-   question-search RPC returns the effective level (coalesce question→pack). Add a Level filter
-   to the question bank, the in-pack list, and the pack library.
+9. **Levels (progression structure, EXPANDABLE 1–100):** a pm_levels table defining the levels
+   (ship with 1–10; support adding more above the top, CHECK ceiling 100 on pm_levels.level AND
+   pm_questions.level AND pm_question_levels.level). Each level has a name, tagline, letter-hiding
+   rule, word-length/complexity rule, emotional theme, age hint, hidden_mode (hide some letters vs
+   the whole word), letters_hidden_default, letter_position, letter_grouping, color, AND vocabulary
+   rules — min_word_len, max_word_len, allow_multiword, vocab_rule (free text) — that shape which
+   ANSWER words the level uses (they drive the generator + display intent; the masking engine
+   ignores them; CHECK min<=max when both set). The LEVEL NUMBER itself is the difficulty — do NOT
+   add a separate basic/advanced tier. Packs carry a default \`level\`; questions have a nullable
+   \`level\` override (null = inherit the pack). Build a dedicated Levels page to view/edit each
+   definition AND to ADD a new level above the current top (button "Add level N", pre-filled from
+   the current top level's rules) and DELETE the top level (highest only, to keep the ladder
+   contiguous; guard with a confirm noting pinned questions/overrides should be moved first). Each
+   level card must make the rule LEGIBLE: a plain-English summary derived from the actual mechanical
+   fields AND a live "Looks like" sample word masked through the real maskWord engine, plus
+   word-band / multi-word badges. CRUCIAL INVARIANT: adding a level row is sufficient for it to
+   render everywhere (CMS previews + BOTH feeds) — nothing is pre-materialized; the shared engine
+   derives every level on demand from pm_levels, so a new level instantly applies to every question.
+   Never infer a level's mode from its number (no "level>=7 ⇒ whole word" shortcuts anywhere,
+   including preview fallbacks). Also a level chip on pack cards and question rows, and level
+   selectors in the pack and question editors. The question-search RPC returns the effective level
+   (coalesce question→pack). Add a Level filter to the question bank, the in-pack list, and the pack
+   library. GENERATING questions for a level: the AI generator prompt must include each target
+   level's word-length band, multi-word allowance, and vocab_rule (and a reminder both answers stay
+   in-band yet differ in length so only one fits). DERIVING for existing content: a "Derive level"
+   pack action materializes editable pm_question_levels rows for a chosen level across all active
+   questions (apply that level's masking rule to each word; skip-or-overwrite existing rows; chunk
+   the upserts), for when concrete per-question rows are wanted to hand-tune.
 10. **Blank-shape control:** each level (and per-question override) also controls WHERE the
    missing letters sit (letter_position: start/middle/end/random) and whether multiple hidden
    letters are grouped or spread (letter_grouping). A single maskWord(word, letters, position,
@@ -3836,7 +3895,7 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    preview, row, PlayMode, and the export/feed. "random" must be DETERMINISTIC (seed from the
    word) so it's stable across renders and matches the game. Every preview ("how the child
    sees it") reflects the real shape.
-11. **Questions are multi-level concepts:** every question auto-renders all 10 levels — the
+11. **Questions are multi-level concepts:** every question auto-renders every level (one per pm_levels row) — the
    same question at each level's blank difficulty (buildLevelVariants derives them from the
    question + level rules; no row duplication). The question bank keeps flat rows with a
    "Levels" expand toggle revealing all 10 variants. Any individual level can be edited
@@ -4057,15 +4116,24 @@ const docTabStyle = (on) => ({
 // Level lives on packs (default) and can be overridden per question.
 // ============================================================
 const db_levels = {
-  list: () => rest("pm_levels?order=level.asc&limit=50").then(r => r.data || []),
+  list: () => rest("pm_levels?order=level.asc&limit=200").then(r => r.data || []),
   update: (level, patch) => rest(`pm_levels?level=eq.${level}`, { method: "PATCH", body: patch }).then(r => r.data?.[0]),
+  create: (row) => rest("pm_levels", { method: "POST", body: row }).then(r => r.data?.[0]),
+  remove: (level) => rest(`pm_levels?level=eq.${level}`, { method: "DELETE" }),
 };
 
 // Per-question, per-level overrides (rows exist only where a level was hand-edited).
 const db_qlevels = {
-  forQuestion: (qid) => rest(`pm_question_levels?question_id=eq.${qid}&order=level.asc&limit=50`).then(r => r.data || []),
+  forQuestion: (qid) => rest(`pm_question_levels?question_id=eq.${qid}&order=level.asc&limit=200`).then(r => r.data || []),
   upsert: (row) => rest("pm_question_levels", { method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=representation" }, body: row }).then(r => r.data?.[0]),
+  upsertMany: (rows) => rest("pm_question_levels", { method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=representation" }, body: rows }).then(r => r.data || []),
   reset: (qid, level) => rest(`pm_question_levels?question_id=eq.${qid}&level=eq.${level}`, { method: "DELETE" }),
+  // Which questions in a pack already have an override row at this level (so derive can skip them).
+  overridesForPackLevel: (questionIds, level) => {
+    if (!questionIds.length) return Promise.resolve([]);
+    const list = questionIds.join(",");
+    return rest(`pm_question_levels?level=eq.${level}&question_id=in.(${list})&select=question_id&limit=10000`).then(r => r.data || []);
+  },
 };
 
 // Build all level variants for a question. `overrides` is a map { [level]: overrideRow }.
@@ -4091,21 +4159,64 @@ function LevelChip({ level, levels, size = "sm" }) {
 // ============================================================
 function LevelsView() {
   const { loading, error, data, reload } = useAsync(() => db_levels.list(), []);
-  const [edit, setEdit] = useState(null);
+  const [edit, setEdit] = useState(null);      // an existing level being edited
+  const [creating, setCreating] = useState(null); // a new (unsaved) level draft
   if (error) return <ErrorState error={error} onRetry={reload} />;
   const levels = data || [];
+  const topLevel = levels.length ? Math.max(...levels.map(l => l.level)) : 0;
+  const nextLevel = topLevel + 1;
 
   const save = async (level, patch) => { await db_levels.update(level, patch); await reload(); notify(`Level ${level} updated`); };
+  const createLevel = async (row) => {
+    await db_levels.create(row);
+    await reload();
+    notify(`Level ${row.level} added`);
+    try { await rpc("pm_log", { p_action: "level_added", p_detail: `Level ${row.level}: ${row.name}` }); } catch {}
+  };
+  const removeLevel = async (l) => {
+    const ok = await confirmDialog({
+      title: `Delete Level ${l.level}?`,
+      body: `"${l.name}" will be removed. Any questions pinned to level ${l.level}, and any per-question overrides at this level, should be moved first. Only the highest level can be deleted to keep the ladder contiguous.`,
+      confirmText: "Delete level", tone: "danger",
+    });
+    if (!ok) return;
+    try {
+      await db_levels.remove(l.level);
+      await reload();
+      notify(`Level ${l.level} deleted`);
+      try { await rpc("pm_log", { p_action: "level_deleted", p_detail: `Level ${l.level}: ${l.name}` }); } catch {}
+    } catch (e) { notify(friendlyError(0, String(e?.message || e)), "error"); }
+  };
+
+  // A new level pre-fills from the current top level's rules (a sensible harder-tier starting point).
+  const startCreate = () => {
+    const base = levels.find(l => l.level === topLevel) || {};
+    setCreating({
+      level: nextLevel,
+      name: "", tagline: "", letters_rule: "", word_rule: "", theme: "", age_hint: "",
+      hidden_mode: base.hidden_mode || "word",
+      letters_hidden_default: base.letters_hidden_default ?? 9,
+      letter_position: base.letter_position || "end",
+      letter_grouping: base.letter_grouping || "spread",
+      color: nextColor(nextLevel),
+      min_word_len: base.max_word_len ?? null, max_word_len: null,
+      allow_multiword: base.allow_multiword ?? false, vocab_rule: "",
+      sort_order: nextLevel,
+    });
+  };
 
   return (
     <div>
-      <div style={{ marginBottom: S.lg }}>
-        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Levels</h1>
-        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>The game's progression structure. Each level defines how words are hidden and which themes it covers. Edit any level's rules below.</p>
+      <div style={{ marginBottom: S.lg, display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: S.md, flexWrap: "wrap" }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Levels</h1>
+          <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>The game's progression structure. Each level defines how words are hidden, which words to use, and its theme. Add levels above the current top to extend the ladder.</p>
+        </div>
+        <Btn onClick={startCreate}>+ Add level {nextLevel <= 100 ? nextLevel : ""}</Btn>
       </div>
 
       <div style={{ background: C.brandSoft, borderRadius: R.md, padding: "12px 16px", marginBottom: S.lg, fontSize: 13, color: C.brandInk, lineHeight: 1.5 }}>
-        These rules are <b>live</b> — they control exactly how every question is hidden in the game at each level. Each level sets <b>how much of the word is hidden</b> (one letter → the whole word), <b>where</b> the gaps sit, and its <b>emotional theme</b>. A pack has a default level; individual questions can override it. Hit <b>Edit</b> on any level to change its rules.
+        These rules are <b>live</b> — they control exactly how every question is hidden in the game at each level. Each level sets <b>how much of the word is hidden</b> (one letter → the whole word), <b>where</b> the gaps sit, <b>which words</b> to use (length band, multi-word), and its <b>theme</b>. A pack has a default level; individual questions can override it. New levels start from the current top level's rules — tune them, then generate or derive questions for them.
       </div>
 
       {loading ? <div style={{ display: "grid", gap: 10 }}>{Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} h={84} r={12} />)}</div>
@@ -4118,6 +4229,8 @@ function LevelsView() {
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                     <span style={{ fontSize: 16.5, fontWeight: 800, color: C.ink }}>{l.name}</span>
                     <Pill tone="muted">{l.hidden_mode === "word" ? "whole word" : `${l.letters_hidden_default ?? 1} letter${(l.letters_hidden_default ?? 1) === 1 ? "" : "s"}`}</Pill>
+                    {wordBandLabel(l) && <Pill tone="muted">{wordBandLabel(l)}</Pill>}
+                    {l.allow_multiword && <Pill tone="muted">multi-word ok</Pill>}
                     <span style={{ fontSize: 12.5, color: C.faint }}>{l.age_hint}</span>
                   </div>
                   {l.tagline && <div style={{ fontSize: 13.5, color: C.sub, marginTop: 3, fontStyle: "italic" }}>“{l.tagline}”</div>}
@@ -4134,9 +4247,16 @@ function LevelsView() {
                     <Rule label="Theme" value={l.theme} />
                     {l.hidden_mode !== "word" && <Rule label="Position" value={{ start: "Towards start", middle: "Towards middle", end: "Towards end", random: "Random" }[l.letter_position] || l.letter_position} />}
                     {l.hidden_mode !== "word" && <Rule label="Grouping" value={l.letter_grouping === "spread" ? "Spread apart" : "Grouped together"} />}
+                    {l.vocab_rule && <Rule label="Vocabulary" value={l.vocab_rule} />}
                   </div>
                 </div>
-                <Btn variant="ghost" size="sm" onClick={() => setEdit(l)}>Edit</Btn>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end" }}>
+                  <Btn variant="ghost" size="sm" onClick={() => setEdit(l)}>Edit</Btn>
+                  {l.level === topLevel && topLevel > 1 && (
+                    <button onClick={() => removeLevel(l)} title="Delete this level (top level only)"
+                      style={{ fontSize: 12, fontWeight: 700, padding: "5px 10px", borderRadius: 8, cursor: "pointer", border: "1px solid " + C.line, background: "transparent", color: C.danger }}>Delete</button>
+                  )}
+                </div>
               </div>
             ))}
           </div>
@@ -4145,8 +4265,22 @@ function LevelsView() {
       <Modal open={edit !== null} onClose={() => setEdit(null)} width={560}>
         {edit !== null && <LevelEditor level={edit} onSave={save} onClose={() => setEdit(null)} />}
       </Modal>
+      <Modal open={creating !== null} onClose={() => setCreating(null)} width={560}>
+        {creating !== null && <LevelEditor level={creating} isNew onSave={async (_lvl, patch) => { await createLevel({ ...creating, ...patch }); }} onClose={() => setCreating(null)} />}
+      </Modal>
     </div>
   );
+}
+// Distinct palette entry for a new level so consecutive levels don't collide in color.
+const LEVEL_PALETTE = ["#00B894","#55EFC4","#0984E3","#74B9FF","#6C4CE0","#A29BFE","#E17055","#E84393","#D63031","#2D3436","#F39C12","#00CEC9","#FD79A8","#636E72","#00A8FF"];
+const nextColor = (lvl) => LEVEL_PALETTE[(lvl - 1) % LEVEL_PALETTE.length];
+// Short label for a level's word-length band, if set.
+function wordBandLabel(l) {
+  const lo = l.min_word_len, hi = l.max_word_len;
+  if (lo && hi) return `${lo}–${hi} letters`;
+  if (lo) return `${lo}+ letters`;
+  if (hi) return `≤${hi} letters`;
+  return "";
 }
 const Rule = ({ label, value }) => (
   <div style={{ background: C.bg, borderRadius: R.sm, padding: "8px 11px" }}>
@@ -4172,29 +4306,41 @@ function sampleMask(l) {
   return maskWord(sample, n, l.letter_position, l.letter_grouping);
 }
 
-function LevelEditor({ level, onSave, onClose }) {
+function LevelEditor({ level, onSave, onClose, isNew = false }) {
   const [f, setF] = useState({ ...level });
   const [busy, setBusy] = useState(false);
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
   const submit = async () => {
     setBusy(true);
-    try { await onSave(level.level, { name: f.name, tagline: f.tagline, letters_rule: f.letters_rule, word_rule: f.word_rule, theme: f.theme, age_hint: f.age_hint, hidden_mode: f.hidden_mode, letters_hidden_default: f.letters_hidden_default, letter_position: f.letter_position, letter_grouping: f.letter_grouping, color: f.color }); onClose(); }
-    catch { setBusy(false); }
+    try {
+      await onSave(level.level, {
+        name: f.name, tagline: f.tagline, letters_rule: f.letters_rule, word_rule: f.word_rule,
+        theme: f.theme, age_hint: f.age_hint, hidden_mode: f.hidden_mode,
+        letters_hidden_default: f.letters_hidden_default, letter_position: f.letter_position,
+        letter_grouping: f.letter_grouping, color: f.color,
+        min_word_len: f.min_word_len === "" || f.min_word_len == null ? null : parseInt(f.min_word_len),
+        max_word_len: f.max_word_len === "" || f.max_word_len == null ? null : parseInt(f.max_word_len),
+        allow_multiword: !!f.allow_multiword, vocab_rule: f.vocab_rule || "",
+        ...(isNew ? { level: f.level, sort_order: f.sort_order ?? f.level } : {}),
+      });
+      onClose();
+    }
+    catch (e) { setBusy(false); notify(friendlyError(0, String(e?.message || e)), "error"); }
   };
   return (
     <>
-      <ModalHead title={`Edit Level ${level.level}`} subtitle="Define this level's rules and theme" />
+      <ModalHead title={isNew ? `Add Level ${level.level}` : `Edit Level ${level.level}`} subtitle={isNew ? "Define the new level's rules and theme" : "Define this level's rules and theme"} />
       <div style={{ padding: S.xl, display: "grid", gap: S.md + 2, maxHeight: "64vh", overflowY: "auto" }}>
-        <Field label="Level name"><Input value={f.name} onChange={(e) => set("name", e.target.value)} autoFocus /></Field>
+        <Field label="Level name"><Input value={f.name} onChange={(e) => set("name", e.target.value)} autoFocus placeholder={isNew ? "e.g. Master Wordsmith" : ""} /></Field>
         <Field label="Tagline" hint="Short, child-friendly description"><Input value={f.tagline} onChange={(e) => set("tagline", e.target.value)} /></Field>
         <Field label="Letters rule" hint="How much of the word is hidden"><Input value={f.letters_rule} onChange={(e) => set("letters_rule", e.target.value)} /></Field>
-        <Field label="Words rule" hint="Word length / complexity"><Input value={f.word_rule} onChange={(e) => set("word_rule", e.target.value)} /></Field>
+        <Field label="Words rule" hint="Word length / complexity (free text)"><Input value={f.word_rule} onChange={(e) => set("word_rule", e.target.value)} /></Field>
         <Field label="Theme" hint="Emotional / thematic focus"><Input value={f.theme} onChange={(e) => set("theme", e.target.value)} /></Field>
         <div className="pm-form-2">
           <Field label="Age hint"><Input value={f.age_hint} onChange={(e) => set("age_hint", e.target.value)} /></Field>
           <Field label="Default letters hidden" hint="Suggested for new questions"><Input type="number" min={0} value={f.letters_hidden_default} onChange={(e) => set("letters_hidden_default", parseInt(e.target.value) || 0)} /></Field>
         </div>
-        <Field label="Hidden mode" hint="Authoring guidance">
+        <Field label="Hidden mode" hint="How the target word is masked in the game">
           <Select value={f.hidden_mode} onChange={(e) => set("hidden_mode", e.target.value)}><option value="letters">Hide some letters</option><option value="word">Hide the whole word</option></Select>
         </Field>
         <div className="pm-form-2">
@@ -4213,6 +4359,23 @@ function LevelEditor({ level, onSave, onClose }) {
             </Select>
           </Field>
         </div>
+
+        {/* Vocabulary rules — shape WHICH answer words this level uses (drives the generator + shows intent). */}
+        <div style={{ borderTop: "1px solid " + C.line, paddingTop: S.md }}>
+          <div style={{ fontSize: 11, fontWeight: 800, color: C.faint, letterSpacing: 0.3, textTransform: "uppercase", marginBottom: 8 }}>Vocabulary rules</div>
+          <div className="pm-form-2">
+            <Field label="Min word length" hint="Blank = no minimum"><Input type="number" min={1} max={40} value={f.min_word_len ?? ""} onChange={(e) => set("min_word_len", e.target.value)} placeholder="—" /></Field>
+            <Field label="Max word length" hint="Blank = no maximum"><Input type="number" min={1} max={40} value={f.max_word_len ?? ""} onChange={(e) => set("max_word_len", e.target.value)} placeholder="—" /></Field>
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 9, cursor: "pointer", fontSize: 13.5, color: C.ink2, marginTop: 4 }}>
+            <input type="checkbox" checked={!!f.allow_multiword} onChange={(e) => set("allow_multiword", e.target.checked)} style={{ width: 16, height: 16 }} />
+            Allow two-word answers / short phrases
+          </label>
+          <Field label="Vocabulary guidance" hint="Free text passed to the AI generator (e.g. 'nuanced emotional-regulation words, GCSE-level')" style={{ marginTop: S.sm }}>
+            <Textarea rows={2} value={f.vocab_rule || ""} onChange={(e) => set("vocab_rule", e.target.value)} />
+          </Field>
+        </div>
+
         <div style={{ background: C.bg, borderRadius: R.md, padding: "11px 14px" }}>
           <div style={{ fontSize: 10.5, fontWeight: 800, color: C.faint, letterSpacing: 0.3, textTransform: "uppercase", marginBottom: 6 }}>Example shape</div>
           <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
@@ -4225,7 +4388,7 @@ function LevelEditor({ level, onSave, onClose }) {
         </div>
         <Field label="Color">
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {["#00B894","#55EFC4","#0984E3","#74B9FF","#6C4CE0","#A29BFE","#E17055","#E84393","#D63031","#2D3436","#F39C12","#00CEC9"].map(c => (
+            {["#00B894","#55EFC4","#0984E3","#74B9FF","#6C4CE0","#A29BFE","#E17055","#E84393","#D63031","#2D3436","#F39C12","#00CEC9","#FD79A8","#636E72","#00A8FF"].map(c => (
               <button key={c} onClick={() => set("color", c)} style={{ width: 30, height: 30, borderRadius: R.sm, cursor: "pointer", background: c, border: "3px solid " + (f.color === c ? C.ink : "transparent") }} />
             ))}
           </div>
@@ -4233,7 +4396,7 @@ function LevelEditor({ level, onSave, onClose }) {
       </div>
       <ModalFoot>
         <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
-        <Btn onClick={submit} disabled={busy}>{busy ? "Saving…" : "Save level"}</Btn>
+        <Btn onClick={submit} disabled={busy || !f.name}>{busy ? "Saving…" : (isNew ? "Add level" : "Save level")}</Btn>
       </ModalFoot>
     </>
   );
@@ -4350,6 +4513,122 @@ function QuestionLevelEditor({ question, variant, onSave, onClose }) {
       <ModalFoot>
         <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
         <Btn onClick={submit} disabled={busy}>{busy ? "Saving…" : "Save this level"}</Btn>
+      </ModalFoot>
+    </>
+  );
+}
+
+// ============================================================
+// Derive a level across a whole pack — materialize editable override rows for a target level,
+// pre-filled by applying that level's masking rule to each question's current word. Handy when
+// you add a new high level and want per-question rows you can then hand-tune. (A new level ALSO
+// renders automatically for every question via the shared engine — this is only for when you want
+// explicit, editable per-question versions at that level.)
+// ============================================================
+function DeriveLevelDialog({ pack, questions, levels, onClose, onDone }) {
+  const [targetLevel, setTargetLevel] = useState(() => (levels && levels.length ? Math.max(...levels.map(l => l.level)) : 1));
+  const [mode, setMode] = useState("skip"); // skip | overwrite
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+
+  const activeQs = (questions || []).filter(q => q.status === "active");
+  const lvlDef = (levels || []).find(l => l.level === targetLevel);
+
+  // Preview the first few masked results for the chosen level.
+  const preview = React.useMemo(() => {
+    if (!lvlDef) return [];
+    return activeQs.slice(0, 4).map(q => {
+      const v = buildLevelVariants(q, [lvlDef], {})[0];
+      return { answer: q.answer, blank: v?.blank || "", sentence: v?.sentence || "" };
+    });
+  }, [lvlDef, activeQs]);
+
+  const run = async () => {
+    if (!lvlDef) return;
+    setBusy(true);
+    try {
+      const ids = activeQs.map(q => q.id);
+      // Which already have an override at this level?
+      let skipIds = new Set();
+      if (mode === "skip") {
+        const existing = await db_qlevels.overridesForPackLevel(ids, targetLevel);
+        skipIds = new Set(existing.map(r => r.question_id));
+      }
+      const targets = activeQs.filter(q => !skipIds.has(q.id));
+      // Build override rows: pin the computed letters/position/grouping so the row is concrete
+      // and editable, but leave template/answer/alt null so they still inherit the concept.
+      const rows = targets.map(q => {
+        const v = buildLevelVariants(q, [lvlDef], {})[0];
+        const whole = v?.target?.wholeWord;
+        return {
+          question_id: q.id, level: targetLevel,
+          template: null, answer: null, alt_answer: null,
+          letters_hidden: whole ? (q.answer || "").length : (v?.letters ?? lvlDef.letters_hidden_default ?? 1),
+          letter_position: lvlDef.letter_position || null,
+          letter_grouping: lvlDef.letter_grouping || null,
+          enabled: true,
+        };
+      });
+      let written = 0;
+      // Upsert in chunks to stay well under any payload limits.
+      for (let i = 0; i < rows.length; i += 200) {
+        const chunk = rows.slice(i, i + 200);
+        if (chunk.length) { await db_qlevels.upsertMany(chunk); written += chunk.length; }
+      }
+      setResult({ written, skipped: skipIds.size, total: activeQs.length });
+      try { await rpc("pm_log", { p_action: "level_derived", p_detail: `L${targetLevel} across ${pack.slug}: ${written} rows` }); } catch {}
+      notify(`Derived Level ${targetLevel} for ${written} question${written === 1 ? "" : "s"}`);
+      onDone && onDone();
+    } catch (e) {
+      notify(friendlyError(0, String(e?.message || e)), "error");
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <>
+      <ModalHead title="Derive a level across this pack" subtitle={`Create editable per-question versions at a chosen level for “${pack.name}”`} />
+      <div style={{ padding: S.xl, display: "grid", gap: S.md, maxHeight: "64vh", overflowY: "auto" }}>
+        <div style={{ background: C.brandSoft, borderRadius: R.md, padding: "11px 14px", fontSize: 12.5, color: C.brandInk, lineHeight: 1.5 }}>
+          A new level already renders automatically for every question. Use this only when you want concrete, <b>editable</b> rows at a level so you can hand-tune individual questions. It applies the level's masking rule to each question's current word.
+        </div>
+        <div className="pm-form-2">
+          <Field label="Target level">
+            <Select value={targetLevel} onChange={(e) => setTargetLevel(parseInt(e.target.value))}>
+              {(levels || []).map(l => <option key={l.level} value={l.level}>Level {l.level}{l.name ? ` — ${l.name}` : ""}</option>)}
+            </Select>
+          </Field>
+          <Field label="If a version already exists">
+            <Select value={mode} onChange={(e) => setMode(e.target.value)}>
+              <option value="skip">Skip those questions</option>
+              <option value="overwrite">Overwrite them</option>
+            </Select>
+          </Field>
+        </div>
+        <div style={{ fontSize: 12.5, color: C.sub }}>
+          {activeQs.length} active question{activeQs.length === 1 ? "" : "s"} in this pack{lvlDef ? "" : " · pick a level"}.
+        </div>
+        {preview.length > 0 && (
+          <div style={{ background: C.bg, borderRadius: R.md, padding: "11px 14px" }}>
+            <div style={{ fontSize: 10.5, fontWeight: 800, color: C.faint, letterSpacing: 0.3, textTransform: "uppercase", marginBottom: 8 }}>Preview at Level {targetLevel}</div>
+            <div style={{ display: "grid", gap: 7 }}>
+              {preview.map((p, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 12.5, color: C.sub, minWidth: 70, fontWeight: 700 }}>{p.answer}</span>
+                  <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 13.5, fontWeight: 800, letterSpacing: 2, color: lvlDef?.color || C.brand }}>{p.blank}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {result && (
+          <div style={{ background: "#00B89415", border: "1px solid #00B89440", borderRadius: R.md, padding: "11px 14px", fontSize: 13, color: C.ink }}>
+            Done — <b>{result.written}</b> version{result.written === 1 ? "" : "s"} written{result.skipped ? `, ${result.skipped} skipped` : ""} (of {result.total} active).
+          </div>
+        )}
+      </div>
+      <ModalFoot>
+        <Btn variant="ghost" onClick={onClose}>{result ? "Close" : "Cancel"}</Btn>
+        {!result && <Btn onClick={run} disabled={busy || !lvlDef || activeQs.length === 0}>{busy ? "Deriving…" : `Derive Level ${targetLevel}`}</Btn>}
       </ModalFoot>
     </>
   );
@@ -4523,8 +4802,19 @@ function buildGeneratorPrompt({ pack, levels, selectedLevels, themes, count, for
       if (l.theme) bits.push(l.theme);
       if (l.age_hint) bits.push(`ages ${l.age_hint}`);
       lines.push(`- ${bits.join(" — ")}`);
+      // Per-level word constraints so generated words actually fit the level's rules.
+      const wc = [];
+      if (l.min_word_len && l.max_word_len) wc.push(`answer words ${l.min_word_len}–${l.max_word_len} letters long`);
+      else if (l.min_word_len) wc.push(`answer words at least ${l.min_word_len} letters`);
+      else if (l.max_word_len) wc.push(`answer words at most ${l.max_word_len} letters`);
+      if (l.allow_multiword) wc.push(`two-word answers or short phrases are allowed`);
+      else wc.push(`single words only`);
+      if (l.vocab_rule) wc.push(l.vocab_rule);
+      if (wc.length) lines.push(`    · words for L${l.level}: ${wc.join("; ")}.`);
+      // Remind that BOTH answer words must obey the band AND differ in length from each other.
+      if (l.min_word_len || l.max_word_len) lines.push(`    · both the primary AND the alternate for L${l.level} must fall in that length band, while still differing in length from EACH OTHER so only one fits the blanks.`);
     }
-    lines.push(`The same question works across levels; the game itself controls how much of the word is hidden per level, so you do NOT need to vary the blank difficulty — just write good, level-appropriate sentences and words.`);
+    lines.push(`The same question can work across levels; the game itself controls how much of the word is hidden per level. Focus on writing sentences and word-pairs that match each level's theme, age, and the word constraints above.`);
     lines.push("");
   }
 
@@ -4532,7 +4822,10 @@ function buildGeneratorPrompt({ pack, levels, selectedLevels, themes, count, for
   lines.push(`RULES (important):`);
   lines.push(`1. Every sentence must contain exactly one {blank}.`);
   lines.push(`2. Provide TWO answer words, both genuinely positive and age-appropriate. The FIRST (primary) word is the correct answer — it is the word the sentence is really about. The SECOND word must be another positive word whose SPELLING does NOT fit the primary's blank pattern — the simplest reliable way is to make it a DIFFERENT LENGTH from the primary (a different-length word can never match the fixed blanks at any level). Do NOT make them the same length near-synonyms; if both could spell into the pattern the question has two answers. Example: primary PROUD (5) with alternate GLAD (4) — both positive, different lengths, so only PROUD fits "PR_UD".`);
-  lines.push(`3. Answer words are single words, UPPERCASE, no punctuation. Prefer common words a child would know; keep them short enough to spell.`);
+  const anyMultiword = levelDefs.some(l => l.allow_multiword);
+  lines.push(anyMultiword
+    ? `3. Answer words are UPPERCASE, no punctuation. Single words by default; where a level's rules allow it, a two-word answer or short phrase is fine (still make the primary and alternate different lengths so only one fits the blanks). Prefer words a child at that level would know.`
+    : `3. Answer words are single words, UPPERCASE, no punctuation. Prefer common words a child would know; keep them short enough to spell.`);
   lines.push(`4. Sentences are warm, simple, first-person ("I am…", "I feel…", "Being…"), and self-affirming.`);
   lines.push(`5. Avoid anything scary, negative, clinical, or that references the child doing something wrong.`);
   lines.push(`6. No duplicates; vary the sentence structure.`);
@@ -4999,6 +5292,8 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
   const [qEdit, setQEdit] = useState(null);
   const [bulk, setBulk] = useState(false);
   const [play, setPlay] = useState(false);
+  const [derive, setDerive] = useState(false);
+  const [deriveQs, setDeriveQs] = useState(null);
   const [sel, setSel] = useState(new Set());
   const [expanded, setExpanded] = useState(new Set());
   const toggleExpand = (id) => setExpanded(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -5088,6 +5383,7 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
         <div className="pm-pack-actions" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <Btn variant="soft" size="sm" onClick={() => setPlay(true)} icon="▶">Play</Btn>
           {onEditPack && <Btn variant="ghost" size="sm" onClick={() => onEditPack(pack)} icon="✎">Edit</Btn>}
+          <Btn variant="ghost" size="sm" onClick={() => setDerive(true)} icon="⚙">Derive level</Btn>
         </div>
       </div>
 
@@ -5194,9 +5490,24 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
       <Modal open={bulk} onClose={() => setBulk(false)} labelledBy="pm-imp-title">
         {bulk && <BulkImport packId={pack.id} onDone={importQ} onClose={() => setBulk(false)} />}
       </Modal>
+      <Modal open={derive} onClose={() => setDerive(false)} width={560}>
+        {derive && (
+          <DeriveLevelGate pack={pack} levels={levels}
+            onClose={() => setDerive(false)}
+            onDone={afterChange} />
+        )}
+      </Modal>
       {play && <PlayMode pack={pack} levels={levels} onClose={() => setPlay(false)} />}
     </div>
   );
+}
+
+// Loads ALL active questions for the pack (past the paginated view) then hands off to the dialog.
+function DeriveLevelGate({ pack, levels, onClose, onDone }) {
+  const { loading, error, data } = useAsync(() => db.allQuestionsForPack(pack.id), [pack.id]);
+  if (loading) return <div style={{ padding: S.xl }}><Spinner label="Loading pack questions…" /></div>;
+  if (error) return <div style={{ padding: S.xl }}><ErrorState error={error} /></div>;
+  return <DeriveLevelDialog pack={pack} questions={data || []} levels={levels} onClose={onClose} onDone={onDone} />;
 }
 
 const Pager = ({ page, pages, onPage }) => (
