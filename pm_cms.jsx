@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.04-12", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.04-13", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -3011,6 +3011,23 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Comprehensive audit fixes (two real issues found + fixed):**
+  · **Pack header count bug (introduced by the server-side pack filters):** the header showed the
+    QUERY total, which is now the FILTERED count — so applying a date/level filter made it read
+    e.g. "3 questions" for an 11-question pack. Fixed: the header now shows the pack's true count
+    (pack.total_questions from pm_pack_overview) and, when a filter is active, appends "· N match
+    filter". Added an isFiltered flag (datePreset !== 'all' || level !== 'all').
+  · **RPC grant posture drift:** recreating pm_search_questions (and earlier pm_clone_pack) via
+    DROP+CREATE silently restored the PUBLIC execute grant, so anon could CALL pm_search_questions,
+    pm_clone_pack, pm_dashboard_stats, pm_lint, pm_lint_details, pm_log, pm_mark_released. No breach
+    (all are SECURITY INVOKER, so writes were still RLS-blocked and reads were published-scoped), but
+    it contradicted the intended model. Revoked execute from PUBLIC + anon on all of them (the fix
+    that had been missed needed to target PUBLIC, not just anon); authenticated retains execute. Now
+    only the two trigger functions are anon-executable, and those can't be called as RPCs anyway.
+  Audit also verified (no change needed): all 16 components render; client/edge maskWord parity
+  (384 cases, 0 mismatches) + buildLevelVariants override handling; all RPCs execute; the live
+  game-feed renders BRAVE correctly L1→L10; created_at auto-populates and updated_at trigger fires;
+  db.questions builds valid URLs for every filter combo (verified the full combined query live).
 - **Pack-detail filters moved SERVER-SIDE (span the whole pack, not just the loaded page).** The
   per-pack "when added" / level / sort filters were initially client-side (page-only). db.questions
   now takes fromDate/toDate/level/packLevel/sort and builds the PostgREST query, so filtering +
@@ -4816,6 +4833,8 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
   };
   const bulkStatus = async (status) => { const ids = [...sel]; try { await db.setQuestionsStatus(ids, status); await afterChange(); notify(`${ids.length} set to ${status}`); } catch (e) { notify("Bulk update failed: " + e.message, { kind: "error" }); } };
 
+  // True when a server-side filter (date window or level) is narrowing the pack.
+  const isFiltered = datePreset !== "all" || lvlF !== "all";
   // Date filter, level filter, and sort are now applied server-side (in db.questions) so they
   // span the whole pack and paginate correctly. Only the quick text search stays client-side.
   const shown = (rows || []).filter(q => {
@@ -4841,7 +4860,7 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
           </div>
           {pack.description && <p style={{ margin: "8px 0 0", color: C.sub, fontSize: 14.5, lineHeight: 1.5 }}>{pack.description}</p>}
           {pack.tags?.length > 0 && <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 8 }}>{pack.tags.map(t => <span key={t} style={{ fontSize: 11.5, fontWeight: 700, background: C.lineSoft, color: C.sub, padding: "2px 8px", borderRadius: R.sm }}>#{t}</span>)}</div>}
-          <div style={{ marginTop: S.md, fontSize: 13, color: C.faint }}><b style={{ color: C.ink }}>{total}</b> question{total === 1 ? "" : "s"} · slug <code style={{ background: C.bg, padding: "1px 6px", borderRadius: 5 }}>{pack.slug}</code></div>
+          <div style={{ marginTop: S.md, fontSize: 13, color: C.faint }}><b style={{ color: C.ink }}>{pack.total_questions ?? total}</b> question{(pack.total_questions ?? total) === 1 ? "" : "s"}{isFiltered && total !== (pack.total_questions ?? total) ? ` · ${total} match filter` : ""} · slug <code style={{ background: C.bg, padding: "1px 6px", borderRadius: 5 }}>{pack.slug}</code></div>
         </div>
         <div className="pm-pack-actions" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <Btn variant="soft" size="sm" onClick={() => setPlay(true)} icon="▶">Play</Btn>
