@@ -73,7 +73,7 @@ function _extends(){return _extends=Object.assign?Object.assign.bind():function(
 //   - App shell (auth gate, routing via history, command surface)
 // ============================================================
 // ---------- config ----------
-const CFG={build:"2026.07.05-07",// bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+const CFG={build:"2026.07.05-08",// bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
 url:"https://tytrmjjucqijzcrbwjfm.supabase.co",key:"sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",adminEmail:"admin@positiveminds.app",sessionStore:"pm_admin_session_v2",sessionMaxAgeMs:7*24*60*60*1000,// keep users logged in for 7 days
 pageSize:40};// ============================================================
 // Session + Auth
@@ -356,6 +356,91 @@ const pushToGame=async profile=>{const cfg=getPushCfg();if(!cfg.url){notify("Set
 // These are hardcoded so they always ship with the build.
 // ============================================================
 const DOC_ARCHITECTURE=`# Positive Minds CMS — Site Architecture & Structure
+
+## 0. START HERE (new developer / taking over)
+
+**Read in this order.** This document is long because it is complete; you do not need all of it on
+day one.
+
+1. **§1 What this is** and **§2 The game mechanic** — 5 minutes. Nothing else makes sense without
+   them. The single most important idea: it is a SPELLING puzzle, both words are always POSITIVE,
+   and the wrong option is guaranteed wrong by being a DIFFERENT LENGTH.
+2. **§0.1 Live coordinates** (just below) — where everything actually lives.
+3. **§0.2 Run it / change it / ship it** — the loop.
+4. **CLAUDE.md** (the second tab) — the hard rules. These are invariants learned from real bugs.
+   Breaking one silently breaks the game. Read it before your first change, not after.
+5. **§7d Integration Guide** — if you are building or maintaining the game client, go straight there.
+   It has a complete, runnable sync implementation.
+6. The rest as you need it. **§12 is the changelog** — read the top few entries to see what has been
+   moving lately.
+
+If you only remember three things:
+- **The masking engine and the validator are duplicated in four places and MUST stay byte-identical.**
+  (App, content-api, game-feed, generate-questions.) If a blank renders differently in the CMS than in
+  the game, the game is wrong.
+- **PostgREST silently caps at 1,000 rows.** No error. Always set an explicit limit or paginate.
+- **The app is a PWA with an aggressive service worker.** Most "my change didn't deploy" reports are a
+  cached build. The sidebar shows a build stamp — if it didn't change, you are seeing a cached build.
+
+### 0.1 Live coordinates
+
+| What | Where |
+|---|---|
+| Supabase project | \`tytrmjjucqijzcrbwjfm\` → \`https://tytrmjjucqijzcrbwjfm.supabase.co\` |
+| Publishable (anon) key | \`sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev\` — safe in the browser; RLS enforces everything |
+| Repo | \`github.com/alcharles1980-design/positive-minds-cms\` |
+| Hosting | Cloudflare Pages project \`positive-minds-cms\` (push to \`main\` → GitHub Actions → deploy) |
+| Admin login | \`admin@positiveminds.app\` |
+| **Content API (the game client calls this)** | \`https://tytrmjjucqijzcrbwjfm.supabase.co/functions/v1/content-api\` |
+
+**Edge functions (4):**
+- \`content-api\` — the sync API for the game client. **Public** (verify_jwt=false). Manifest,
+  full pull, incremental \`?since=\`, deletions, ETag/304. **This is the one the game uses.**
+- \`generate-questions\` — AI content generation. **Auth-gated (verify_jwt=TRUE)** so only a logged-in
+  admin can spend API credits. Writes ONLY to the review queue, never to live content.
+- \`game-feed\` — the older, profile-driven feed. Kept for back-compat. New clients should use
+  content-api.
+- \`pack-describe\` — small helper that asks an LLM to write a pack description.
+
+**GitHub secrets needed for deploys:** \`CLOUDFLARE_API_TOKEN\` (Account → Cloudflare Pages → Edit) and
+\`CLOUDFLARE_ACCOUNT_ID\`.
+
+### 0.2 Run it, change it, ship it
+
+**The app you deploy is \`index.html\` — a single self-contained file. It is the OUTPUT, not the
+source.** The app is authored as modular \`.jsx\` files, concatenated in a fixed dependency order by
+\`assemble.cjs\`, compiled with Babel (\`@babel/preset-react\`, **classic** runtime — the automatic/dev
+runtime emits an import that breaks the plain \`<script>\` and yields a blank screen), then wrapped by
+\`build_html.cjs\`.
+
+The loop:
+1. Edit the modular source.
+2. **Check the docs still parse BEFORE building.** They are template literals; a stray backtick or
+   \`\${\` silently breaks them, and \`assemble.cjs\` will then leave the PREVIOUS compiled file in place —
+   so \`node --check\` passes on a stale build and you ship nothing. This has happened repeatedly.
+3. Build. Confirm the compiled file was **freshly written** and contains a string you just added.
+4. Bump \`CFG.build\` (the stamp shown in the sidebar).
+5. Push to \`main\`. GitHub Actions deploys to Cloudflare Pages.
+6. Hard-refresh (service worker) and check the stamp changed.
+
+**Database changes** are Postgres migrations against the Supabase project. **Edge functions** deploy
+separately (\`supabase functions deploy <name> --project-ref tytrmjjucqijzcrbwjfm\`; add
+\`--no-verify-jwt\` for content-api).
+
+### 0.3 What is where
+
+| Concern | Where it lives |
+|---|---|
+| Config, auth, data layer, **the masking engine**, **the validator** | \`core.jsx\` |
+| UI primitives (buttons, modals, fields, toasts) | \`primitives.jsx\` |
+| Packs / questions editors, bulk import | \`editors.jsx\` |
+| Levels (definitions, per-question overrides, derive) | \`levels.jsx\` |
+| AI review queue (approve / edit / reject) | \`aireview.jsx\` |
+| AI settings (providers, keys, usage) | \`aisettings.jsx\` |
+| Prompt builder (copy-paste workflow) | \`generator.jsx\` |
+| Export/transform engine + publishing | \`engine.jsx\`, \`publish1/2.jsx\` |
+| These three documents | \`devdocs.jsx\` |
+| Routing, nav, app shell | \`shell.jsx\` |
 
 ## 1. What this is
 A content management system for the **Positive Minds** children's word game
@@ -681,6 +766,191 @@ Best-effort: if repair fails, the originals are queued WITH their flags.
 **What the machine can't do:** judge tone, meaning, suitability. A rejected test case proved the
 point — "PERFECT" passes every mechanical check but a human rightly rejected it as an unhealthy
 standard for a child. Machine catches mechanics; human catches meaning. That is why the queue exists.
+
+## 7d. INTEGRATION GUIDE (for whoever builds/maintains the game client)
+
+Everything a client needs to consume content. The shapes below are copied from a REAL response, not
+from memory.
+
+**Base URL**
+\`\`\`
+https://tytrmjjucqijzcrbwjfm.supabase.co/functions/v1/content-api
+\`\`\`
+Public by default (no auth). CORS is open, so it works from a browser, a mobile app, or a server.
+If a \`CONTENT_API_KEY\` secret is ever set on the function, send it as \`X-API-Key: <key>\` or \`?key=\`.
+
+### The mental model
+
+The CMS is the source of truth. The client keeps a **cursor** (\`global_version\`) and periodically asks
+"has anything changed?". If yes, it pulls only what changed, applies deletions, and advances its
+cursor. **Questions arrive with every level variation ALREADY RENDERED — the client never does any
+masking itself.**
+
+### Endpoints
+
+| Call | Use it for |
+|---|---|
+| \`?manifest=1\` | Cheap poll. Returns versions only, no content. |
+| (no params) | Full pull of all published content. |
+| \`?since=<epoch or ISO>\` | Incremental: only changed packs + a \`deletions\` array. |
+| \`?packs=slug1,slug2\` | Restrict to certain packs. |
+| \`?levels=1,2,3\` | Restrict which level variations are rendered. |
+| \`?format=xml\` | XML instead of JSON. |
+| \`?health=1\` | Liveness check. |
+
+Every response carries an **ETag**. Send it back as \`If-None-Match\` and you get **304 Not Modified**
+with no body when nothing changed.
+
+### The manifest (poll this)
+
+\`\`\`json
+{
+  "global_version": 1783810085,
+  "global_updated_at": "2026-07-11T22:48:04.891Z",
+  "levels_version": 1783242969,
+  "pack_count": 14,
+  "question_count": 12,
+  "packs": [
+    { "slug": "confidence", "name": "Confidence", "content_version": 56,
+      "active_questions": 12, "version": 1783810085 }
+  ]
+}
+\`\`\`
+If \`global_version\` matches the cursor you stored, **there is nothing to do**. That is the whole point:
+one tiny request instead of pulling all content.
+
+### The content response
+
+\`\`\`json
+{
+  "meta": {
+    "mode": "full",                      // or "incremental"
+    "global_version": 1783810085,        // <-- STORE THIS as your next cursor
+    "levels_version": 1783242969,
+    "pack_count": 14,
+    "question_count": 12,
+    "generated_at": "2026-07-11T23:31:04.287Z"
+  },
+  "levels":  [ /* the level DEFINITIONS — see below */ ],
+  "packs":   [ /* each pack, with its questions */ ],
+  "deletions": [ /* ONLY present when ?since= was used */ ]
+}
+\`\`\`
+
+**A level definition** (use these for labels, colours, age hints — NOT for masking):
+\`\`\`json
+{
+  "level": 1, "name": "First Words", "tagline": "Just one letter to find",
+  "theme": "Simple self-affirmation", "age_hint": "Around 5", "color": "#00B894",
+  "hidden_mode": "letters", "letters_hidden_default": 1,
+  "letter_position": "middle", "letter_grouping": "grouped",
+  "min_word_len": null, "max_word_len": null, "allow_multiword": false, "vocab_rule": ""
+}
+\`\`\`
+
+**A pack:** \`slug, name, emoji, description, color, difficulty, tags, level, content_version,
+updated_at, questions[]\`.
+
+**A question — this is the important one:**
+\`\`\`json
+{
+  "id": "d21d33cc-...",
+  "template": "I am {blank} when I try new things",
+  "answer": "BRAVE",
+  "alt_answer": "BOLD",
+  "level": 10,                      // its own level (metadata; does NOT limit the variations)
+  "updated_at": "...",
+  "levels": [                       // ONE ENTRY PER LEVEL — already rendered for you
+    {
+      "level": 1,
+      "level_name": "First Words",
+      "sentence": "I am BRA_E when I try new things",   // <-- SHOW THIS
+      "blank": "BRA_E",                                  // <-- the masked word
+      "options": ["BRAVE", "BOLD"],                      // <-- SHOW THESE TWO (shuffle them!)
+      "answer": "BRAVE",                                 // <-- the correct one
+      "alt_answer": "BOLD",
+      "target": {
+        "word": "BRAVE", "altWord": "BOLD", "blankShape": "BRA_E",
+        "wholeWord": false, "lettersHidden": 1,
+        "position": "random", "grouping": "spread"
+      },
+      "frames": {},
+      "enabled": true
+    }
+    // ... one of these per level
+  ]
+}
+\`\`\`
+
+**To render a question at level N:** find the entry in \`question.levels\` where \`level === N\`, show
+\`sentence\`, and offer \`options\` (shuffled). The child is right if they pick \`answer\`. That is all.
+
+### A complete sync implementation
+
+\`\`\`js
+const BASE = 'https://tytrmjjucqijzcrbwjfm.supabase.co/functions/v1/content-api';
+
+async function sync(store) {
+  // store = { version: number|null, etag: string|null, packs: {...}, levels: [...] }
+
+  // 1) Cheap poll. Nothing changed => stop here.
+  const m = await (await fetch(BASE + '?manifest=1')).json();
+  if (store.version && m.global_version === store.version) return { changed: false };
+
+  // 2) First run => full pull. Otherwise => incremental.
+  const url = store.version ? BASE + '?since=' + store.version : BASE;
+
+  const res = await fetch(url, {
+    headers: store.etag ? { 'If-None-Match': store.etag } : {},
+  });
+  if (res.status === 304) return { changed: false };   // belt and braces
+  if (!res.ok) throw new Error('sync failed: ' + res.status);
+
+  const data = await res.json();
+
+  // 3) Apply deletions FIRST (incremental only).
+  for (const d of data.deletions ?? []) {
+    if (d.type === 'pack')     delete store.packs[d.slug];
+    if (d.type === 'question') removeQuestionById(store, d.id);
+  }
+
+  // 4) Upsert. A returned pack always carries its FULL current question set,
+  //    so replace it wholesale — do not try to merge question-by-question.
+  for (const pack of data.packs) store.packs[pack.slug] = pack;
+
+  // 5) Level definitions (labels/colours). Cheap; just take the latest.
+  if (data.levels?.length) store.levels = data.levels;
+
+  // 6) Advance the cursor. Do this LAST, only after everything applied cleanly.
+  store.version = data.meta.global_version;
+  store.etag    = res.headers.get('etag');
+
+  return { changed: true, packs: data.packs.length };
+}
+\`\`\`
+
+### Rules for the client (learned the hard way)
+
+1. **Never assume 10 levels.** Levels are data and can be added (up to 100). Iterate whatever the feed
+   reports. Hardcoding 10 will silently drop new content.
+2. **Never do your own masking.** The blanks are pre-rendered. If the client re-implements masking it
+   WILL drift from the CMS and the game will show a different puzzle than the author designed.
+3. **Shuffle the two options.** The correct answer is always \`options[0]\`. Present them in random order.
+4. **Apply deletions before upserts**, and **advance the cursor last** — so a crash mid-sync just means
+   you redo the same window, rather than skipping it.
+5. **A pack in an incremental response is complete.** Replace it wholesale rather than merging.
+6. **Only published packs and active questions are ever returned.** Unpublishing a pack shows up as a
+   deletion in \`?since=\`.
+7. **The integer cursor is safe.** \`global_version\` is a floored epoch, so it can re-send the boundary
+   row but will never skip one. Redundant, never lossy.
+
+### Testing it
+
+\`\`\`bash
+curl 'https://tytrmjjucqijzcrbwjfm.supabase.co/functions/v1/content-api?health=1'
+curl 'https://tytrmjjucqijzcrbwjfm.supabase.co/functions/v1/content-api?manifest=1'
+curl 'https://tytrmjjucqijzcrbwjfm.supabase.co/functions/v1/content-api?packs=confidence&levels=1'
+\`\`\`
 
 ## 8. Publishing channels
 All emit through a chosen profile:
