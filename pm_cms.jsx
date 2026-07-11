@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.05-04", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.05-05", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -145,6 +145,30 @@ const rpc = async (fn, args = {}, _retried = false) => {
   }
   const t = await res.text();
   return t ? JSON.parse(t) : null;
+};
+
+// Call a Supabase Edge Function with the logged-in user's token. Used for functions deployed with
+// verify_jwt=true (e.g. generate-questions), so only an authenticated admin can invoke them.
+// Mirrors rpc()'s auth handling: one silent refresh+retry on 401.
+const callFn = async (name, payload = {}, _retried = false) => {
+  const bearer = session.token || CFG.key;
+  const res = await fetch(`${CFG.url}/functions/v1/${name}`, {
+    method: "POST",
+    headers: { apikey: CFG.key, Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (res.status === 401 && session.token && !_retried) {
+    const ok = await auth.refresh();
+    if (ok) return callFn(name, payload, true);
+    session.clear(); authEvents.expire();
+  }
+  const t = await res.text();
+  let parsed = null;
+  try { parsed = t ? JSON.parse(t) : null; } catch { parsed = { error: "bad_response", message: t.slice(0, 300) }; }
+  // Edge functions signal problems in the BODY (e.g. {error:'no_key'}) as well as via status —
+  // hand the whole thing back so the caller can show the real message.
+  if (!res.ok && parsed && !parsed.error) parsed.error = `http_${res.status}`;
+  return parsed;
 };
 
 // Fetch ALL rows for a table path, paging past the PostgREST 1000-row cap.
@@ -356,6 +380,90 @@ const maskWord = (word, letters, position = "end", grouping = "grouped") => {
   const chars = word.split("");
   for (const i of idx) chars[i] = "_";
   return chars.join("");
+};
+
+// ============================================================
+// THE QUESTION VALIDATOR — shared truth about what makes a question sound.
+//
+// MUST stay identical to the copy in the generate-questions edge function (parity invariant, same
+// as maskWord). It runs the REAL masking engine at EVERY level, because most quality rules for
+// this game are mechanically decidable — and the worst defect is invisible to the eye:
+//
+//   "ambiguous" — the ALTERNATE word ALSO fits the blank at some level, so the puzzle has TWO
+//   correct answers and a child is marked wrong for a right answer. At whole-word levels the only
+//   clue is LENGTH, so ANY same-length alternate is ambiguous there. (This is a real defect that
+//   shipped in live content: BRIGHT/GENTLE, SURE/GLAD — both fine to a human eye, both broken.)
+//
+// The human still decides everything the machine can't judge (tone, meaning, suitability).
+// ============================================================
+
+// Does `alt` ALSO satisfy this blank pattern? If so, two words are correct.
+const altFitsBlank = (blank, alt) => {
+  alt = (alt || "").toUpperCase();
+  if (alt.length !== blank.length) return false;
+  for (let i = 0; i < blank.length; i++) {
+    if (blank[i] !== "_" && blank[i] !== alt[i]) return false;
+  }
+  return true;
+};
+
+const validateQuestion = (q, levels, opts = {}) => {
+  const flags = [];
+  const tpl = q.template || "";
+  const ans = (q.answer || "").toUpperCase().trim();
+  const alt = (q.alt_answer || "").toUpperCase().trim();
+
+  const blanks = (tpl.match(/\{blank\}/g) || []).length;
+  if (blanks === 0) flags.push({ code: "no_blank", detail: "Sentence has no {blank} placeholder." });
+  else if (blanks > 1) flags.push({ code: "multi_blank", detail: `Sentence has ${blanks} {blank} placeholders — must have exactly one.` });
+
+  if (!ans) flags.push({ code: "no_answer", detail: "Missing the primary answer word." });
+  if (!alt) flags.push({ code: "no_alt", detail: "Missing the alternate word." });
+  if (ans && alt && ans === alt) flags.push({ code: "same_word", detail: "The two options are the same word." });
+
+  // The big one: ambiguity at EVERY level.
+  if (ans && alt && ans !== alt && blanks === 1) {
+    const bad = [];
+    for (const lvl of levels || []) {
+      const isWord = lvl.hidden_mode === "word";
+      let blank;
+      if (isWord) blank = "_".repeat(Math.max(3, ans.length));
+      else {
+        const letters = Math.min(lvl.letters_hidden_default || 2, Math.max(1, ans.length - 1));
+        blank = maskWord(ans, letters, lvl.letter_position || "end", lvl.letter_grouping || "grouped");
+      }
+      if (altFitsBlank(blank, alt)) bad.push(lvl.level);
+    }
+    if (bad.length) {
+      flags.push({
+        code: "ambiguous", levels: bad,
+        detail: `"${alt}" also fits the blank at level${bad.length > 1 ? "s" : ""} ${bad.join(", ")} — two correct answers. The alternate must be a DIFFERENT length from "${ans}".`,
+      });
+    }
+  }
+
+  // Level vocabulary rules (word-length band, multi-word)
+  const lvl = (levels || []).find(l => l.level === opts.targetLevel);
+  if (lvl && ans) {
+    const letters = ans.replace(/\s+/g, "").length;
+    const words = ans.trim().split(/\s+/).filter(Boolean).length;
+    if (lvl.min_word_len && letters < lvl.min_word_len) flags.push({ code: "too_short", level: lvl.level, detail: `"${ans}" is ${letters} letters; level ${lvl.level} wants at least ${lvl.min_word_len}.` });
+    if (lvl.max_word_len && letters > lvl.max_word_len) flags.push({ code: "too_long", level: lvl.level, detail: `"${ans}" is ${letters} letters; level ${lvl.level} allows at most ${lvl.max_word_len}.` });
+    if (words > 1 && !lvl.allow_multiword) flags.push({ code: "multiword", level: lvl.level, detail: `Level ${lvl.level} doesn't allow multi-word answers.` });
+  }
+
+  if (ans && /[^A-Z\s'-]/.test(ans)) flags.push({ code: "bad_chars", detail: `"${ans}" contains characters other than letters.` });
+  if (alt && /[^A-Z\s'-]/.test(alt)) flags.push({ code: "bad_chars_alt", detail: `"${alt}" contains characters other than letters.` });
+
+  const norm = (s) => (s || "").toLowerCase().replace(/\{blank\}/g, "___").replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim();
+  for (const e of opts.existing || []) {
+    if (norm(e.template) === norm(tpl) && (e.answer || "").toUpperCase() === ans) {
+      flags.push({ code: "duplicate", detail: "This exact question already exists in the pack." });
+      break;
+    }
+  }
+
+  return { ok: flags.length === 0, flags };
 };
 
 // Resolve the effective blank-shape settings for a question:
@@ -2896,6 +3004,20 @@ config → data layer → design tokens → hooks → primitives → feature vie
 - \`pm_sync_log\` — profile/target/channel/mode/status/counts/detail, created_at.
 - \`pm_sync_targets\` — id, name, channel, profile_id, config (jsonb), enabled.
 - \`pm_dev_notes\` — singleton row (id=1) holding the editable Developer-Notes scratchpad.
+- \`pm_review_queue\` — the HUMAN APPROVAL GATE for AI content. Every AI-generated question lands
+  here first; NOTHING reaches pm_questions (and therefore no child) without an explicit human
+  Approve / Edit / Reject. Columns: id, batch_id, pack_id, template, answer, alt_answer, frame_slots,
+  target_level, provider, model, status (pending|approved|rejected), edited, reject_reason,
+  decided_at, decided_by, approved_question_id, validation (jsonb), created_at. RLS: authenticated
+  only — anon has NO access (this is unreviewed content). In the realtime publication.
+- \`pm_ai_config\` — **SECURITY-CRITICAL.** Stores third-party API keys (anthropic/openai/gemini).
+  Unlike every other pm_ table, it has **NO select policy for anon OR authenticated** — the browser
+  literally cannot read it. Verified empirically: a fully authenticated admin SELECT returns [] while
+  the same token reads pm_levels fine. Writes go through SECURITY DEFINER RPCs only; the
+  generate-questions edge fn reads the key with the service role, server-side. Columns: provider (PK),
+  api_key, model, enabled, updated_at, updated_by.
+- \`pm_ai_settings\` — singleton (id=1) NON-secret settings: active_provider, batch_size,
+  auto_repair. Safe for the client to read/write.
 - \`pm_deletions\` — deletion tombstones for incremental sync (a "changed since" query can't see
   rows that no longer exist). Columns: id, entity_type ('pack'|'question'), entity_id, pack_id,
   slug, deleted_at. Written ONLY by SECURITY DEFINER triggers — trg_tombstone_pack/
@@ -3036,6 +3158,44 @@ well-designed shape (NOT the profile-projection system) plus everything needed t
 Backed by the \`pm_content_manifest()\` RPC (SECURITY DEFINER, published-only) and the pm_deletions
 tombstone table. Source lives in the repo at edge-functions/content-api.ts.
 
+## 7c. AI content generation (with mandatory human review)
+Two new pages — **AI Settings** (aisettings.jsx) and **AI Review** (aireview.jsx) — plus the
+\`generate-questions\` edge function (verify_jwt=TRUE, so only a logged-in admin can spend your API
+credits). Supports THREE providers: Anthropic, OpenAI, Gemini (three genuinely different API shapes,
+one adapter each).
+
+**The approval gate (non-negotiable):** generate-questions writes ONLY to pm_review_queue, never to
+pm_questions. A human must Approve / Edit / Reject each item. Approve goes through the
+\`pm_review_approve\` RPC — the single atomic path into live content (creates the question, links it,
+records who decided and whether they edited it, tags the question "AI-generated — human approved").
+Reject records a reason and writes nothing.
+
+**API-key security:** keys live in pm_ai_config, which the browser CANNOT read (no RLS select policy
+at all). The settings page writes keys via \`pm_ai_set_key\` and displays status ONLY —
+"Configured ••••••1234" — via \`pm_ai_status\`, which returns a masked hint and never the key. Even
+someone with the admin login, or an XSS in this app, cannot lift the keys. Empirically verified.
+Rotate by saving a new key over the old one. \`callFn()\` in core.jsx invokes verify_jwt edge fns with
+the user's token (mirrors rpc()'s 401 refresh-and-retry).
+
+**THE VALIDATOR (\`validateQuestion\` in core.jsx — the reason this is trustworthy):** most quality
+rules for this game are MECHANICALLY DECIDABLE, so the machine catches its own errors before a human
+sees them. It runs the REAL masking engine at EVERY level and flags: no/multiple {blank}; missing or
+identical words; word-length band + multi-word rule for the target level; bad characters; duplicates;
+and above all **ambiguous** — the alternate ALSO fits the blank at some level, so the puzzle has TWO
+correct answers and a child is marked wrong for a right answer. At whole-word levels the ONLY clue is
+LENGTH, so ANY same-length alternate is ambiguous there. This is not theoretical: BRIGHT/GENTLE,
+SURE/GLAD and KIND/MEAN were all found broken at L7-10 in LIVE content — each looks perfectly fine to
+a human eye. PARITY INVARIANT: validateQuestion must stay byte-identical between core.jsx and the
+edge function (verified across 45 cases), exactly like maskWord.
+
+**Auto-repair:** failures are sent back to the model ONCE with the exact defect ("GENTLE also fits the
+blank at levels 7-10 — use a different-length alternate"), re-validated, and swapped in if fixed.
+Best-effort: if repair fails, the originals are queued WITH their flags.
+
+**What the machine can't do:** judge tone, meaning, suitability. A rejected test case proved the
+point — "PERFECT" passes every mechanical check but a human rightly rejected it as an unhealthy
+standard for a child. Machine catches mechanics; human catches meaning. That is why the queue exists.
+
 ## 8. Publishing channels
 All emit through a chosen profile:
 - **File** — download the transformed JSON bundle.
@@ -3102,6 +3262,31 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **NEW: AI content generation with a mandatory human review queue (two new pages, existing pages
+  untouched).** Pages: **AI Settings** (aisettings.jsx — pick provider, save keys, generate) and
+  **AI Review** (aireview.jsx — the approve/edit/reject queue). New edge fn \`generate-questions\`
+  (verify_jwt=TRUE) supporting Anthropic, OpenAI AND Gemini. New tables: pm_review_queue,
+  pm_ai_config, pm_ai_settings. New RPCs: pm_review_approve/reject, pm_ai_set_key/clear_key/status.
+  New in core.jsx (pure additions): \`validateQuestion\` + \`altFitsBlank\` (the shared validator) and
+  \`callFn\` (auth'd edge-fn caller).
+  THE GATE: generated questions go ONLY to pm_review_queue — never to pm_questions. A human must
+  Approve / Edit / Reject each one. Approve is the single atomic RPC path into live content and tags
+  the question "AI-generated — human approved". Reject writes nothing.
+  KEY SECURITY: pm_ai_config has NO select policy for anon OR authenticated, so the browser cannot
+  read the keys at all. Attack-tested: an authenticated admin SELECT returns [] while the SAME token
+  reads pm_levels fine; a direct anon INSERT returns 401 RLS violation. The UI shows only
+  "Configured ••••••1234". Even the admin login (or an XSS) cannot lift the keys.
+  THE VALIDATOR: runs the REAL masking engine at EVERY level. Its headline flag, "ambiguous", catches
+  the defect a human eye cannot — an alternate that ALSO fits the blank, giving the puzzle TWO correct
+  answers. Found REAL bugs in LIVE content this way (BRIGHT/GENTLE, SURE/GLAD, KIND/MEAN all broken at
+  L7-10 — each looks fine to a human). Byte-identical between core.jsx and the edge fn (verified, 45
+  cases) — a parity invariant like maskWord. Auto-repair sends failures back to the model once with
+  the exact defect.
+  BUG FOUND AND FIXED WHILE TESTING: pm_questions.frame_slots is NOT NULL but queued AI rows have it
+  null, so EVERY approve failed until the RPC coalesced it to '{}'. Caught by running the real path.
+  All three decisions verified live (approve / approve-with-edit / reject), and a reject test proved
+  why humans are still needed: "PERFECT" passes every mechanical check but is an unhealthy standard
+  for a child — the machine cannot see that, a person can. Test data cleaned up; prod untouched.
 - **Deeper audit pass — one real gap fixed, one enhancement added.** GAP (fixed): the
   pm_level_delete_cleanup trigger handled questions and override rows pinned to a deleted level, but
   NOT packs — a pack pinned to the deleted level was left as a stale pointer (a pack's level can't be
@@ -3698,6 +3883,23 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    via the pm_level_delete_cleanup BEFORE DELETE trigger: reset pinned PACKS to the highest remaining
    level (a pack's level can't be null), un-pin QUESTIONS (→ null), drop OVERRIDE rows at that level.
    Never remove or narrow that trigger or you leave stale pointers.
+4b. **AI content NEVER bypasses human review.** generate-questions writes ONLY to pm_review_queue.
+   The single path into pm_questions is the pm_review_approve RPC, which requires an explicit human
+   decision. Never add a "publish straight through" path, an auto-approve, or a direct insert from a
+   generator - a child must never see a question no person approved.
+4c. **API keys must never be readable by the browser.** pm_ai_config deliberately has NO RLS select
+   policy for anon OR authenticated. The CMS is a browser app with a shared admin login, so anything
+   the client can SELECT is effectively public to anyone with that login (or any XSS). Keys are
+   written via pm_ai_set_key and read ONLY server-side by the edge function (service role). The UI
+   reads pm_ai_status, which returns a masked hint and NEVER the key. Never add a select policy to
+   pm_ai_config, never return api_key from an RPC, never send a key to the client "just to show it".
+4d. **validateQuestion is a PARITY INVARIANT** (like maskWord). The copy in core.jsx and the copy in
+   the generate-questions edge fn must stay byte-identical - the CMS and the generator must agree on
+   what "valid" means. Its headline check, "ambiguous", runs the REAL engine at EVERY level: if the
+   alternate ALSO fits the blank anywhere, the puzzle has TWO correct answers. At whole-word levels
+   the only clue is LENGTH, so ANY same-length alternate is broken there. This is not hypothetical -
+   BRIGHT/GENTLE, SURE/GLAD and KIND/MEAN all shipped broken in live content and all look fine to a
+   human eye. Never weaken or skip this check.
 5. **View column order.** pm_pack_overview uses \`p.*\`. Adding a column to pm_packs shifts
    positions and CREATE OR REPLACE VIEW will error — DROP and recreate the view instead.
 6. **Auth/session.** Access tokens expire ~1hr. rest()/rpc() auto-refresh + retry once on
@@ -3942,6 +4144,56 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    \`pm_content_manifest()\` SECURITY DEFINER RPC (published-only) returning the global/per-pack
    versions. The rendering engine (maskWord/resolveSlots/
    resolveFrameMap/buildLevelVariants) MUST stay byte-identical to the client and game-feed.
+6c. **AI content generation + MANDATORY human review (two dedicated pages).**
+   Build an edge function \`generate-questions\` with verify_jwt=TRUE (only a logged-in admin may
+   spend API credits). It must support THREE providers - Anthropic (/v1/messages, x-api-key header),
+   OpenAI (/v1/chat/completions, Bearer, max_completion_tokens) and Gemini
+   (generativelanguage .../:generateContent?key=, contents[].parts[].text) - one adapter each,
+   returning raw text; share the JSON-array parsing (strip code fences, slice from first [ to last ]).
+
+   THE APPROVAL GATE (non-negotiable): the function writes ONLY to a \`pm_review_queue\` table, NEVER
+   to pm_questions. Columns: id, batch_id, pack_id, template, answer, alt_answer, frame_slots,
+   target_level, provider, model, status(pending|approved|rejected), edited, reject_reason,
+   decided_at, decided_by, approved_question_id, validation jsonb, created_at. RLS authenticated-only
+   (anon must NOT see unreviewed content); add it to the realtime publication. The ONLY path into
+   live content is a \`pm_review_approve\` RPC (atomic: insert the question, mark the row approved,
+   link them, flag edited if the human changed anything, note it as AI-generated+approved). CAUTION:
+   pm_questions.frame_slots is NOT NULL - coalesce null to '{}' or every approve fails.
+   \`pm_review_reject(id, reason)\` records the decision and writes nothing.
+
+   API-KEY SECURITY: store keys in \`pm_ai_config\` (provider PK, api_key, model, enabled) with RLS
+   enabled and DELIBERATELY NO SELECT POLICY for anon or authenticated - the browser must not be able
+   to read keys at all (this CMS has a shared admin login, so a client-readable key is a public key).
+   Write via SECURITY DEFINER \`pm_ai_set_key\`/\`pm_ai_clear_key\`; expose status via
+   \`pm_ai_status()\` which returns {configured, hint: masked last 4, model, updated_at} and NEVER the
+   key. The edge fn reads the key with the service role. Non-secret settings (active_provider,
+   batch_size, auto_repair) go in a separate client-readable \`pm_ai_settings\` singleton. Add a
+   \`callFn()\` helper in core.jsx to invoke verify_jwt edge fns with the user's token (mirror rpc()'s
+   401 refresh-and-retry).
+
+   THE VALIDATOR (the reason any of this is trustworthy): a \`validateQuestion(q, levels, opts)\` in
+   core.jsx, MIRRORED byte-identically in the edge fn (a parity invariant like maskWord). It runs the
+   REAL masking engine at EVERY level and flags: no/multiple {blank}; missing/identical words; the
+   level's word-length band + multi-word rule; non-letter characters; duplicates; and above all
+   AMBIGUOUS - the alternate ALSO fits the blank at some level, so the puzzle has TWO correct answers
+   and a child is marked wrong for a right answer. At whole-word levels the ONLY clue is LENGTH, so
+   ANY same-length alternate is ambiguous there. Auto-repair: send failures back to the model ONCE
+   with the exact defect text, re-validate, swap in the fixes (best-effort; on failure queue the
+   originals WITH flags).
+
+   PAGE 1 - AI Settings: a card per provider showing Configured/not with a MASKED hint only, the
+   model, "Use this one", "Add/Replace key" (a write-only password field - never render a key back),
+   "Test" (a tiny round-trip via the edge fn), "Remove". Plus generation defaults and a Generate panel
+   (pack, target level, count, notes) whose output goes to the review queue.
+   PAGE 2 - AI Review: tabs pending/approved/rejected; each row shows the sentence, both words WITH
+   their letter counts, the pack, level, provider, and any validation flags with plain-English
+   reasons; per-row Approve / Edit / Reject; bulk "Approve N clean"; a reject dialog capturing an
+   optional reason. The Edit modal must RE-VALIDATE LIVE as you type (same validateQuestion) and show
+   the blank shape at every level, highlighting the levels that are ambiguous - so you can see the
+   moment a fix actually clears the problem.
+
+   REMEMBER WHY THE HUMAN IS THERE: the machine judges mechanics; only a person judges tone and
+   meaning. "PERFECT" passes every automated check and is still the wrong word to teach a child.
 7. **Activity log:** every mutation recorded (who/what/when) via pm_log.
 8. **Developer Notes page:** hardcoded architecture doc + CLAUDE.md + this build prompt,
    each viewable with copy + download, plus an editable scratchpad saved to pm_dev_notes.
@@ -4755,6 +5007,808 @@ function DeriveLevelDialog({ pack, questions, levels, onClose, onDone }) {
         {!result && <Btn onClick={run} disabled={busy || !lvlDef || activeQs.length === 0}>{busy ? "Deriving…" : `Derive Level ${targetLevel}`}</Btn>}
       </ModalFoot>
     </>
+  );
+}
+
+// ===== aireview.jsx =====
+// ============================================================
+// AI Review — the human approval gate.
+//
+// EVERY AI-generated question lands in pm_review_queue and MUST get an explicit human decision
+// (Approve / Edit / Reject) before it can become a real question. Nothing here is live content.
+//
+// Each row carries machine VALIDATION computed by running the REAL masking engine at EVERY level
+// (see validateQuestion in core.jsx). The machine catches the mechanical defects a human eye
+// misses — above all "ambiguous": an alternate word that ALSO fits the blank, meaning the puzzle
+// has two correct answers. The human catches what the machine can't (tone, meaning, suitability).
+// ============================================================
+
+const db_review = {
+  list: (status = "pending") =>
+    rest(`pm_review_queue?status=eq.${status}&order=created_at.desc&limit=1000`).then(r => r.data || []),
+  counts: () =>
+    rest(`pm_review_queue?select=status&limit=10000`).then(r => {
+      const rows = r.data || [];
+      return {
+        pending: rows.filter(x => x.status === "pending").length,
+        approved: rows.filter(x => x.status === "approved").length,
+        rejected: rows.filter(x => x.status === "rejected").length,
+      };
+    }),
+  approve: (id, patch = {}) =>
+    rpc("pm_review_approve", {
+      p_id: id,
+      p_template: patch.template ?? null,
+      p_answer: patch.answer ?? null,
+      p_alt_answer: patch.alt_answer ?? null,
+      p_level: patch.level ?? null,
+    }),
+  reject: (id, reason) => rpc("pm_review_reject", { p_id: id, p_reason: reason || null }),
+  purge: (status) => rest(`pm_review_queue?status=eq.${status}`, { method: "DELETE" }),
+};
+
+// A short human label for each validation flag code.
+const FLAG_LABEL = {
+  ambiguous: "Two answers",
+  no_blank: "No blank",
+  multi_blank: "Too many blanks",
+  no_answer: "No answer",
+  no_alt: "No alternate",
+  same_word: "Same word twice",
+  too_short: "Too short",
+  too_long: "Too long",
+  multiword: "Multi-word",
+  bad_chars: "Bad characters",
+  bad_chars_alt: "Bad characters",
+  duplicate: "Duplicate",
+};
+
+function FlagPill({ flag }) {
+  const label = FLAG_LABEL[flag.code] || flag.code;
+  return (
+    <span title={flag.detail}
+      style={{ display: "inline-block", fontSize: 11, fontWeight: 800, padding: "2px 8px", borderRadius: R.pill,
+        background: C.danger + "14", color: C.danger, border: "1px solid " + C.danger + "44", whiteSpace: "nowrap" }}>
+      {label}
+    </span>
+  );
+}
+
+function AIReviewView({ packs, levels }) {
+  const [tab, setTab] = useState("pending");
+  const { loading, error, data, reload } = useAsync(() => db_review.list(tab), [tab]);
+  const countsState = useAsync(() => db_review.counts(), []);
+  const [editing, setEditing] = useState(null);
+  const [rejecting, setRejecting] = useState(null);
+  const [busyId, setBusyId] = useState(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+
+  useRealtimeRefresh(["pm_review_queue"], () => { reload(); countsState.reload(); }, [reload, countsState.reload]);
+
+  const rows = data || [];
+  const counts = countsState.data || { pending: 0, approved: 0, rejected: 0 };
+  const packById = useMemo(() => Object.fromEntries((packs || []).map(p => [p.id, p])), [packs]);
+
+  const refreshAll = async () => { await reload(); await countsState.reload(); };
+
+  const doApprove = async (row, patch) => {
+    setBusyId(row.id);
+    try {
+      await db_review.approve(row.id, patch || {});
+      notify(patch ? "Approved with your edits" : "Approved");
+      await refreshAll();
+    } catch (e) { notify(friendlyError(0, String(e?.message || e)), "error"); }
+    finally { setBusyId(null); }
+  };
+
+  const doReject = async (row) => setRejecting(row);
+
+  const confirmReject = async (reason) => {
+    const row = rejecting;
+    setRejecting(null);
+    if (!row) return;
+    setBusyId(row.id);
+    try {
+      await db_review.reject(row.id, reason);
+      notify("Rejected");
+      await refreshAll();
+    } catch (e) { notify(friendlyError(0, String(e?.message || e)), "error"); }
+    finally { setBusyId(null); }
+  };
+
+  // Bulk: approve every row the machine says is clean.
+  const approveAllClean = async () => {
+    const clean = rows.filter(r => r.validation?.ok);
+    if (!clean.length) { notify("No clean questions to approve", "error"); return; }
+    const ok = await confirmDialog({
+      title: `Approve ${clean.length} clean question${clean.length === 1 ? "" : "s"}?`,
+      body: "These passed every automated check. They'll become real questions in their pack. Flagged ones are left for you to review individually.",
+      confirmText: "Approve them",
+    });
+    if (!ok) return;
+    setBulkBusy(true);
+    let done = 0;
+    for (const r of clean) {
+      try { await db_review.approve(r.id, {}); done++; } catch { /* keep going */ }
+    }
+    setBulkBusy(false);
+    notify(`Approved ${done} of ${clean.length}`);
+    await refreshAll();
+  };
+
+  const clearDecided = async () => {
+    const ok = await confirmDialog({
+      title: `Clear ${tab} history?`,
+      body: "This only removes the review records. Approved questions stay in their packs.",
+      confirmText: "Clear", tone: "danger",
+    });
+    if (!ok) return;
+    try { await db_review.purge(tab); notify("Cleared"); await refreshAll(); }
+    catch (e) { notify(friendlyError(0, String(e?.message || e)), "error"); }
+  };
+
+  const cleanCount = rows.filter(r => r.validation?.ok).length;
+  const flaggedCount = rows.length - cleanCount;
+
+  if (error) return <ErrorState error={error} onRetry={reload} />;
+
+  return (
+    <div>
+      <div style={{ marginBottom: S.lg }}>
+        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>AI Review</h1>
+        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>
+          Every AI-generated question waits here for your decision. Nothing becomes a real question until you approve it.
+        </p>
+      </div>
+
+      {/* Tabs */}
+      <div style={{ display: "flex", gap: 6, marginBottom: S.lg, flexWrap: "wrap" }}>
+        {[
+          { id: "pending", label: "Pending", n: counts.pending },
+          { id: "approved", label: "Approved", n: counts.approved },
+          { id: "rejected", label: "Rejected", n: counts.rejected },
+        ].map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)}
+            style={{ padding: "7px 14px", borderRadius: R.pill, cursor: "pointer", fontFamily: "inherit",
+              fontSize: 13, fontWeight: 700, border: "1px solid " + (tab === t.id ? C.brand : C.line),
+              background: tab === t.id ? C.brandSoft : "transparent",
+              color: tab === t.id ? C.brandInk : C.sub }}>
+            {t.label}{t.n ? ` · ${t.n}` : ""}
+          </button>
+        ))}
+        <div style={{ flex: 1 }} />
+        {tab === "pending" && rows.length > 0 && (
+          <Btn size="sm" onClick={approveAllClean} disabled={bulkBusy || !cleanCount}>
+            {bulkBusy ? "Approving…" : `Approve ${cleanCount} clean`}
+          </Btn>
+        )}
+        {tab !== "pending" && rows.length > 0 && (
+          <Btn size="sm" variant="ghost" onClick={clearDecided}>Clear history</Btn>
+        )}
+      </div>
+
+      {tab === "pending" && rows.length > 0 && (
+        <div style={{ display: "flex", gap: 10, marginBottom: S.md, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 13, color: C.sub }}>
+            <b style={{ color: C.ok }}>{cleanCount}</b> passed every automated check
+            {flaggedCount > 0 && <> · <b style={{ color: C.danger }}>{flaggedCount}</b> need your attention</>}
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div style={{ display: "grid", gap: 10 }}>{Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} h={92} r={12} />)}</div>
+      ) : rows.length === 0 ? (
+        <EmptyState
+          icon="✓"
+          title={tab === "pending" ? "Nothing waiting for review" : `No ${tab} questions`}
+          body={tab === "pending"
+            ? "Generate questions from a pack and they'll appear here for you to approve, edit or reject."
+            : `Questions you ${tab === "approved" ? "approve" : "reject"} will be listed here.`}
+        />
+      ) : (
+        <div style={{ display: "grid", gap: 10 }}>
+          {rows.map(r => {
+            const v = r.validation || {};
+            const flags = v.flags || [];
+            const clean = !!v.ok;
+            const pack = packById[r.pack_id];
+            const decided = r.status !== "pending";
+            return (
+              <div key={r.id} style={{ background: C.panel, border: "1px solid " + (clean || decided ? C.line : C.danger + "55"),
+                borderLeft: "4px solid " + (decided ? (r.status === "approved" ? C.ok : C.faint) : clean ? C.ok : C.danger),
+                borderRadius: R.lg, padding: S.lg }}>
+
+                <div style={{ display: "flex", gap: S.md, alignItems: "flex-start", flexWrap: "wrap" }}>
+                  <div style={{ flex: 1, minWidth: 260 }}>
+                    {/* Sentence */}
+                    <div style={{ fontSize: 15, color: C.ink, lineHeight: 1.5 }}>
+                      {String(r.template || "").split("{blank}").map((part, i, arr) => (
+                        <React.Fragment key={i}>
+                          {part}
+                          {i < arr.length - 1 && (
+                            <span style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, color: C.brand,
+                              background: C.brandSoft, padding: "1px 8px", borderRadius: 5, letterSpacing: 1 }}>____</span>
+                          )}
+                        </React.Fragment>
+                      ))}
+                    </div>
+
+                    {/* The two options */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 9, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 13.5, fontWeight: 800, color: C.ok, background: C.ok + "14",
+                        padding: "3px 10px", borderRadius: R.sm }}>
+                        {r.answer} <span style={{ fontWeight: 600, opacity: .7 }}>({(r.answer || "").length})</span>
+                      </span>
+                      <span style={{ fontSize: 12, color: C.faint }}>vs</span>
+                      <span style={{ fontSize: 13.5, fontWeight: 700, color: C.sub, background: C.bg,
+                        padding: "3px 10px", borderRadius: R.sm }}>
+                        {r.alt_answer || "—"} <span style={{ fontWeight: 600, opacity: .7 }}>({(r.alt_answer || "").length})</span>
+                      </span>
+                      {pack && <Pill tone="muted">{pack.emoji} {pack.name}</Pill>}
+                      {r.target_level != null && <LevelChip level={r.target_level} levels={levels} />}
+                      {r.provider && <Pill tone="muted">{r.provider}</Pill>}
+                      {r.edited && <Pill tone="muted">edited by you</Pill>}
+                    </div>
+
+                    {/* Validation flags */}
+                    {flags.length > 0 && (
+                      <div style={{ marginTop: 10 }}>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 6 }}>
+                          {flags.map((f, i) => <FlagPill key={i} flag={f} />)}
+                        </div>
+                        {flags.map((f, i) => (
+                          <div key={i} style={{ fontSize: 12.5, color: C.danger, lineHeight: 1.5 }}>{f.detail}</div>
+                        ))}
+                      </div>
+                    )}
+                    {clean && !decided && (
+                      <div style={{ marginTop: 8, fontSize: 12.5, color: C.ok, fontWeight: 600 }}>
+                        ✓ Passed every automated check — still your call.
+                      </div>
+                    )}
+
+                    {/* Decision record */}
+                    {decided && (
+                      <div style={{ marginTop: 9, fontSize: 12.5, color: C.faint }}>
+                        {r.status === "approved" ? "Approved" : "Rejected"}
+                        {r.decided_by ? ` by ${r.decided_by}` : ""}
+                        {r.decided_at ? ` · ${relativeTime(r.decided_at)}` : ""}
+                        {r.reject_reason ? ` · “${r.reject_reason}”` : ""}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Actions */}
+                  {!decided && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 108 }}>
+                      <Btn size="sm" onClick={() => doApprove(r)} disabled={busyId === r.id}>
+                        {busyId === r.id ? "…" : "Approve"}
+                      </Btn>
+                      <Btn size="sm" variant="ghost" onClick={() => setEditing(r)} disabled={busyId === r.id}>Edit</Btn>
+                      <button onClick={() => doReject(r)} disabled={busyId === r.id}
+                        style={{ fontSize: 12.5, fontWeight: 700, padding: "6px 10px", borderRadius: 8, cursor: "pointer",
+                          border: "1px solid " + C.line, background: "transparent", color: C.danger }}>
+                        Reject
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <Modal open={editing !== null} onClose={() => setEditing(null)} width={620}>
+        {editing !== null && (
+          <ReviewEditor
+            row={editing}
+            levels={levels}
+            onCancel={() => setEditing(null)}
+            onApprove={async (patch) => { const row = editing; setEditing(null); await doApprove(row, patch); }}
+          />
+        )}
+      </Modal>
+
+      <Modal open={rejecting !== null} onClose={() => setRejecting(null)} width={480}>
+        {rejecting !== null && (
+          <RejectDialog row={rejecting} onCancel={() => setRejecting(null)} onConfirm={confirmReject} />
+        )}
+      </Modal>
+    </div>
+  );
+}
+
+// Capture an optional reason when rejecting, so you remember why later.
+function RejectDialog({ row, onCancel, onConfirm }) {
+  const [reason, setReason] = useState("");
+  return (
+    <>
+      <ModalHead title="Reject this question?" subtitle="It won't become a real question" />
+      <div style={{ padding: S.xl, display: "grid", gap: S.md }}>
+        <div style={{ background: C.bg, borderRadius: R.md, padding: "11px 14px", fontSize: 13.5, color: C.ink2 }}>
+          “{String(row.template || "").replace(/\{blank\}/g, "____")}” — <b>{row.answer}</b> vs {row.alt_answer || "—"}
+        </div>
+        <Field label="Reason (optional)" hint="Helps you remember why, and improves future batches">
+          <Textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value)} autoFocus
+            placeholder="e.g. tone is off for young children" />
+        </Field>
+      </div>
+      <ModalFoot>
+        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+        <Btn onClick={() => onConfirm(reason)} tone="danger">Reject</Btn>
+      </ModalFoot>
+    </>
+  );
+}
+
+// Edit-then-approve. Re-validates LIVE as you type, using the same engine the game uses, so you can
+// see the moment a fix actually clears the problem.
+function ReviewEditor({ row, levels, onCancel, onApprove }) {
+  const [f, setF] = useState({
+    template: row.template || "",
+    answer: row.answer || "",
+    alt_answer: row.alt_answer || "",
+  });
+  const [busy, setBusy] = useState(false);
+  const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+
+  const live = useMemo(
+    () => validateQuestion(
+      { template: f.template, answer: f.answer, alt_answer: f.alt_answer },
+      levels || [],
+      { targetLevel: row.target_level }
+    ),
+    [f, levels, row.target_level]
+  );
+
+  const submit = async () => {
+    setBusy(true);
+    await onApprove({
+      template: f.template,
+      answer: (f.answer || "").toUpperCase().trim(),
+      alt_answer: (f.alt_answer || "").toUpperCase().trim(),
+    });
+    setBusy(false);
+  };
+
+  return (
+    <>
+      <ModalHead title="Edit & approve" subtitle="Fix it here, then approve — it re-checks as you type" />
+      <div style={{ padding: S.xl, display: "grid", gap: S.md, maxHeight: "60vh", overflowY: "auto" }}>
+        <Field label="Sentence" hint="Must contain exactly one {blank}">
+          <Textarea rows={2} value={f.template} onChange={(e) => set("template", e.target.value)} autoFocus />
+        </Field>
+        <div className="pm-form-2">
+          <Field label="Answer (correct)" hint={`${(f.answer || "").replace(/\s+/g, "").length} letters`}>
+            <Input value={f.answer} onChange={(e) => set("answer", e.target.value.toUpperCase())} />
+          </Field>
+          <Field label="Alternate (wrong)" hint={`${(f.alt_answer || "").replace(/\s+/g, "").length} letters — must differ`}>
+            <Input value={f.alt_answer} onChange={(e) => set("alt_answer", e.target.value.toUpperCase())} />
+          </Field>
+        </div>
+
+        {/* Live validation */}
+        <div style={{ background: live.ok ? C.ok + "12" : C.danger + "10",
+          border: "1px solid " + (live.ok ? C.ok + "44" : C.danger + "44"),
+          borderRadius: R.md, padding: "11px 14px" }}>
+          {live.ok ? (
+            <div style={{ fontSize: 13, fontWeight: 700, color: C.ok }}>✓ Passes every automated check</div>
+          ) : (
+            <>
+              <div style={{ fontSize: 12, fontWeight: 800, color: C.danger, textTransform: "uppercase",
+                letterSpacing: .3, marginBottom: 6 }}>Still a problem</div>
+              {live.flags.map((fl, i) => (
+                <div key={i} style={{ fontSize: 12.5, color: C.danger, lineHeight: 1.5 }}>• {fl.detail}</div>
+              ))}
+            </>
+          )}
+        </div>
+
+        {/* How it will look at each level */}
+        {f.answer && (
+          <div style={{ background: C.bg, borderRadius: R.md, padding: "11px 14px" }}>
+            <div style={{ fontSize: 10.5, fontWeight: 800, color: C.faint, letterSpacing: .3,
+              textTransform: "uppercase", marginBottom: 7 }}>How the blank looks at each level</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {(levels || []).map(l => {
+                const isWord = l.hidden_mode === "word";
+                const w = (f.answer || "").toUpperCase();
+                const letters = Math.min(l.letters_hidden_default || 2, Math.max(1, w.length - 1));
+                const blank = isWord ? "_".repeat(Math.max(3, w.length))
+                  : maskWord(w, letters, l.letter_position || "end", l.letter_grouping || "grouped");
+                const bad = (live.flags || []).some(fl => fl.code === "ambiguous" && (fl.levels || []).includes(l.level));
+                return (
+                  <span key={l.level} title={`Level ${l.level}`}
+                    style={{ fontFamily: "ui-monospace, monospace", fontSize: 12.5, fontWeight: 800, letterSpacing: 1.5,
+                      padding: "3px 8px", borderRadius: R.sm,
+                      background: bad ? C.danger + "18" : C.panel,
+                      color: bad ? C.danger : C.ink2,
+                      border: "1px solid " + (bad ? C.danger + "55" : C.line) }}>
+                    {l.level}: {blank}
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+      <ModalFoot>
+        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+        <Btn onClick={submit} disabled={busy || !f.template || !f.answer}>
+          {busy ? "Approving…" : live.ok ? "Approve" : "Approve anyway"}
+        </Btn>
+      </ModalFoot>
+    </>
+  );
+}
+
+// ===== aisettings.jsx =====
+// ============================================================
+// AI Settings — choose the provider, save API keys, generate content.
+//
+// SECURITY: keys are stored in pm_ai_config, a table the browser CANNOT read (RLS has no select
+// policy for anon OR authenticated — verified empirically). Keys are written via the
+// pm_ai_set_key RPC and read ONLY server-side by the generate-questions edge function.
+// This page can never display a key back to you: it shows "Configured ••••••1234" and nothing
+// more. That means even someone with your login (or an XSS bug in this app) cannot lift them.
+// ============================================================
+
+const PROVIDERS = [
+  {
+    id: "anthropic", name: "Anthropic (Claude)", emoji: "◆",
+    defaultModel: "claude-sonnet-4-6",
+    models: ["claude-sonnet-4-6", "claude-opus-4-1", "claude-haiku-4-5"],
+    keyHint: "Starts with sk-ant-",
+    where: "console.anthropic.com → API Keys",
+  },
+  {
+    id: "openai", name: "OpenAI (GPT)", emoji: "◇",
+    defaultModel: "gpt-4o",
+    models: ["gpt-4o", "gpt-4o-mini", "gpt-4.1"],
+    keyHint: "Starts with sk-",
+    where: "platform.openai.com → API keys",
+  },
+  {
+    id: "gemini", name: "Google (Gemini)", emoji: "◈",
+    defaultModel: "gemini-2.0-flash",
+    models: ["gemini-2.0-flash", "gemini-1.5-pro"],
+    keyHint: "A long alphanumeric key",
+    where: "aistudio.google.com → Get API key",
+  },
+];
+
+const db_ai = {
+  status: () => rpc("pm_ai_status"),
+  setKey: (provider, key, model) => rpc("pm_ai_set_key", { p_provider: provider, p_key: key, p_model: model || null }),
+  clearKey: (provider) => rpc("pm_ai_clear_key", { p_provider: provider }),
+  settings: () => rest("pm_ai_settings?id=eq.1&limit=1").then(r => (r.data || [])[0] || null),
+  saveSettings: (patch) => rest("pm_ai_settings?id=eq.1", { method: "PATCH", body: patch }).then(r => r.data?.[0]),
+  test: (provider) => callFn("generate-questions", { test_only: true, provider }),
+  generate: (payload) => callFn("generate-questions", payload),
+};
+
+function AISettingsView({ packs, levels }) {
+  const statusState = useAsync(() => db_ai.status(), []);
+  const settingsState = useAsync(() => db_ai.settings(), []);
+  const [editKey, setEditKey] = useState(null);   // provider id being edited
+  const [testing, setTesting] = useState(null);
+  const [testResult, setTestResult] = useState({});
+
+  const status = statusState.data || [];
+  const settings = settingsState.data || { active_provider: "anthropic", batch_size: 10, auto_repair: true };
+  const byProvider = useMemo(() => Object.fromEntries(status.map(s => [s.provider, s])), [status]);
+
+  const reloadAll = async () => { await statusState.reload(); await settingsState.reload(); };
+
+  const setActive = async (id) => {
+    try { await db_ai.saveSettings({ active_provider: id, updated_at: new Date().toISOString() }); await settingsState.reload(); notify(`Using ${PROVIDERS.find(p => p.id === id)?.name}`); }
+    catch (e) { notify(friendlyError(0, String(e?.message || e)), "error"); }
+  };
+
+  const saveSetting = async (patch) => {
+    try { await db_ai.saveSettings({ ...patch, updated_at: new Date().toISOString() }); await settingsState.reload(); }
+    catch (e) { notify(friendlyError(0, String(e?.message || e)), "error"); }
+  };
+
+  const clearKey = async (p) => {
+    const ok = await confirmDialog({
+      title: `Remove the ${p.name} key?`,
+      body: "Generation with this provider will stop working until you add a new key.",
+      confirmText: "Remove key", tone: "danger",
+    });
+    if (!ok) return;
+    try { await db_ai.clearKey(p.id); await statusState.reload(); notify("Key removed"); }
+    catch (e) { notify(friendlyError(0, String(e?.message || e)), "error"); }
+  };
+
+  const testConn = async (p) => {
+    setTesting(p.id);
+    setTestResult(r => ({ ...r, [p.id]: null }));
+    try {
+      const res = await db_ai.test(p.id);
+      setTestResult(r => ({ ...r, [p.id]: res?.ok ? { ok: true, model: res.model } : { ok: false, error: res?.error || res?.message || "Failed" } }));
+      if (res?.ok) notify(`${p.name} is working`);
+    } catch (e) {
+      const msg = String(e?.message || e);
+      setTestResult(r => ({ ...r, [p.id]: { ok: false, error: msg } }));
+    } finally { setTesting(null); }
+  };
+
+  const loading = statusState.loading || settingsState.loading;
+
+  return (
+    <div>
+      <div style={{ marginBottom: S.lg }}>
+        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>AI Settings</h1>
+        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>
+          Choose which AI writes your content and save its API key. Keys are stored on the server and shared by everyone who logs in.
+        </p>
+      </div>
+
+      {/* Security note — earned, not decorative */}
+      <div style={{ background: C.brandSoft, borderRadius: R.md, padding: "12px 16px", marginBottom: S.lg,
+        fontSize: 13, color: C.brandInk, lineHeight: 1.55 }}>
+        <b>Your keys stay on the server.</b> Once saved, a key can never be read back — not by this page, not by anyone logged in, not by a script running in your browser. You'll only ever see whether it's set, plus its last four characters. To change one, save a new key over it.
+      </div>
+
+      {loading ? (
+        <div style={{ display: "grid", gap: 12 }}>{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} h={120} r={12} />)}</div>
+      ) : (
+        <>
+          {/* Providers */}
+          <div style={{ display: "grid", gap: 12, marginBottom: S.xl }}>
+            {PROVIDERS.map(p => {
+              const st = byProvider[p.id] || {};
+              const configured = !!st.configured;
+              const isActive = settings.active_provider === p.id;
+              const tr = testResult[p.id];
+              return (
+                <div key={p.id} style={{ background: C.panel, border: "1px solid " + (isActive ? C.brand + "77" : C.line),
+                  borderLeft: "4px solid " + (isActive ? C.brand : C.line),
+                  borderRadius: R.lg, padding: S.lg }}>
+
+                  <div style={{ display: "flex", alignItems: "flex-start", gap: S.md, flexWrap: "wrap" }}>
+                    <div style={{ flex: 1, minWidth: 240 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 18 }}>{p.emoji}</span>
+                        <span style={{ fontSize: 16, fontWeight: 800, color: C.ink }}>{p.name}</span>
+                        {isActive && <Pill tone="brand">In use</Pill>}
+                        {configured
+                          ? <span style={{ fontSize: 12, fontWeight: 700, color: C.ok }}>✓ Key saved <span style={{ fontFamily: "ui-monospace, monospace", color: C.faint }}>{st.hint}</span></span>
+                          : <span style={{ fontSize: 12, fontWeight: 700, color: C.faint }}>No key yet</span>}
+                      </div>
+
+                      {configured && st.updated_at && (
+                        <div style={{ fontSize: 12, color: C.faint, marginTop: 4 }}>
+                          Saved {relativeTime(st.updated_at)}{st.updated_by && st.updated_by !== "unknown" ? ` by ${st.updated_by}` : ""}
+                        </div>
+                      )}
+
+                      {/* Model */}
+                      {configured && (
+                        <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <span style={{ fontSize: 12, color: C.sub, fontWeight: 600 }}>Model</span>
+                          <Select value={st.model || p.defaultModel}
+                            onChange={async (e) => {
+                              try { await db_ai.setKey(p.id, "__KEEP__", e.target.value); }
+                              catch { /* handled below */ }
+                            }}
+                            style={{ maxWidth: 220, fontSize: 13, padding: "5px 9px" }}
+                            disabled>
+                            <option>{st.model || p.defaultModel}</option>
+                          </Select>
+                          <span style={{ fontSize: 11.5, color: C.faint }}>set when you save the key</span>
+                        </div>
+                      )}
+
+                      {/* Test result */}
+                      {tr && (
+                        <div style={{ marginTop: 10, fontSize: 12.5, lineHeight: 1.5,
+                          color: tr.ok ? C.ok : C.danger, fontWeight: 600 }}>
+                          {tr.ok ? `✓ Connected — ${tr.model} responded.` : `✗ ${tr.error}`}
+                        </div>
+                      )}
+                    </div>
+
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 130 }}>
+                      {!isActive && configured && <Btn size="sm" variant="soft" onClick={() => setActive(p.id)}>Use this one</Btn>}
+                      <Btn size="sm" variant={configured ? "ghost" : "primary"} onClick={() => setEditKey(p.id)}>
+                        {configured ? "Replace key" : "Add key"}
+                      </Btn>
+                      {configured && (
+                        <Btn size="sm" variant="ghost" onClick={() => testConn(p)} disabled={testing === p.id}>
+                          {testing === p.id ? "Testing…" : "Test"}
+                        </Btn>
+                      )}
+                      {configured && (
+                        <button onClick={() => clearKey(p)}
+                          style={{ fontSize: 12, fontWeight: 700, padding: "5px 10px", borderRadius: 8, cursor: "pointer",
+                            border: "1px solid " + C.line, background: "transparent", color: C.danger }}>Remove</button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Generation defaults */}
+          <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg, marginBottom: S.xl }}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: C.ink, marginBottom: S.md }}>Generation defaults</div>
+            <div className="pm-form-2">
+              <Field label="Questions per batch" hint="1–30">
+                <Input type="number" min={1} max={30} value={settings.batch_size ?? 10}
+                  onChange={(e) => saveSetting({ batch_size: Math.min(30, Math.max(1, parseInt(e.target.value) || 10)) })} />
+              </Field>
+              <Field label=" " hint="Send failures back to the AI once with the exact problem">
+                <label style={{ display: "flex", alignItems: "center", gap: 9, cursor: "pointer", fontSize: 13.5, color: C.ink2, paddingTop: 8 }}>
+                  <input type="checkbox" checked={settings.auto_repair !== false}
+                    onChange={(e) => saveSetting({ auto_repair: e.target.checked })}
+                    style={{ width: 16, height: 16 }} />
+                  Auto-fix flagged questions
+                </label>
+              </Field>
+            </div>
+          </div>
+
+          {/* Generate */}
+          <GeneratePanel packs={packs} levels={levels} settings={settings} status={byProvider} />
+        </>
+      )}
+
+      <Modal open={editKey !== null} onClose={() => setEditKey(null)} width={520}>
+        {editKey !== null && (
+          <KeyEditor
+            provider={PROVIDERS.find(p => p.id === editKey)}
+            existing={byProvider[editKey]}
+            onClose={() => setEditKey(null)}
+            onSaved={async () => { setEditKey(null); await reloadAll(); notify("Key saved"); }}
+          />
+        )}
+      </Modal>
+    </div>
+  );
+}
+
+// Write-only key entry. Nothing is ever read back — you can only overwrite.
+function KeyEditor({ provider, existing, onClose, onSaved }) {
+  const [key, setKey] = useState("");
+  const [model, setModel] = useState(existing?.model || provider.defaultModel);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (!key.trim() || key.trim().length < 8) { notify("That key looks too short", "error"); return; }
+    setBusy(true);
+    try {
+      await db_ai.setKey(provider.id, key.trim(), model);
+      setKey(""); // never keep it in memory
+      onSaved();
+    } catch (e) {
+      setBusy(false);
+      notify(friendlyError(0, String(e?.message || e)), "error");
+    }
+  };
+
+  return (
+    <>
+      <ModalHead title={`${existing?.configured ? "Replace" : "Add"} ${provider.name} key`}
+        subtitle={`Get one from ${provider.where}`} />
+      <div style={{ padding: S.xl, display: "grid", gap: S.md }}>
+        {existing?.configured && (
+          <div style={{ background: C.bg, borderRadius: R.md, padding: "10px 13px", fontSize: 12.5, color: C.sub }}>
+            A key is already saved <span style={{ fontFamily: "ui-monospace, monospace" }}>{existing.hint}</span>. Saving a new one replaces it. The old key can't be shown.
+          </div>
+        )}
+        <Field label="API key" hint={provider.keyHint}>
+          <Input type="password" value={key} onChange={(e) => setKey(e.target.value)} autoFocus
+            placeholder="Paste the key here" autoComplete="off" spellCheck={false} />
+        </Field>
+        <Field label="Model">
+          <Select value={model} onChange={(e) => setModel(e.target.value)}>
+            {provider.models.map(m => <option key={m} value={m}>{m}</option>)}
+          </Select>
+        </Field>
+        <div style={{ fontSize: 12, color: C.faint, lineHeight: 1.5 }}>
+          Once saved, this key is stored on the server and shared by everyone who logs in. It can't be read back from here — only replaced.
+        </div>
+      </div>
+      <ModalFoot>
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn onClick={submit} disabled={busy || !key.trim()}>{busy ? "Saving…" : "Save key"}</Btn>
+      </ModalFoot>
+    </>
+  );
+}
+
+// Kick off a generation run. Everything produced goes to the AI Review queue — never straight
+// into a pack.
+function GeneratePanel({ packs, levels, settings, status }) {
+  const [packId, setPackId] = useState("");
+  const [level, setLevel] = useState("");
+  const [count, setCount] = useState(settings.batch_size ?? 10);
+  const [notes, setNotes] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+
+  const active = settings.active_provider || "anthropic";
+  const ready = !!status[active]?.configured;
+  const pack = (packs || []).find(p => p.id === packId);
+
+  const run = async () => {
+    if (!packId) { notify("Pick a pack first", "error"); return; }
+    setBusy(true); setResult(null);
+    try {
+      const res = await db_ai.generate({
+        pack_id: packId,
+        target_level: level ? parseInt(level) : null,
+        count: Math.min(30, Math.max(1, parseInt(count) || 10)),
+        notes: notes.trim(),
+      });
+      if (res?.error) throw new Error(res.message || res.error);
+      setResult(res);
+      notify(res.message || "Queued for review");
+    } catch (e) {
+      notify(friendlyError(0, String(e?.message || e)), "error");
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg }}>
+      <div style={{ fontSize: 15, fontWeight: 800, color: C.ink, marginBottom: 4 }}>Generate questions</div>
+      <div style={{ fontSize: 13, color: C.sub, marginBottom: S.md, lineHeight: 1.5 }}>
+        Everything the AI writes goes to <b>AI Review</b> first — checked automatically, then waiting for your approval. Nothing reaches a pack until you say so.
+      </div>
+
+      {!ready && (
+        <div style={{ background: C.danger + "10", border: "1px solid " + C.danger + "33", borderRadius: R.md,
+          padding: "10px 13px", fontSize: 13, color: C.danger, marginBottom: S.md }}>
+          No API key saved for <b>{PROVIDERS.find(p => p.id === active)?.name}</b>. Add one above to start generating.
+        </div>
+      )}
+
+      <div className="pm-form-2" style={{ marginBottom: S.md }}>
+        <Field label="Pack">
+          <Select value={packId} onChange={(e) => setPackId(e.target.value)}>
+            <option value="">Choose a pack…</option>
+            {(packs || []).slice().sort((a, b) => a.name.localeCompare(b.name)).map(p => (
+              <option key={p.id} value={p.id}>{p.emoji ? p.emoji + " " : ""}{p.name}</option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Target level" hint={pack ? `Pack default is ${pack.level ?? 1}` : "Uses the pack's level"}>
+          <Select value={level} onChange={(e) => setLevel(e.target.value)}>
+            <option value="">Pack default</option>
+            {(levels || []).map(l => <option key={l.level} value={l.level}>Level {l.level}{l.name ? ` — ${l.name}` : ""}</option>)}
+          </Select>
+        </Field>
+      </div>
+
+      <div className="pm-form-2" style={{ marginBottom: S.md }}>
+        <Field label="How many" hint="1–30">
+          <Input type="number" min={1} max={30} value={count} onChange={(e) => setCount(e.target.value)} />
+        </Field>
+        <Field label="Extra instructions" hint="Optional">
+          <Input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="e.g. focus on friendship" />
+        </Field>
+      </div>
+
+      <Btn onClick={run} disabled={busy || !ready || !packId}>
+        {busy ? "Generating…" : `Generate with ${PROVIDERS.find(p => p.id === active)?.name || active}`}
+      </Btn>
+
+      {result && (
+        <div style={{ marginTop: S.md, background: C.ok + "10", border: "1px solid " + C.ok + "44",
+          borderRadius: R.md, padding: "11px 14px", fontSize: 13, color: C.ink, lineHeight: 1.55 }}>
+          <b>{result.generated}</b> question{result.generated === 1 ? "" : "s"} queued —{" "}
+          <b style={{ color: C.ok }}>{result.clean}</b> passed every check
+          {result.flagged > 0 && <> · <b style={{ color: C.danger }}>{result.flagged}</b> flagged</>}
+          {result.repaired > 0 && <> · {result.repaired} auto-fixed</>}.
+          {" "}Go to <b>AI Review</b> to approve them.
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -5870,6 +6924,8 @@ const NAV = [
   { id: "questions", label: "Questions", icon: "⌕" },
   { id: "generator", label: "Generator", icon: "✦" },
   { id: "levels", label: "Levels", icon: "▲" },
+  { id: "aireview", label: "AI Review", icon: "◎" },
+  { id: "aisettings", label: "AI Settings", icon: "✧" },
   { id: "health", label: "Health", icon: "◉" },
   { id: "publish", label: "Publishing", icon: "⇧" },
   { id: "activity", label: "Activity", icon: "≡" },
@@ -5891,7 +6947,7 @@ function App() {
   const theme = useTheme();
   const [authed, setAuthed] = useState(() => !!session.load());
   // URL-hash routing so a refresh keeps you where you were (e.g. #/questions, #/pack/<id>).
-  const VALID_NAV = ["dashboard", "library", "questions", "generator", "levels", "health", "publish", "activity", "devnotes"];
+  const VALID_NAV = ["dashboard", "library", "questions", "generator", "levels", "aireview", "aisettings", "health", "publish", "activity", "devnotes"];
   const parseHash = () => {
     const raw = (window.location.hash || "").replace(/^#\/?/, "").trim(); // "questions" | "pack/<id>" | ""
     if (!raw) return { nav: "dashboard", packId: null };
@@ -6179,6 +7235,10 @@ function App() {
             <GeneratorView packs={packs} levels={levels} />
           ) : nav === "health" ? (
             <HealthView onOpenPack={openPackById} />
+          ) : nav === "aireview" ? (
+            <AIReviewView packs={packs} levels={levels} />
+          ) : nav === "aisettings" ? (
+            <AISettingsView packs={packs} levels={levels} />
           ) : nav === "publish" ? (
             <PublishHub packs={packs} onSynced={reloadPacks} />
           ) : nav === "devnotes" ? (
