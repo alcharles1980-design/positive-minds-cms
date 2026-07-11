@@ -114,10 +114,36 @@ function validateQuestion(q: any, levels: any[], opts: any = {}) {
   if (alt && /[^A-Z\s'-]/.test(alt)) flags.push({ code: 'bad_chars_alt', detail: `"${alt}" contains characters other than letters.` });
 
   const norm = (s: string) => (s || '').toLowerCase().replace(/\{blank\}/g, '___').replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
-  for (const e of opts.existing || []) {
-    if (norm(e.template) === norm(tpl) && (e.answer || '').toUpperCase() === ans) {
-      flags.push({ code: 'duplicate', detail: 'This exact question already exists in the pack.' });
-      break;
+  // Duplicate detection has THREE distinct cases, because they mean different things:
+  //   duplicate      — same sentence AND same answer. Definitely reject.
+  //   same_sentence  — same sentence, different answer. Repetitive phrasing.
+  //   answer_reused  — this answer word is already taught elsewhere. In a 10–20 question pack,
+  //                    teaching BRAVE twice is a real quality problem, and it is INVISIBLE if you
+  //                    only compare whole questions.
+  // `existing` includes live questions AND anything already pending/rejected in the review queue —
+  // otherwise two generate runs before a review duplicate each other, and a rejected question gets
+  // cheerfully regenerated.
+  if (ans) {
+    const tplN = norm(tpl);
+    let exact = false, sameSentence = false, reusedIn: any = null;
+    for (const e of opts.existing || []) {
+      const eAns = (e.answer || '').toUpperCase();
+      const eTpl = norm(e.template);
+      if (eTpl === tplN && eAns === ans) { exact = true; break; }
+      if (eTpl === tplN) sameSentence = true;
+      if (eAns === ans && !reusedIn) reusedIn = e;
+    }
+    if (exact) {
+      flags.push({ code: 'duplicate', detail: 'This exact question already exists.' });
+    } else {
+      if (sameSentence) flags.push({ code: 'same_sentence', detail: 'This sentence is already used with a different answer.' });
+      if (reusedIn) {
+        const where = reusedIn.source === 'pending' ? 'is already waiting in the review queue'
+          : reusedIn.source === 'rejected' ? 'was already rejected'
+          : reusedIn.source === 'batch' ? 'is used by another question in this same batch'
+          : 'is already used in this pack';
+        flags.push({ code: 'answer_reused', detail: `The answer "${ans}" ${where}${reusedIn.template ? ` — “${String(reusedIn.template).replace(/\{blank\}/g, '____')}”` : ''}.` });
+      }
     }
   }
 
@@ -242,9 +268,28 @@ function buildPrompt(opts: any) {
   lines.push('');
 
   if (existing?.length) {
-    const sample = existing.slice(0, 40).map((e: any) => `${e.answer}`).join(', ');
-    lines.push(`ALREADY USED (do not repeat these answer words): ${sample}`);
-    lines.push('');
+    // Every answer word already spoken for — whether live in the pack, waiting in the review queue,
+    // or previously rejected. No cap: if the model doesn't see a word, it will happily reuse it.
+    const used = [...new Set(existing.map((e: any) => String(e.answer || '').toUpperCase()).filter(Boolean))];
+    const rejected = [...new Set(existing.filter((e: any) => e.source === 'rejected')
+      .map((e: any) => String(e.answer || '').toUpperCase()).filter(Boolean))];
+
+    if (used.length) {
+      lines.push(`ANSWER WORDS ALREADY TAKEN — do NOT use any of these as the primary answer (each word should be taught once):`);
+      lines.push(used.join(', '));
+      lines.push('');
+    }
+    if (rejected.length) {
+      lines.push(`Note: ${rejected.join(', ')} were previously REJECTED by a human reviewer — avoid them and anything close to them.`);
+      lines.push('');
+    }
+    // Also show the sentences, so the model varies phrasing rather than just swapping words.
+    const sentences = [...new Set(existing.map((e: any) => String(e.template || '').replace(/\{blank\}/g, '___')).filter(Boolean))].slice(0, 60);
+    if (sentences.length) {
+      lines.push(`SENTENCES ALREADY USED — write genuinely different ones, don't just swap the word:`);
+      for (const t of sentences) lines.push(`- ${t}`);
+      lines.push('');
+    }
   }
   if (notes) { lines.push(`ADDITIONAL INSTRUCTIONS: ${notes}`); lines.push(''); }
 
@@ -315,8 +360,21 @@ Deno.serve(async (req) => {
     if (!pack) return json({ error: 'Pack not found' }, 404);
 
     const { data: levels } = await db.from('pm_levels').select('*').order('level');
-    const { data: existing } = await db
-      .from('pm_questions').select('template,answer,alt_answer').eq('pack_id', pack_id).limit(1000);
+
+    // De-dup context. This must include MORE than the live questions, or:
+    //   • two generate runs before you review will duplicate each other, and
+    //   • a question you rejected gets cheerfully regenerated next time.
+    // So: live questions (active AND inactive) + anything pending or already rejected in the queue.
+    const { data: liveQs } = await db
+      .from('pm_questions').select('template,answer,alt_answer').eq('pack_id', pack_id).limit(2000);
+    const { data: queuedQs } = await db
+      .from('pm_review_queue').select('template,answer,status')
+      .eq('pack_id', pack_id).in('status', ['pending', 'rejected']).limit(2000);
+
+    const existing = [
+      ...(liveQs || []).map((q: any) => ({ ...q, source: 'live' })),
+      ...(queuedQs || []).map((q: any) => ({ ...q, source: q.status })), // 'pending' | 'rejected'
+    ];
 
     const tLevel = target_level ?? pack.level ?? 1;
 
@@ -338,8 +396,18 @@ Deno.serve(async (req) => {
     catch (e) { return json({ error: 'parse_error', message: String(e), raw: raw.slice(0, 600) }, 502); }
 
     // ---- Validate every item against the REAL engine at EVERY level ----
-    const vopts = { targetLevel: tLevel, existing: existing || [] };
-    let checked = items.map((q: any) => ({ q, result: validateQuestion(q, levels || [], vopts) }));
+    // Validate a list cumulatively: each item is checked against `existing` PLUS everything already
+    // seen (either previously accepted in this batch, or earlier in the same list) — otherwise the
+    // model can hand back BRAVE twice in one run and neither copy gets flagged.
+    const validateList = (list: any[], seed: any[]) => {
+      const seen: any[] = [...seed];
+      return list.map((q: any) => {
+        const result = validateQuestion(q, levels || [], { targetLevel: tLevel, existing: seen });
+        seen.push({ template: q.template, answer: q.answer, source: 'batch' });
+        return { q, result };
+      });
+    };
+    let checked = validateList(items, existing || []);
 
     // ---- Auto-repair one round for failures (if enabled) ----
     let repaired = 0;
@@ -350,9 +418,14 @@ Deno.serve(async (req) => {
         const rprompt = buildRepairPrompt(bad, levels || [], tLevel);
         const rraw = await callProvider(provider, cfg.api_key, model, rprompt, 4000);
         const fixed = parseQuestions(rraw);
-        // Re-validate the fixes and swap in any that now pass.
+        // Re-validate the fixes AGAINST the items we're keeping — a "fix" must not collide with a
+        // question that already passed in the same batch.
         const goodOnes = checked.filter((c) => c.result.ok);
-        const refixed = fixed.map((q: any) => ({ q, result: validateQuestion(q, levels || [], vopts) }));
+        const seed = [
+          ...(existing || []),
+          ...goodOnes.map((c) => ({ template: c.q.template, answer: c.q.answer, source: 'batch' })),
+        ];
+        const refixed = validateList(fixed, seed);
         repaired = refixed.filter((c) => c.result.ok).length;
         checked = [...goodOnes, ...refixed];
       } catch {

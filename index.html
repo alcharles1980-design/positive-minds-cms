@@ -85,7 +85,7 @@ const {
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.05-05",
+  build: "2026.07.05-06",
   // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
@@ -831,13 +831,47 @@ const validateQuestion = (q, levels, opts = {}) => {
     detail: `"${alt}" contains characters other than letters.`
   });
   const norm = s => (s || "").toLowerCase().replace(/\{blank\}/g, "___").replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim();
-  for (const e of opts.existing || []) {
-    if (norm(e.template) === norm(tpl) && (e.answer || "").toUpperCase() === ans) {
+  // Duplicate detection has THREE distinct cases, because they mean different things:
+  //   duplicate      — same sentence AND same answer. Definitely reject.
+  //   same_sentence  — same sentence, different answer. Repetitive phrasing.
+  //   answer_reused  — this answer word is already taught elsewhere. In a 10–20 question pack,
+  //                    teaching BRAVE twice is a real quality problem, and it is INVISIBLE if you
+  //                    only compare whole questions.
+  // `existing` should include live questions AND anything already sitting in (or rejected from)
+  // the review queue — otherwise two generate runs before a review can duplicate each other, and a
+  // rejected question gets cheerfully regenerated.
+  if (ans) {
+    const tplN = norm(tpl);
+    let exact = false,
+      sameSentence = false,
+      reusedIn = null;
+    for (const e of opts.existing || []) {
+      const eAns = (e.answer || "").toUpperCase();
+      const eTpl = norm(e.template);
+      if (eTpl === tplN && eAns === ans) {
+        exact = true;
+        break;
+      }
+      if (eTpl === tplN) sameSentence = true;
+      if (eAns === ans && !reusedIn) reusedIn = e;
+    }
+    if (exact) {
       flags.push({
         code: "duplicate",
-        detail: "This exact question already exists in the pack."
+        detail: "This exact question already exists."
       });
-      break;
+    } else {
+      if (sameSentence) flags.push({
+        code: "same_sentence",
+        detail: "This sentence is already used with a different answer."
+      });
+      if (reusedIn) {
+        const where = reusedIn.source === "pending" ? "is already waiting in the review queue" : reusedIn.source === "rejected" ? "was already rejected" : reusedIn.source === "batch" ? "is used by another question in this same batch" : "is already used in this pack";
+        flags.push({
+          code: "answer_reused",
+          detail: `The answer "${ans}" ${where}${reusedIn.template ? ` — “${String(reusedIn.template).replace(/\{blank\}/g, "____")}”` : ""}.`
+        });
+      }
     }
   }
   return {
@@ -6912,7 +6946,25 @@ rules for this game are MECHANICALLY DECIDABLE, so the machine catches its own e
 sees them. It runs the REAL masking engine at EVERY level and flags: no/multiple {blank}; missing or
 identical words; word-length band + multi-word rule for the target level; bad characters; duplicates;
 and above all **ambiguous** — the alternate ALSO fits the blank at some level, so the puzzle has TWO
-correct answers and a child is marked wrong for a right answer. At whole-word levels the ONLY clue is
+correct answers and a child is marked wrong for a right answer.
+
+**DUPLICATE HANDLING (three distinct cases, because they mean different things):**
+- \`duplicate\` — same sentence AND same answer. A true repeat.
+- \`same_sentence\` — same sentence, different answer. Repetitive phrasing.
+- \`answer_reused\` — the ANSWER WORD is already taught elsewhere. This is the one that matters most
+  and is invisible if you only compare whole questions: in a 10-20 question pack, teaching BRAVE
+  twice is a real quality problem. The flag says exactly WHERE the word is already used.
+The de-dup CONTEXT is deliberately wider than "live questions in this pack". It includes:
+live questions (active AND inactive) + anything PENDING in the review queue + anything previously
+REJECTED + the other items in the SAME BATCH (validated cumulatively, so if the model hands back
+BRAVE twice, the second copy is flagged, not the first). Without the queue in scope, two generate
+runs before a review would duplicate each other, and a question you rejected would be cheerfully
+regenerated next time. The prompt's avoid-list is likewise uncapped (it was truncated at 40 words)
+and now lists every taken answer word, calls out previously-rejected words explicitly, and shows the
+sentences already used so the model varies phrasing rather than just swapping the word.
+In the UI, \`answer_reused\` and \`same_sentence\` are SOFT (amber, advisory — you may still want the
+question); everything else is a hard mechanical defect (red). Bulk "Approve N clean" only ever takes
+rows with ZERO flags of any kind. At whole-word levels the ONLY clue is
 LENGTH, so ANY same-length alternate is ambiguous there. This is not theoretical: BRIGHT/GENTLE,
 SURE/GLAD and KIND/MEAN were all found broken at L7-10 in LIVE content — each looks perfectly fine to
 a human eye. PARITY INVARIANT: validateQuestion must stay byte-identical between core.jsx and the
@@ -6992,6 +7044,24 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Duplicate handling rebuilt — four real gaps closed.** The original check only caught an EXACT
+  duplicate (same sentence AND same answer), which missed the cases that actually matter. Now three
+  distinct flags: \`duplicate\` (true repeat), \`same_sentence\` (repetitive phrasing), and
+  \`answer_reused\` — the ANSWER WORD is already taught elsewhere, which is invisible if you only
+  compare whole questions and is a real quality problem in a 10-20 question pack (BRAVE taught twice).
+  GAPS CLOSED: (1) same answer word in a new sentence was NOT flagged; (2) the review queue was
+  invisible to de-dup, so two generate runs before a review could duplicate each other; (3) REJECTED
+  items were invisible, so a question you rejected got cheerfully regenerated; (4) the avoid-list sent
+  to the model was capped at 40 words, so past ~40 questions the model stopped being told about the
+  older ones. The de-dup context now spans live questions (active AND inactive) + pending + rejected
+  queue items + the other items in the SAME BATCH (validated cumulatively — if the model returns BRAVE
+  twice, the SECOND copy is flagged, not the first; verified). The repair pass is seeded with the
+  batch's already-good items so a "fix" can't collide with them. The prompt now lists every taken
+  answer word (uncapped), calls out previously-rejected words explicitly, and shows the sentences
+  already used so the model varies phrasing rather than just swapping the word. UI: answer_reused and
+  same_sentence are SOFT (amber, advisory — you may still want the question); mechanical defects stay
+  red. Bulk "Approve N clean" still only takes rows with ZERO flags. Validator parity re-verified
+  (client ↔ deployed edge fn identical across 22 cases including every duplicate type).
 - **NEW: AI content generation with a mandatory human review queue (two new pages, existing pages
   untouched).** Pages: **AI Settings** (aisettings.jsx — pick provider, save keys, generate) and
   **AI Review** (aireview.jsx — the approve/edit/reject queue). New edge fn \`generate-questions\`
@@ -7622,6 +7692,13 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    written via pm_ai_set_key and read ONLY server-side by the edge function (service role). The UI
    reads pm_ai_status, which returns a masked hint and NEVER the key. Never add a select policy to
    pm_ai_config, never return api_key from an RPC, never send a key to the client "just to show it".
+4e. **De-dup context must include the review queue and the current batch.** Comparing only against
+   live questions is not enough: two generate runs before a review will duplicate each other, and a
+   question you REJECTED will be regenerated. Always seed the validator's \`existing\` with live
+   questions + pending + rejected queue rows, and validate a batch CUMULATIVELY (each item sees the
+   ones before it) so a word repeated within one batch is caught. Also: an answer WORD reused in a
+   different sentence is a real defect (a 10-20 question pack teaching BRAVE twice) - never collapse
+   duplicate detection back to "same sentence AND same answer".
 4d. **validateQuestion is a PARITY INVARIANT** (like maskWord). The copy in core.jsx and the copy in
    the generate-questions edge fn must stay byte-identical - the CMS and the generator must agree on
    what "valid" means. Its headline check, "ambiguous", runs the REAL engine at EVERY level: if the
@@ -7904,7 +7981,21 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    REAL masking engine at EVERY level and flags: no/multiple {blank}; missing/identical words; the
    level's word-length band + multi-word rule; non-letter characters; duplicates; and above all
    AMBIGUOUS - the alternate ALSO fits the blank at some level, so the puzzle has TWO correct answers
-   and a child is marked wrong for a right answer. At whole-word levels the ONLY clue is LENGTH, so
+   and a child is marked wrong for a right answer.
+
+   DUPLICATES need THREE distinct flags, not one: \`duplicate\` (same sentence AND same answer),
+   \`same_sentence\` (same sentence, different answer), and \`answer_reused\` (the ANSWER WORD is
+   already taught elsewhere - the case that matters most, and the one you miss if you only compare
+   whole questions; in a 10-20 question pack, teaching BRAVE twice is a real defect). The de-dup
+   CONTEXT must be wider than "live questions in this pack": include live questions (active AND
+   inactive) + PENDING queue items + REJECTED queue items + the other items in the SAME BATCH
+   (validate cumulatively so the second copy of a repeated word is flagged, not the first; seed the
+   repair pass with the batch's already-good items too). Without the queue in scope, two generate runs
+   before a review duplicate each other and rejected questions get regenerated. Do NOT cap the
+   avoid-list sent to the model - list every taken answer word, call out previously-rejected words,
+   and show the sentences already used so it varies phrasing instead of just swapping the word.
+   In the UI, treat answer_reused/same_sentence as SOFT (advisory) and the mechanical defects as HARD;
+   bulk-approve must only take rows with ZERO flags of any kind. At whole-word levels the ONLY clue is LENGTH, so
    ANY same-length alternate is ambiguous there. Auto-repair: send failures back to the model ONCE
    with the exact defect text, re-validate, swap in the fixes (best-effort; on failure queue the
    originals WITH flags).
@@ -9655,12 +9746,20 @@ const FLAG_LABEL = {
   multiword: "Multi-word",
   bad_chars: "Bad characters",
   bad_chars_alt: "Bad characters",
-  duplicate: "Duplicate"
+  duplicate: "Duplicate",
+  same_sentence: "Sentence reused",
+  answer_reused: "Word reused"
 };
+
+// Duplicate-ish flags are advisory (you may still want the question); the rest are mechanical
+// defects. Colour them differently so the genuinely broken ones stand out.
+const SOFT_FLAGS = new Set(["answer_reused", "same_sentence"]);
 function FlagPill({
   flag
 }) {
   const label = FLAG_LABEL[flag.code] || flag.code;
+  const soft = SOFT_FLAGS.has(flag.code);
+  const col = soft ? C.warn : C.danger;
   return /*#__PURE__*/React.createElement("span", {
     title: flag.detail,
     style: {
@@ -9669,9 +9768,9 @@ function FlagPill({
       fontWeight: 800,
       padding: "2px 8px",
       borderRadius: R.pill,
-      background: C.danger + "14",
-      color: C.danger,
-      border: "1px solid " + C.danger + "44",
+      background: col + "14",
+      color: col,
+      border: "1px solid " + col + "44",
       whiteSpace: "nowrap"
     }
   }, label);
@@ -9892,12 +9991,16 @@ function AIReviewView({
     const clean = !!v.ok;
     const pack = packById[r.pack_id];
     const decided = r.status !== "pending";
+    // Only genuinely mechanical defects get the alarming red treatment. "Word reused" and
+    // "sentence reused" are advisory — you may still want the question.
+    const hardBroken = flags.some(f => !SOFT_FLAGS.has(f.code));
+    const edge = decided ? r.status === "approved" ? C.ok : C.faint : clean ? C.ok : hardBroken ? C.danger : C.warn;
     return /*#__PURE__*/React.createElement("div", {
       key: r.id,
       style: {
         background: C.panel,
-        border: "1px solid " + (clean || decided ? C.line : C.danger + "55"),
-        borderLeft: "4px solid " + (decided ? r.status === "approved" ? C.ok : C.faint : clean ? C.ok : C.danger),
+        border: "1px solid " + (clean || decided || !hardBroken ? C.line : C.danger + "55"),
+        borderLeft: "4px solid " + edge,
         borderRadius: R.lg,
         padding: S.lg
       }
@@ -9999,7 +10102,7 @@ function AIReviewView({
       key: i,
       style: {
         fontSize: 12.5,
-        color: C.danger,
+        color: SOFT_FLAGS.has(f.code) ? C.warn : C.danger,
         lineHeight: 1.5
       }
     }, f.detail))), clean && !decided && /*#__PURE__*/React.createElement("div", {
