@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.05-06", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.05-07", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -3042,6 +3042,11 @@ config → data layer → design tokens → hooks → primitives → feature vie
   the same token reads pm_levels fine. Writes go through SECURITY DEFINER RPCs only; the
   generate-questions edge fn reads the key with the service role, server-side. Columns: provider (PK),
   api_key, model, enabled, updated_at, updated_by.
+- \`pm_ai_usage\` — one row per PROVIDER CALL (generate / repair / test), with provider, model,
+  pack, batch, input_tokens, output_tokens, questions_returned, ok, error, actor, created_at.
+  AI generation is the ONLY operation in this app that spends real money, and it used to leave NO
+  trace whatsoever — no audit trail, no token counts, no way to notice a runaway. Readable by the
+  admin (the Usage panel), written only by the edge fn (service role).
 - \`pm_ai_settings\` — singleton (id=1) NON-secret settings: active_provider, batch_size,
   auto_repair. Safe for the client to read/write.
 - \`pm_deletions\` — deletion tombstones for incremental sync (a "changed since" query can't see
@@ -3201,6 +3206,15 @@ at all). The settings page writes keys via \`pm_ai_set_key\` and displays status
 "Configured ••••••1234" — via \`pm_ai_status\`, which returns a masked hint and never the key. Even
 someone with the admin login, or an XSS in this app, cannot lift the keys. Empirically verified.
 Rotate by saving a new key over the old one. \`callFn()\` in core.jsx invokes verify_jwt edge fns with
+
+**COST + RATE CONTROL (this was completely missing):** AI generation is the ONLY operation in this app
+that spends real money, and it originally had NO brake and NO audit trail at all - no run count, no
+token counts, no way to notice a runaway. Now: every provider call (generate / repair / test, success
+AND failure) is recorded in \`pm_ai_usage\` with token counts and the actor from the JWT; the edge fn
+calls \`pm_ai_rate_check\` BEFORE any provider call and returns 429 if the limits are exceeded
+(defaults 20/hour, 100/day); and the AI Settings page shows a Usage panel (runs, questions, tokens,
+errors, by provider, 30 days) via \`pm_ai_usage_summary\`. Logging is best-effort so it can never break
+a generation the user is waiting on.
 the user's token (mirrors rpc()'s 401 refresh-and-retry).
 
 **THE VALIDATOR (\`validateQuestion\` in core.jsx — the reason this is trustworthy):** most quality
@@ -3306,6 +3320,32 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Deep audit of the AI feature — found what we hadn't thought about.** Verified the one integration
+  nobody had tested: approving an AI question DOES bump the pack's content_version and the sync
+  manifest's global_version, so Firebase actually pulls it (proved live end-to-end; without that the
+  whole pipeline would have been a dead end).
+  FOUND AND FIXED:
+  (1) **AI pages were unreachable on mobile.** The phone drawer had a HARDCODED list (health, levels,
+  activity, devnotes) that never included AI Review, AI Settings — or even Generator. On a phone you
+  simply could not approve queued content. The drawer is now DERIVED from NAV, so a new page can never
+  be silently stranded again.
+  (2) **No cost control or audit trail at all.** Generation is the only thing here that spends real
+  money and it was completely invisible and unbounded — no run count, no token counts, no brake. Added
+  pm_ai_usage (a row per provider call incl. failures and connection tests, with token counts and the
+  actor from the JWT), pm_ai_rate_check (checked BEFORE any provider call; 429 with a clear message;
+  defaults 20/hour, 100/day), pm_ai_usage_summary, and a Usage panel on AI Settings. Logging is
+  best-effort so it can never break a generation you're waiting on.
+  (3) **Approve/reject had a race window.** The RPCs read the row, checked status, then updated — two
+  truly simultaneous calls could both see 'pending'. Now SELECT ... FOR UPDATE, so the second blocks
+  and then correctly sees 'approved'. Also added a guard for the pack having been deleted between
+  generating and approving.
+  (4) **The queue counts downloaded up to 10,000 rows to the browser just to count them** — wasteful,
+  and silently WRONG past the cap. Replaced with a cheap server-side pm_review_counts() RPC.
+  (5) Added a **pack filter** to the review queue (it was one undifferentiated list across all packs)
+  and a **"Reject N broken"** bulk action — which deliberately only sweeps up HARD mechanical defects,
+  never the soft advisory flags (a reused word may still be a question you want).
+  Confirmed already-correct: pm_review_queue cascades on pack delete; double-approve is rejected;
+  bulk-approve only takes zero-flag rows. Prod left pristine (12 questions, 15 packs, empty queue).
 - **Duplicate handling rebuilt — four real gaps closed.** The original check only caught an EXACT
   duplicate (same sentence AND same answer), which missed the cases that actually matter. Now three
   distinct flags: \`duplicate\` (true repeat), \`same_sentence\` (repetitive phrasing), and
@@ -3955,6 +3995,14 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    written via pm_ai_set_key and read ONLY server-side by the edge function (service role). The UI
    reads pm_ai_status, which returns a masked hint and NEVER the key. Never add a select policy to
    pm_ai_config, never return api_key from an RPC, never send a key to the client "just to show it".
+4f. **Anything that spends money must be logged and rate-limited.** AI generation is the only
+   operation in this app with a real cost. Every provider call (generate/repair/test, success AND
+   failure) goes to pm_ai_usage with token counts and the actor; the edge fn checks pm_ai_rate_check
+   BEFORE calling a provider. Never add a new paid call without both. Logging must be best-effort so
+   it can't break the request.
+4g. **Mobile nav must be DERIVED from NAV, never hardcoded.** The phone drawer once had a hardcoded
+   list, which left three whole pages (AI Review, AI Settings, Generator) unreachable on a phone. It
+   now renders NAV.filter(n => !NAV_PHONE.includes(n.id)). Never hardcode that list again.
 4e. **De-dup context must include the review queue and the current batch.** Comparing only against
    live questions is not enough: two generate runs before a review will duplicate each other, and a
    question you REJECTED will be regenerated. Always seed the validator's \`existing\` with live
@@ -4275,6 +4323,19 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    the blank shape at every level, highlighting the levels that are ambiguous - so you can see the
    moment a fix actually clears the problem.
 
+   COST + RATE CONTROL (do not skip this): generation is the only paid operation. Log EVERY provider
+   call (generate/repair/test, success AND failure) to a pm_ai_usage table with provider, model, pack,
+   batch, input/output tokens, questions returned, ok, error and the actor (read the email out of the
+   verified JWT). Check a pm_ai_rate_check RPC BEFORE any provider call and return 429 with a clear
+   message when over the limit (sensible defaults: 20/hour, 100/day). Surface a Usage panel on the
+   settings page (runs, questions, tokens, errors, by provider). Make the logging best-effort so it can
+   never break a generation the user is waiting on.
+   CONCURRENCY: the approve/reject RPCs must SELECT ... FOR UPDATE, or two simultaneous approvals of
+   the same queue row can both see 'pending' and create two questions. Also guard against the pack
+   having been deleted between generating and approving.
+   COUNTS: never download the whole queue to the browser to count it - use a server-side counts RPC.
+   MOBILE: the phone drawer MUST be derived from NAV (NAV.filter(n => !NAV_PHONE.includes(n.id))), or
+   new pages end up unreachable on a phone.
    REMEMBER WHY THE HUMAN IS THERE: the machine judges mechanics; only a person judges tone and
    meaning. "PERFECT" passes every automated check and is still the wrong word to teach a child.
 7. **Activity log:** every mutation recorded (who/what/when) via pm_log.
@@ -5109,15 +5170,9 @@ function DeriveLevelDialog({ pack, questions, levels, onClose, onDone }) {
 const db_review = {
   list: (status = "pending") =>
     rest(`pm_review_queue?status=eq.${status}&order=created_at.desc&limit=1000`).then(r => r.data || []),
-  counts: () =>
-    rest(`pm_review_queue?select=status&limit=10000`).then(r => {
-      const rows = r.data || [];
-      return {
-        pending: rows.filter(x => x.status === "pending").length,
-        approved: rows.filter(x => x.status === "approved").length,
-        rejected: rows.filter(x => x.status === "rejected").length,
-      };
-    }),
+  // Server-side counts. (This used to download every row to the browser just to count them, which
+  // was wasteful AND silently wrong past the 10,000-row cap.)
+  counts: () => rpc("pm_review_counts"),
   approve: (id, patch = {}) =>
     rpc("pm_review_approve", {
       p_id: id,
@@ -5167,6 +5222,7 @@ function FlagPill({ flag }) {
 
 function AIReviewView({ packs, levels }) {
   const [tab, setTab] = useState("pending");
+  const [packFilter, setPackFilter] = useState("");
   const { loading, error, data, reload } = useAsync(() => db_review.list(tab), [tab]);
   const countsState = useAsync(() => db_review.counts(), []);
   const [editing, setEditing] = useState(null);
@@ -5176,9 +5232,15 @@ function AIReviewView({ packs, levels }) {
 
   useRealtimeRefresh(["pm_review_queue"], () => { reload(); countsState.reload(); }, [reload, countsState.reload]);
 
-  const rows = data || [];
+  const allRows = data || [];
+  const rows = packFilter ? allRows.filter(r => r.pack_id === packFilter) : allRows;
   const counts = countsState.data || { pending: 0, approved: 0, rejected: 0 };
   const packById = useMemo(() => Object.fromEntries((packs || []).map(p => [p.id, p])), [packs]);
+  // Only offer packs that actually have rows in this tab — a filter full of empty options is noise.
+  const packsInTab = useMemo(() => {
+    const ids = [...new Set(allRows.map(r => r.pack_id))];
+    return ids.map(id => packById[id]).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name));
+  }, [allRows, packById]);
 
   const refreshAll = async () => { await reload(); await countsState.reload(); };
 
@@ -5227,6 +5289,27 @@ function AIReviewView({ packs, levels }) {
     await refreshAll();
   };
 
+  // Bulk: reject everything the machine flagged as mechanically broken. (Soft flags like a reused
+  // word are advisory — they are NOT swept up here, because you may still want those questions.)
+  const rejectAllBroken = async () => {
+    const broken = rows.filter(r => (r.validation?.flags || []).some(f => !SOFT_FLAGS.has(f.code)));
+    if (!broken.length) { notify("Nothing is mechanically broken", "error"); return; }
+    const ok = await confirmDialog({
+      title: `Reject ${broken.length} broken question${broken.length === 1 ? "" : "s"}?`,
+      body: "These have real defects (e.g. two correct answers, or a missing blank). Questions flagged only for a reused word are left alone — you may still want those.",
+      confirmText: "Reject them", tone: "danger",
+    });
+    if (!ok) return;
+    setBulkBusy(true);
+    let done = 0;
+    for (const r of broken) {
+      try { await db_review.reject(r.id, "Failed automated checks"); done++; } catch { /* keep going */ }
+    }
+    setBulkBusy(false);
+    notify(`Rejected ${done} of ${broken.length}`);
+    await refreshAll();
+  };
+
   const clearDecided = async () => {
     const ok = await confirmDialog({
       title: `Clear ${tab} history?`,
@@ -5240,6 +5323,9 @@ function AIReviewView({ packs, levels }) {
 
   const cleanCount = rows.filter(r => r.validation?.ok).length;
   const flaggedCount = rows.length - cleanCount;
+  // "Broken" = has at least one HARD (mechanical) defect. A row flagged only for a reused word is
+  // advisory, not broken — don't sweep it into a bulk reject.
+  const brokenCount = rows.filter(r => (r.validation?.flags || []).some(f => !SOFT_FLAGS.has(f.code))).length;
 
   if (error) return <ErrorState error={error} onRetry={reload} />;
 
@@ -5268,10 +5354,28 @@ function AIReviewView({ packs, levels }) {
           </button>
         ))}
         <div style={{ flex: 1 }} />
+        {packsInTab.length > 1 && (
+          <Select value={packFilter} onChange={(e) => setPackFilter(e.target.value)}
+            style={{ maxWidth: 200, fontSize: 13, padding: "6px 10px" }}>
+            <option value="">All packs ({allRows.length})</option>
+            {packsInTab.map(p => (
+              <option key={p.id} value={p.id}>
+                {p.emoji ? p.emoji + " " : ""}{p.name} ({allRows.filter(r => r.pack_id === p.id).length})
+              </option>
+            ))}
+          </Select>
+        )}
         {tab === "pending" && rows.length > 0 && (
           <Btn size="sm" onClick={approveAllClean} disabled={bulkBusy || !cleanCount}>
-            {bulkBusy ? "Approving…" : `Approve ${cleanCount} clean`}
+            {bulkBusy ? "Working…" : `Approve ${cleanCount} clean`}
           </Btn>
+        )}
+        {tab === "pending" && brokenCount > 0 && (
+          <button onClick={rejectAllBroken} disabled={bulkBusy}
+            style={{ fontSize: 12.5, fontWeight: 700, padding: "7px 13px", borderRadius: R.pill, cursor: "pointer",
+              border: "1px solid " + C.danger + "55", background: "transparent", color: C.danger }}>
+            Reject {brokenCount} broken
+          </button>
         )}
         {tab !== "pending" && rows.length > 0 && (
           <Btn size="sm" variant="ghost" onClick={clearDecided}>Clear history</Btn>
@@ -5576,6 +5680,7 @@ const PROVIDERS = [
 
 const db_ai = {
   status: () => rpc("pm_ai_status"),
+  usage: () => rpc("pm_ai_usage_summary"),
   setKey: (provider, key, model) => rpc("pm_ai_set_key", { p_provider: provider, p_key: key, p_model: model || null }),
   clearKey: (provider) => rpc("pm_ai_clear_key", { p_provider: provider }),
   settings: () => rest("pm_ai_settings?id=eq.1&limit=1").then(r => (r.data || [])[0] || null),
@@ -5750,6 +5855,10 @@ function AISettingsView({ packs, levels }) {
 
           {/* Generate */}
           <GeneratePanel packs={packs} levels={levels} settings={settings} status={byProvider} />
+
+          {/* Usage — AI generation is the one thing here that spends real money. Until now it left
+              no trace at all. */}
+          <UsagePanel />
         </>
       )}
 
@@ -5763,6 +5872,67 @@ function AISettingsView({ packs, levels }) {
           />
         )}
       </Modal>
+    </div>
+  );
+}
+
+// Usage + spend visibility. AI generation is the ONLY operation in this app that costs real money,
+// and it used to leave no audit trail whatsoever — no run count, no token counts, no way to notice a
+// runaway. Every provider call is now recorded (including failures and connection tests).
+function UsagePanel() {
+  const { loading, data, reload } = useAsync(() => db_ai.usage(), []);
+  const u = data || {};
+  const byProv = u.by_provider || [];
+  const fmt = (n) => (n == null ? "—" : Number(n).toLocaleString());
+
+  return (
+    <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg, marginTop: S.xl }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: S.md, gap: S.md, flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 800, color: C.ink }}>Usage</div>
+          <div style={{ fontSize: 12.5, color: C.sub }}>Last 30 days. Generation is rate-limited to 20/hour and 100/day as a spend brake.</div>
+        </div>
+        <Btn size="sm" variant="ghost" onClick={reload}>Refresh</Btn>
+      </div>
+
+      {loading ? <Skeleton h={70} r={10} /> : (
+        <>
+          <div style={{ display: "flex", gap: S.lg, flexWrap: "wrap", marginBottom: byProv.length ? S.md : 0 }}>
+            {[
+              ["Runs today", u.runs_today],
+              ["Runs (30d)", u.runs_30d],
+              ["Questions made", u.questions_30d],
+              ["Input tokens", u.input_tokens_30d],
+              ["Output tokens", u.output_tokens_30d],
+              ["Errors", u.errors_30d],
+            ].map(([label, val]) => (
+              <div key={label}>
+                <div style={{ fontSize: 19, fontWeight: 800, color: label === "Errors" && val > 0 ? C.danger : C.ink }}>{fmt(val)}</div>
+                <div style={{ fontSize: 11.5, color: C.faint, fontWeight: 600 }}>{label}</div>
+              </div>
+            ))}
+          </div>
+
+          {byProv.length > 0 && (
+            <div style={{ borderTop: "1px solid " + C.line, paddingTop: S.md }}>
+              {byProv.map(p => (
+                <div key={p.provider} style={{ display: "flex", alignItems: "center", gap: S.md, fontSize: 12.5, color: C.sub, padding: "3px 0" }}>
+                  <span style={{ fontWeight: 700, color: C.ink2, minWidth: 80 }}>{p.provider}</span>
+                  <span>{p.runs} run{p.runs === 1 ? "" : "s"}</span>
+                  <span style={{ color: C.faint }}>·</span>
+                  <span>{fmt(p.input_tokens)} in / {fmt(p.output_tokens)} out</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {!u.runs_30d && (
+            <div style={{ fontSize: 12.5, color: C.faint, marginTop: 4 }}>
+              No generation runs yet.
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -5841,6 +6011,10 @@ function GeneratePanel({ packs, levels, settings, status }) {
         count: Math.min(30, Math.max(1, parseInt(count) || 10)),
         notes: notes.trim(),
       });
+      if (res?.error === "rate_limited") {
+        notify(res.message || "Rate limit reached — try again later", "error");
+        return;
+      }
       if (res?.error) throw new Error(res.message || res.error);
       setResult(res);
       notify(res.message || "Queued for review");
@@ -7298,11 +7472,16 @@ function App() {
                 <button onClick={() => setMenuOpen(o => !o)} aria-label="Menu" style={{ background: "none", border: "1px solid " + C.line, borderRadius: R.md, padding: "8px 12px", fontSize: 18, lineHeight: 1, cursor: "pointer", color: C.ink2 }}>⋯</button>
                 {menuOpen && (<>
                   <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 60 }} />
-                  <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", background: C.panel, borderRadius: R.md, border: "1px solid " + C.line, boxShadow: SH.lg, zIndex: 61, minWidth: 210, overflow: "hidden" }}>
-                    <button onClick={() => { goNav("health"); }} style={menuItem}>◉ Content health</button>
-                    <button onClick={() => { goNav("levels"); }} style={{ ...menuItem, borderTop: "1px solid " + C.line }}>▲ Levels</button>
-                    <button onClick={() => { goNav("activity"); }} style={{ ...menuItem, borderTop: "1px solid " + C.line }}>≡ Activity log</button>
-                    <button onClick={() => { goNav("devnotes"); }} style={{ ...menuItem, borderTop: "1px solid " + C.line }}>⌘ Developer notes</button>
+                  <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", background: C.panel, borderRadius: R.md, border: "1px solid " + C.line, boxShadow: SH.lg, zIndex: 61, minWidth: 210, overflow: "hidden", maxHeight: "70vh", overflowY: "auto" }}>
+                    {/* Every nav section that isn't in the bottom bar must be reachable here, or it
+                        is simply unreachable on a phone. Derive it from NAV so a new page can never
+                        be silently stranded again. */}
+                    {NAV.filter(n => !NAV_PHONE.includes(n.id)).map((n, i) => (
+                      <button key={n.id} onClick={() => { goNav(n.id); setMenuOpen(false); }}
+                        style={{ ...menuItem, ...(i > 0 ? { borderTop: "1px solid " + C.line } : {}) }}>
+                        {n.icon} {n.label}
+                      </button>
+                    ))}
                     <div style={{ padding: "10px 12px", borderTop: "1px solid " + C.line }}><ThemeToggle theme={theme} /></div>
                     <button onClick={() => { setMenuOpen(false); setChangePw(true); }} style={{ ...menuItem, borderTop: "1px solid " + C.line }}>⚙ Change password</button>
                     <button onClick={() => { setMenuOpen(false); auth.logout(); setAuthed(false); setActive(null); }} style={{ ...menuItem, borderTop: "1px solid " + C.line, color: C.danger }}>⏻ Sign out</button>

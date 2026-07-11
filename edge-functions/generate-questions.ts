@@ -168,7 +168,8 @@ async function callAnthropic(key: string, model: string, prompt: string, maxToke
   });
   if (!r.ok) throw new Error(`Anthropic ${r.status}: ${(await r.text()).slice(0, 300)}`);
   const d = await r.json();
-  return (d.content || []).filter((c: any) => c.type === 'text').map((c: any) => c.text).join('');
+  const text = (d.content || []).filter((c: any) => c.type === 'text').map((c: any) => c.text).join('');
+  return { text, usage: { input: d.usage?.input_tokens ?? null, output: d.usage?.output_tokens ?? null } };
 }
 
 async function callOpenAI(key: string, model: string, prompt: string, maxTokens: number) {
@@ -179,7 +180,8 @@ async function callOpenAI(key: string, model: string, prompt: string, maxTokens:
   });
   if (!r.ok) throw new Error(`OpenAI ${r.status}: ${(await r.text()).slice(0, 300)}`);
   const d = await r.json();
-  return d.choices?.[0]?.message?.content || '';
+  const text = d.choices?.[0]?.message?.content || '';
+  return { text, usage: { input: d.usage?.prompt_tokens ?? null, output: d.usage?.completion_tokens ?? null } };
 }
 
 async function callGemini(key: string, model: string, prompt: string, maxTokens: number) {
@@ -194,7 +196,8 @@ async function callGemini(key: string, model: string, prompt: string, maxTokens:
   });
   if (!r.ok) throw new Error(`Gemini ${r.status}: ${(await r.text()).slice(0, 300)}`);
   const d = await r.json();
-  return (d.candidates?.[0]?.content?.parts || []).map((p: any) => p.text || '').join('');
+  const text = (d.candidates?.[0]?.content?.parts || []).map((p: any) => p.text || '').join('');
+  return { text, usage: { input: d.usageMetadata?.promptTokenCount ?? null, output: d.usageMetadata?.candidatesTokenCount ?? null } };
 }
 
 async function callProvider(provider: string, key: string, model: string, prompt: string, maxTokens = 4000) {
@@ -317,12 +320,40 @@ function buildRepairPrompt(bad: any[], levelDefs: any[], targetLevel: number) {
   return lines.join('\n');
 }
 
+
+// Record every provider call. AI generation is the ONE thing in this app that spends real money,
+// and until now it left no trace at all — no audit trail, no token counts, no way to see a runaway.
+// Best-effort: a logging failure must never break a generation the user is waiting on.
+async function logUsage(db: any, o: any) {
+  try {
+    await db.from('pm_ai_usage').insert({
+      provider: o.provider, model: o.model ?? null, pack_id: o.pack_id ?? null,
+      batch_id: o.batch_id ?? null, kind: o.kind ?? 'generate',
+      input_tokens: o.usage?.input ?? null, output_tokens: o.usage?.output ?? null,
+      questions_returned: o.questions ?? null,
+      ok: o.ok !== false, error: o.error ?? null, actor: o.actor ?? null,
+    });
+  } catch { /* never let logging break the request */ }
+}
+
+// Who is calling? The JWT is already verified by the platform (verify_jwt=true); we just read the
+// email out of it for the audit trail.
+function actorFrom(req: Request): string {
+  try {
+    const auth = req.headers.get('authorization') || '';
+    const tok = auth.replace(/^Bearer\s+/i, '');
+    const payload = JSON.parse(atob(tok.split('.')[1] || ''));
+    return payload?.email || payload?.sub || 'admin';
+  } catch { return 'admin'; }
+}
+
 // ============================================================
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') return json({ error: 'POST only' }, 405);
 
   const db = createClient(SUPABASE_URL, SERVICE_KEY);
+  const actor = actorFrom(req);
 
   try {
     const body = await req.json();
@@ -347,13 +378,26 @@ Deno.serve(async (req) => {
     if (test_only) {
       try {
         const t = await callProvider(provider, cfg.api_key, model, 'Reply with exactly: OK', 32);
-        return json({ ok: true, provider, model, reply: (t || '').trim().slice(0, 40) });
+        await logUsage(db, { provider, model, kind: 'test', usage: t.usage, ok: true, actor });
+        return json({ ok: true, provider, model, reply: (t.text || '').trim().slice(0, 40) });
       } catch (e) {
+        await logUsage(db, { provider, model, kind: 'test', ok: false, error: String(e).slice(0, 300), actor });
         return json({ ok: false, provider, model, error: String(e).slice(0, 300) }, 502);
       }
     }
 
     if (!pack_id) return json({ error: 'pack_id required' }, 400);
+
+    // ---- RATE LIMIT: check BEFORE spending anything. A stuck loop, an impatient click, or a
+    // compromised login could otherwise run up a real bill with no brake and no visibility. ----
+    const { data: rate } = await db.rpc('pm_ai_rate_check', { p_max_hour: 20, p_max_day: 100 });
+    if (rate && rate.allowed === false) {
+      return json({
+        error: 'rate_limited',
+        message: `Too many generation runs (${rate.last_hour} in the last hour, ${rate.last_day} today). Limits: ${rate.max_hour}/hour, ${rate.max_day}/day. This is a safety brake on spend — try again later.`,
+        last_hour: rate.last_hour, last_day: rate.last_day,
+      }, 429);
+    }
 
     // ---- Context: pack, levels, existing questions (for de-dup + avoid-list) ----
     const { data: pack } = await db.from('pm_packs').select('*').eq('id', pack_id).maybeSingle();
@@ -385,9 +429,12 @@ Deno.serve(async (req) => {
     });
 
     let raw: string;
+    let genUsage: any = { input: null, output: null };
     try {
-      raw = await callProvider(provider, cfg.api_key, model, prompt, 4000);
+      const res = await callProvider(provider, cfg.api_key, model, prompt, 4000);
+      raw = res.text; genUsage = res.usage;
     } catch (e) {
+      await logUsage(db, { provider, model, pack_id, kind: 'generate', ok: false, error: String(e).slice(0, 300), actor });
       return json({ error: 'provider_error', provider, message: String(e).slice(0, 400) }, 502);
     }
 
@@ -416,8 +463,9 @@ Deno.serve(async (req) => {
     if (autoRepair && bad.length) {
       try {
         const rprompt = buildRepairPrompt(bad, levels || [], tLevel);
-        const rraw = await callProvider(provider, cfg.api_key, model, rprompt, 4000);
-        const fixed = parseQuestions(rraw);
+        const rres = await callProvider(provider, cfg.api_key, model, rprompt, 4000);
+        await logUsage(db, { provider, model, pack_id, kind: 'repair', usage: rres.usage, ok: true, actor });
+        const fixed = parseQuestions(rres.text);
         // Re-validate the fixes AGAINST the items we're keeping — a "fix" must not collide with a
         // question that already passed in the same batch.
         const goodOnes = checked.filter((c) => c.result.ok);
@@ -452,6 +500,12 @@ Deno.serve(async (req) => {
 
     const { error: insErr } = await db.from('pm_review_queue').insert(rows);
     if (insErr) throw insErr;
+
+    // Audit + cost trail for the run.
+    await logUsage(db, {
+      provider, model, pack_id, batch_id, kind: 'generate',
+      usage: genUsage, questions: rows.length, ok: true, actor,
+    });
 
     const clean = rows.filter((r: any) => r.validation?.ok).length;
     return json({
