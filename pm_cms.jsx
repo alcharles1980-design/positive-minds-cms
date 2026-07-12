@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.05-11", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.05-12", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -2092,7 +2092,7 @@ function HealthView({ onOpenPack }) {
     <div>
       <div style={{ marginBottom: S.lg }}>
         <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Content health</h1>
-        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>Automated checks across your whole library.</p>
+        <p className="pm-prose" style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>Automated checks across your whole library.</p>
       </div>
       <div className="pm-stats" style={{ marginBottom: S.lg }}>
         <HealthStat n={loading ? "…" : totalIssues} label="Total issues" color={totalIssues ? C.warn : C.good} />
@@ -2153,7 +2153,7 @@ function ActivityView() {
     <div>
       <div style={{ marginBottom: S.lg }}>
         <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Activity</h1>
-        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>A running history of every change.</p>
+        <p className="pm-prose" style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>A running history of every change.</p>
       </div>
       {loading ? <div style={{ display: "grid", gap: 8 }}>{[0,1,2,3,4].map(i => <Skeleton key={i} h={48} r={10} />)}</div>
         : rows.length === 0 ? <EmptyState icon="📋" title="No activity yet" body="Changes you make — creating packs, editing questions, imports — will appear here." />
@@ -2747,7 +2747,7 @@ function PublishHub({ packs, onSynced }) {
     <div>
       <div style={{ marginBottom: S.lg }}>
         <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Publishing</h1>
-        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>Shape content with profiles, then sync to the game via file, feed, or push.</p>
+        <p className="pm-prose" style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>Shape content with profiles, then sync to the game via file, feed, or push.</p>
       </div>
 
       {pendingCount > 0 && (
@@ -3686,6 +3686,26 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Layout audit: fixed the white space and stretched formatting.** The previous pass fixed the
+  NAVIGATION flipping but only verified pages "render without throwing" — a very low bar that catches
+  nothing about layout. This pass rendered every page in its LOADED state (stubbing useAsync, since
+  SSR otherwise only ever shows skeletons) and measured the actual column widths.
+  WHAT WAS WRONG:
+  (1) **Nothing capped the CONTENT.** \`.pm-main\` capped the container at 1080px, but inside it a
+  single form field, a settings panel with one control, or a page subtitle simply filled the whole
+  1080px. A text input the width of the page, a line of body copy ~150 characters long, and a lot of
+  dead space beside it. That IS the "white space / broken formatting". Fixed with readable-width
+  constraints: \`.pm-readable\` (720px) on panels, \`.pm-form-2\` capped at 860px, \`.pm-prose\` (680px,
+  ~75 chars/line) on every page subtitle and intro. aisettings.jsx, levels.jsx and editors.jsx had
+  ZERO maxWidth constraints anywhere.
+  (2) **A landscape phone was the worst case.** It gets phone chrome but ~800px of width, and the
+  portrait single-column rules stretched one form field to **812px**. Landscape now gets two columns
+  (399px each), a 3-col index grid, and side safe-area padding (viewport-fit=cover was letting
+  content slide under the notch in landscape).
+  (3) Pack detail had an \`<h2>\` as its top heading and no \`<h1>\` — a heading-level skip. Fixed.
+  VERIFIED: computed real column widths across 7 device sizes — everything now lands in a sensible
+  150–423px range, with nothing over 700px (the "too wide" threshold) and nothing under 80px. All 12
+  pages render on all 4 device classes with real data loaded (48 combinations, zero failures).
 - **Fixed the mobile layout flipping between different navigations (reported: "flipping in different
   layouts with different menus from the side").** ROOT CAUSE: useBreakpoint keyed purely off
   window.innerWidth (phone < 640). Rotate ANY phone to landscape and its width becomes 667–932px, so
@@ -4418,6 +4438,11 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    written via pm_ai_set_key and read ONLY server-side by the edge function (service role). The UI
    reads pm_ai_status, which returns a masked hint and NEVER the key. Never add a select policy to
    pm_ai_config, never return api_key from an RPC, never send a key to the client "just to show it".
+4m. **Cap the CONTENT, not just the container.** A max-width on the page wrapper does nothing for a
+   lone form field or a paragraph inside it — they will happily fill all 1080px, leaving a giant
+   input marooned in white space and body copy ~150 characters wide. Every form gets a readable cap
+   (\`.pm-form-2\` 860px), every panel \`.pm-readable\` (720px), every paragraph \`.pm-prose\` (680px).
+   This is the difference between "responsive" and "actually looks designed".
 4l. **Device class is decided on the SHORT side, never on raw width.** A phone in landscape is
    667–932px wide — wider than many tablets. Keying layout off innerWidth alone made rotating a phone
    swap the entire navigation and drop every phone-specific rule (including the 16px inputs that stop
@@ -4818,6 +4843,12 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    so it gets treated as a tablet and the whole navigation swaps on rotation. Phone <640 / tablet
    <1024 / desktop. Have the JS stamp the class onto <html> (pm-phone/pm-tablet/pm-desktop/pm-coarse/
    pm-landscape) and make the CSS key off THAT — never run parallel width media queries, they drift.
+   CAP THE CONTENT, NOT JUST THE CONTAINER: a max-width on the page wrapper is not enough. A single
+   form field or paragraph inside it will fill the whole width — an input the width of the page and a
+   line of text ~150 characters long, with dead space beside it. Give forms a readable cap (~860px),
+   panels ~720px, and prose ~680px (~75 chars/line). A landscape phone is the worst case: phone
+   chrome but ~800px of width, so the portrait single-column rules stretch one field to 812px — give
+   landscape two columns.
    Non-negotiable mobile foundations: overflow-x hidden on html/body (one stubborn element shifts the
    whole page); safe-area padding left/right if you use viewport-fit=cover, or landscape content slides
    under the notch; 16px inputs on touch (anything smaller makes iOS auto-zoom on focus); 40px minimum
@@ -5028,7 +5059,7 @@ function DeveloperNotes() {
     <div>
       <div style={{ marginBottom: S.lg }}>
         <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Developer notes</h1>
-        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>Reference documentation and a shared scratchpad for this project.</p>
+        <p className="pm-prose" style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>Reference documentation and a shared scratchpad for this project.</p>
       </div>
 
       {/* doc tabs */}
@@ -5204,7 +5235,7 @@ function LevelsView({ levels: levelsProp, reload: reloadProp }) {
       <div style={{ marginBottom: S.lg, display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: S.md, flexWrap: "wrap" }}>
         <div>
           <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Levels</h1>
-          <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>The game's progression structure. Each level defines how words are hidden, which words to use, and its theme. Add levels above the current top to extend the ladder.</p>
+          <p className="pm-prose" style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>The game's progression structure. Each level defines how words are hidden, which words to use, and its theme. Add levels above the current top to extend the ladder.</p>
         </div>
         <Btn onClick={startCreate} disabled={nextLevel > 100} title={nextLevel > 100 ? "Maximum of 100 levels reached" : ""}>+ Add level {nextLevel <= 100 ? nextLevel : ""}</Btn>
       </div>
@@ -5816,7 +5847,7 @@ function AIReviewView({ packs, levels }) {
     <div>
       <div style={{ marginBottom: S.lg }}>
         <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>AI Review</h1>
-        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>
+        <p className="pm-prose" style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>
           Every AI-generated question waits here for your decision. Nothing becomes a real question until you approve it.
         </p>
       </div>
@@ -6343,13 +6374,13 @@ function AISettingsView({ packs, levels }) {
     <div>
       <div style={{ marginBottom: S.lg }}>
         <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>AI Settings</h1>
-        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>
+        <p className="pm-prose" style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>
           Choose which AI writes your content and save its API key. Keys are stored on the server and shared by everyone who logs in.
         </p>
       </div>
 
       {/* Security note — earned, not decorative */}
-      <div style={{ background: C.brandSoft, borderRadius: R.md, padding: "12px 16px", marginBottom: S.lg,
+      <div className="pm-readable" style={{ background: C.brandSoft, borderRadius: R.md, padding: "12px 16px", marginBottom: S.lg,
         fontSize: 13, color: C.brandInk, lineHeight: 1.55 }}>
         <b>Your keys stay on the server.</b> Once saved, a key can never be read back — not by this page, not by anyone logged in, not by a script running in your browser. You'll only ever see whether it's set, plus its last four characters. To change one, save a new key over it.
       </div>
@@ -6438,7 +6469,7 @@ function AISettingsView({ packs, levels }) {
           </div>
 
           {/* Generation defaults */}
-          <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg, marginBottom: S.xl }}>
+          <div className="pm-readable" style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg, marginBottom: S.xl }}>
             <div style={{ fontSize: 15, fontWeight: 800, color: C.ink, marginBottom: S.md }}>Generation defaults</div>
             <div className="pm-form-2">
               <HelpField setting="batch_size" hint="1–30. Around 10–15 is comfortable.">
@@ -6493,7 +6524,7 @@ function UsagePanel() {
   const fmt = (n) => (n == null ? "—" : Number(n).toLocaleString());
 
   return (
-    <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg, marginTop: S.xl }}>
+    <div className="pm-readable" style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg, marginTop: S.xl }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: S.md, gap: S.md, flexWrap: "wrap" }}>
         <div>
           <div style={{ fontSize: 15, fontWeight: 800, color: C.ink }}>Usage</div>
@@ -6715,7 +6746,7 @@ function GeneratePanel({ packs, levels, settings, status }) {
   };
 
   return (
-    <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg }}>
+    <div className="pm-readable" style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg }}>
       <div style={{ fontSize: 15, fontWeight: 800, color: C.ink, marginBottom: 4 }}>Generate questions</div>
       <div style={{ fontSize: 13, color: C.sub, marginBottom: S.md, lineHeight: 1.5 }}>
         Everything the AI writes goes to <b>AI Review</b> first — checked automatically, then waiting for your approval. Nothing reaches a pack until you say so.
@@ -7210,7 +7241,7 @@ function Dashboard({ packs, onOpenPack, onGoLibrary, onGoQuestions, onNewPack })
     <div>
       <div style={{ marginBottom: S.xl }}>
         <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Overview</h1>
-        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>Your content library at a glance.</p>
+        <p className="pm-prose" style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>Your content library at a glance.</p>
       </div>
       <div className="pm-stats" style={{ marginBottom: S.lg }}>
         {stat(d.total_packs ?? 0, "Total packs", C.brand, `${d.published_packs ?? 0} published · ${d.draft_packs ?? 0} draft`)}
@@ -7331,7 +7362,7 @@ function Library({ packs, levels, loading, error, onOpen, onNew, onEdit, onExpor
     <div>
       <div style={{ marginBottom: S.lg }}>
         <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Pack library</h1>
-        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>{loading ? "Loading…" : `${order.length} pack${order.length === 1 ? "" : "s"}`}{canReorder && order.length > 1 ? " · drag cards to reorder" : ""}</p>
+        <p className="pm-prose" style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>{loading ? "Loading…" : `${order.length} pack${order.length === 1 ? "" : "s"}`}{canReorder && order.length > 1 ? " · drag cards to reorder" : ""}</p>
       </div>
 
       <div className="pm-toolbar" style={{ marginBottom: S.lg + 2 }}>
@@ -7520,7 +7551,7 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
         <div style={{ fontSize: 42, lineHeight: 1 }}>{pack.emoji}</div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <h2 style={{ margin: 0, fontSize: 23, fontWeight: 800, color: C.ink }}>{pack.name}</h2>
+            <h1 style={{ margin: 0, fontSize: 23, fontWeight: 800, color: C.ink }}>{pack.name}</h1>
             <Badge kind={pack.status} /><Pill>{pack.difficulty}</Pill>{pack.is_custom && <Pill tone="muted">custom</Pill>}
           </div>
           {pack.description && <p style={{ margin: "8px 0 0", color: C.sub, fontSize: 14.5, lineHeight: 1.5 }}>{pack.description}</p>}
@@ -7716,7 +7747,7 @@ function AllQuestions({ onOpenPack, levels, packs }) {
     <div>
       <div style={{ marginBottom: S.lg }}>
         <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>All questions</h1>
-        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>Search across every pack{total ? ` · ${total} match${total === 1 ? "" : "es"}` : ""}</p>
+        <p className="pm-prose" style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>Search across every pack{total ? ` · ${total} match${total === 1 ? "" : "es"}` : ""}</p>
       </div>
       <div className="pm-toolbar" style={{ marginBottom: S.lg }}>
         <SearchBox value={q} onChange={setQ} placeholder="Search all questions…" autoFocus />
@@ -8321,6 +8352,22 @@ function GlobalStyle() {
     @keyframes pm-toast-in{ from{ transform:translateY(10px); opacity:0;} to{ transform:translateY(0); opacity:1;} }
 
     .pm-main{ max-width:1080px; margin:0 auto; width:100%; padding:32px 28px; }
+
+    /* ---- READABLE WIDTH ----
+       .pm-main caps the CONTAINER at 1080px, but nothing capped the CONTENT inside it. So a single
+       form field, or a settings panel with one control, stretched the full 1080px — an input the
+       width of the page, marooned in white space. That is the "white space / broken formatting"
+       problem: content with no upper bound simply fills whatever room it is given.
+       Forms and prose get a comfortable reading width; wide things (grids, tables, cards) opt out. */
+    .pm-readable{ max-width:720px; }
+    .pm-form-2{ max-width:860px; }          /* two columns of ~420px — comfortable, not sprawling */
+    .pm-prose{ max-width:680px; }           /* body copy: ~75 characters per line */
+
+    /* A single full-width control inside a panel should not span the page either. */
+    .pm-panel > .pm-input,
+    .pm-panel > select,
+    .pm-panel > textarea{ max-width:640px; }
+
     .pm-modal-backdrop{ align-items:flex-start; padding:6vh 20px 20px; }
     .pm-modal-card{ border-radius:${R.xl}px; }
 
@@ -8396,11 +8443,28 @@ function GlobalStyle() {
     html.pm-phone .pm-modal-card{ max-width:100% !important; border-radius:20px 20px 0 0; max-height:94vh; overflow-y:auto; animation:pm-sheet .22s ease-out; }
     html.pm-phone .pm-input{ font-size:16px !important; }
 
-    /* A phone in LANDSCAPE is short. Let a bottom-sheet modal use the height it has, and keep the
-       two-column pack grid (there IS horizontal room) — but never re-introduce cramped forms. */
-    html.pm-phone.pm-landscape .pm-modal-card{ max-height:88vh; }
+    /* ---- A PHONE IN LANDSCAPE ----
+       It has phone CHROME (bottom nav, touch targets, 16px inputs) but ~800px of WIDTH and almost
+       no height. Left on the portrait rules, a single form field stretches to 812px — an enormous
+       input marooned in white space. That is the "white space / broken layout" problem: content
+       with no constraint simply fills whatever width exists.
+       So: keep the phone chrome, but let the CONTENT use the width like a small tablet, and cap it
+       so nothing stretches absurdly. */
+    html.pm-phone.pm-landscape .pm-form-2{ grid-template-columns:1fr 1fr; gap:14px; }   /* was 1 huge column */
     html.pm-phone.pm-landscape .pm-pack-grid{ grid-template-columns:repeat(2,1fr); }
     html.pm-phone.pm-landscape .pm-stats{ grid-template-columns:repeat(4,1fr); }
+    html.pm-phone.pm-landscape .pm-index-grid{ grid-template-columns:repeat(3,1fr); }   /* was 2 × 402px */
+    html.pm-phone.pm-landscape .pm-about-grid{ grid-template-columns:1fr 1fr !important; }
+    html.pm-phone.pm-landscape .pm-gen-grid{ grid-template-columns:1fr 1fr !important; }
+
+    /* Short screen: a bottom sheet must not eat the whole viewport, and it needs to scroll. */
+    html.pm-phone.pm-landscape .pm-modal-card{ max-height:92vh; }
+
+    /* Landscape has notches on the SIDES. Pad for them (viewport-fit=cover puts content under). */
+    html.pm-phone.pm-landscape .pm-main{
+      padding-left: max(20px, env(safe-area-inset-left));
+      padding-right: max(20px, env(safe-area-inset-right));
+    }
 
     /* ANY touch device gets finger-sized hit targets, regardless of screen size. */
     html.pm-coarse button, html.pm-coarse .pm-input, html.pm-coarse select{ min-height:40px; }
