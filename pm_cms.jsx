@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.05-15", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.05-16", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -2202,7 +2202,10 @@ function HealthView({ onOpenPack }) {
                 <div key={idx} style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.md, padding: "14px 16px", display: "flex", alignItems: "center", gap: 14 }}>
                   <span style={{ width: 8, height: 8, borderRadius: 99, background: sev.dot, flexShrink: 0 }} />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>{d.label || "(untitled)"} <span style={{ fontSize: 12, fontWeight: 600, color: sev.fg, background: sev.bg, padding: "1px 7px", borderRadius: 5, marginLeft: 6 }}>{issueLabel[d.issue] || d.issue}</span></div>
+                    {/* The RPC returns `answer` and `code` — NOT `label` and `issue`. Reading the
+                        wrong field names meant every row showed "(untitled)" with no issue type.
+                        Only visible by actually reading the rendered page. */}
+                    <div style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>{d.answer || "(no answer word)"} <span style={{ fontSize: 12, fontWeight: 600, color: sev.fg, background: sev.bg, padding: "1px 7px", borderRadius: 5, marginLeft: 6 }}>{issueLabel[d.code] || d.code}</span></div>
                     <div style={{ fontSize: 12.5, color: C.sub, marginTop: 2 }}>{d.detail}</div>
                   </div>
                   {d.pack_id && <Btn variant="ghost" size="sm" onClick={() => onOpenPack(d.pack_id)}>Open pack</Btn>}
@@ -3778,6 +3781,30 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Visual pass — actually READ the pages, and found three bugs nothing else had caught.**
+  HONEST LIMIT FIRST: I cannot take true screenshots here (no browser in the sandbox, and Chrome's
+  CDN is unreachable — I tried puppeteer, resvg and sharp). So instead of pretending, I did two things
+  that ARE rigorous: computed the real layout boxes from the real evaluated stylesheet, and RENDERED
+  EACH PAGE TO READABLE TEXT so I could read what it actually says. The second is what found the bugs.
+  BUGS FOUND BY READING:
+  (1) **The Health page showed "(untitled)" on every issue row.** The UI read \`d.label\` and \`d.issue\`,
+  but pm_lint_details returns \`answer\` and \`code\`. The field names never matched, so every row showed
+  "(untitled)" with no issue type. It had been broken the whole time and NO automated check caught it —
+  the markup was perfectly valid, it just said nothing useful. Only reading the page revealed it.
+  (2) **HelpField had an EMPTY label.** My previous fix wrapped the control in a second \`<label>\` — which
+  made it "associated", so my checker passed it — but that label had no text, so a screen reader
+  announced an unnamed field. An empty label is worse than none: it defeats the check. Now ONE label
+  containing both the text and the control. The inspector now requires a label to have actual TEXT, not
+  merely to exist.
+  (3) **The AI Review page's copy was wrong** after routing imports through the queue: it said "Every
+  AI-generated question waits here", but the queue now also holds hand-written imports. Someone pasting
+  their own lines would be confused. Now: "Nothing becomes a real question until you approve it —
+  whether an AI wrote it or you imported it yourself."
+  Also fixed: Pack detail skipped h1→h3 (heading-level gap).
+  ALL SIX TEST LAYERS PASS: DOM inspection, interaction (41 clicks / 55 input changes), runtime mount
+  (no React warnings), visual layout (computed boxes, 44 page×device combinations), structural checks,
+  and engine parity (1,725 cases identical across all three copies).
+  A viewable .html file per page/device is now written to /visual — so a human CAN look at them.
 - **ALL imported content now goes through the human review queue.** There were TWO ways content got
   into a pack and only ONE was gated:
     generate-questions (API key) → review queue → human approval  ✓
@@ -4627,6 +4654,13 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    broken questions sat LIVE in a published pack while the health check said all was well. Any check
    the AI validator performs on new content, the lint must perform on existing content — above all
    \`ambiguous\`. A health page that cannot see the worst defect is worse than none: it is false comfort.
+4r. **READ the page, don't just inspect it.** A page can be structurally perfect and still say
+   nothing useful. The Health page showed "(untitled)" on every row for weeks — valid markup, correct
+   layout, every automated check green — because the UI read \`d.label\`/\`d.issue\` while the RPC returned
+   \`answer\`/\`code\`. No structural test can catch that. Render the page to text and READ it.
+4s. **An empty label is worse than no label.** A control wrapped in a text-less \`<label>\` counts as
+   "associated" and will pass a naive check, while announcing an unnamed field to a screen reader.
+   Always require the label to have TEXT.
 4n. **Inspect the RESULT, not the source.** Grepping code for suspicious patterns is not a UI audit.
    Render into a real DOM with the real evaluated stylesheet and walk the computed styles. And VALIDATE
    YOUR ORACLE FIRST: extracting CSS by regex left \`\${...}\` placeholders that jsdom silently rejected,
@@ -6062,7 +6096,7 @@ function AIReviewView({ packs, levels }) {
       <div style={{ marginBottom: S.lg }}>
         <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>AI Review</h1>
         <p className="pm-prose" style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>
-          Every AI-generated question waits here for your decision. Nothing becomes a real question until you approve it.
+          Nothing becomes a real question until you approve it — whether an AI wrote it or you imported it yourself.
         </p>
       </div>
 
@@ -6126,7 +6160,7 @@ function AIReviewView({ packs, levels }) {
           icon="✓"
           title={tab === "pending" ? "Nothing waiting for review" : `No ${tab} questions`}
           body={tab === "pending"
-            ? "Generate questions from a pack and they'll appear here for you to approve, edit or reject."
+            ? "Anything you generate or import appears here first, for you to approve, edit or reject."
             : `Questions you ${tab === "approved" ? "approve" : "reject"} will be listed here.`}
         />
       ) : (
@@ -6499,25 +6533,25 @@ function InfoDot({ setting }) {
 
 // A Field with an (i) next to its label.
 //
-// NOTE: this MUST use a <label> element, not a <div>+<span>. A control nested inside a <label> is
-// programmatically associated with it (implicit association) and screen readers announce it. The
-// first version of this used a div/span, which looked identical but left every control inside it
-// completely unlabelled to assistive tech. Caught by inspecting the real DOM.
-//
-// The (i) button lives OUTSIDE the label, because a button inside a label swallows clicks meant for
-// the field.
+// TWO bugs lived here, both caught by actually reading the rendered page:
+//   1. The first version used a <div>+<span> — no programmatic label association at all.
+//   2. The fix wrapped the control in a SECOND, EMPTY <label>. It was "associated", so my check
+//      passed — but the label had no text, so a screen reader announced an unnamed field.
+// The correct shape: ONE label that contains BOTH the text and the control. The (i) button sits
+// outside it, because a button inside a label swallows clicks meant for the field.
 function HelpField({ setting, label, hint, children, style }) {
   const h = SETTING_HELP[setting];
   const text = label || h?.title;
   return (
     <div style={style}>
-      <div style={{ display: "flex", alignItems: "center", marginBottom: 5 }}>
-        <label style={{ fontSize: 12, fontWeight: 700, color: C.ink2 }}>{text}</label>
-        <InfoDot setting={setting} />
-      </div>
-      {/* Wrapping the control in its own label gives the implicit association. */}
-      <label style={{ display: "block" }} aria-label={text}>{children}</label>
-      {hint && <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4, lineHeight: 1.4 }}>{hint}</div>}
+      <label style={{ display: "block" }}>
+        <span style={{ display: "inline-flex", alignItems: "center", marginBottom: 5,
+          fontSize: 12, fontWeight: 700, color: C.ink2 }}>{text}</span>
+        {children}
+      </label>
+      {/* Outside the label on purpose — see above. Pulled up to sit beside the label text. */}
+      <span style={{ float: "right", marginTop: -26 }}><InfoDot setting={setting} /></span>
+      {hint && <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4, lineHeight: 1.4, clear: "both" }}>{hint}</div>}
     </div>
   );
 }
@@ -7820,7 +7854,7 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
         </div>
       ) : (
         <div className="pm-toolbar" style={{ marginBottom: S.md + 2 }}>
-          <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: C.ink }}>Question bank</h3>
+          <h2 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: C.ink }}>Question bank</h2>
           <div className="pm-grow" />
           <SearchBox value={search} onChange={setSearch} placeholder="Search…" />
           <Select value={lvlF} onChange={(e) => setLvlF(e.target.value)} aria-label="Filter by level" title="Filter by level" style={{ minWidth: 130, padding: "8px 12px" }}>
