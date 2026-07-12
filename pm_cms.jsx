@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.05-13", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.05-14", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -2086,7 +2086,19 @@ function HealthView({ onOpenPack }) {
   const totalIssues = details.length;
 
   const sevStyle = { error: { bg: C.dangerSoft, fg: C.dangerInk, dot: C.danger, label: "Error" }, warning: { bg: C.warnSoft, fg: C.warnInk, dot: C.warn, label: "Warning" } };
-  const issueLabel = { invalid_template: "Invalid template", missing_alt: "Missing 2nd option", duplicate: "Duplicate", revealed_answer: "Answer revealed", empty_answer: "Empty answer" };
+  const issueLabel = {
+    ambiguous: "Two correct answers",     // the only one that actively harms a child
+    same_word: "Both options identical",
+    invalid_template: "Invalid template",
+    multi_blank: "Too many blanks",
+    empty_answer: "Empty answer",
+    missing_alt: "Missing 2nd option",
+    bad_chars: "Odd characters",
+    reused_word: "Word used twice",
+    duplicate: "Duplicate",
+    revealed_answer: "Answer revealed",
+  };
+  const ambiguousCount = s.ambiguous || 0;
 
   return (
     <div>
@@ -2095,13 +2107,25 @@ function HealthView({ onOpenPack }) {
         <p className="pm-prose" style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>Automated checks across your whole library.</p>
       </div>
       <div className="pm-stats" style={{ marginBottom: S.lg }}>
+        <HealthStat n={loading ? "…" : ambiguousCount} label="Two correct answers" color={ambiguousCount ? C.danger : C.good} />
         <HealthStat n={loading ? "…" : totalIssues} label="Total issues" color={totalIssues ? C.warn : C.good} />
-        <HealthStat n={loading ? "…" : (s.invalid_template || 0)} label="Invalid templates" color={s.invalid_template ? C.danger : C.faint} />
-        <HealthStat n={loading ? "…" : (s.missing_alt || 0)} label="Missing 2nd option" color={s.missing_alt ? C.warn : C.faint} />
-        <HealthStat n={loading ? "…" : (s.duplicates || 0)} label="Duplicates" color={s.duplicates ? C.warn : C.faint} />
+        <HealthStat n={loading ? "…" : (s.invalid_template || 0) + (s.multi_blank || 0) + (s.empty_answer || 0)} label="Broken questions" color={(s.invalid_template || s.multi_blank || s.empty_answer) ? C.danger : C.faint} />
+        <HealthStat n={loading ? "…" : (s.duplicates || 0) + (s.reused_word || 0)} label="Repeats" color={(s.duplicates || s.reused_word) ? C.warn : C.faint} />
       </div>
+
+      {/* The defect that actually harms a child gets its own banner. Two same-length words means the
+          blank fits BOTH — the child picks a correct word and is told they are wrong. */}
+      {!loading && ambiguousCount > 0 && (
+        <div className="pm-readable" style={{ background: C.danger + "12", border: "1px solid " + C.danger + "44",
+          borderRadius: R.md, padding: "13px 16px", marginBottom: S.lg, fontSize: 13.5, color: C.ink, lineHeight: 1.6 }}>
+          <b style={{ color: C.danger }}>{ambiguousCount} question{ambiguousCount === 1 ? " has" : "s have"} two correct answers.</b>{" "}
+          The two options are the same length, so at the higher levels — where the whole word is hidden —
+          <b> both of them fit the blank</b>. A child who picks the “wrong” one has actually given a right
+          answer, and is told they are wrong. Give the alternate a <b>different length</b> to fix it.
+        </div>
+      )}
       {loading ? <div style={{ display: "grid", gap: 10 }}>{[0,1,2].map(i => <Skeleton key={i} h={56} r={12} />)}</div>
-        : totalIssues === 0 ? <EmptyState icon="✅" title="Everything looks healthy" body="No invalid templates, missing options, or duplicates found. Nice work." />
+        : totalIssues === 0 ? <EmptyState icon="✅" title="Everything looks healthy" body="No ambiguous answers, broken templates, missing options or repeats. Nice work." />
         : (
           <div style={{ display: "grid", gap: 10 }}>
             {details.map((d, idx) => {
@@ -3686,6 +3710,37 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Comprehensive audit — found TWO BROKEN QUESTIONS LIVE IN A PUBLISHED PACK, and the systemic hole
+  that let them sit there.**
+  THE SERIOUS ONE: \`BRIGHT/GENTLE\` and \`SURE/GLAD\` were live in the published \`confidence\` pack and
+  being served to children by the content API. Both same-length pairs — so at levels 7-10, where the
+  whole word is hidden, the child sees \`______\` and BOTH options fit. Pick the "wrong" one and you
+  are marked wrong for a right answer. In a therapy app for children's self-esteem that is the worst
+  possible failure. Verified against the LIVE API (the game really was receiving them), then fixed:
+  GENTLE→CURIOUS (7 letters) and GLAD→CONFIDENT (9 letters) — both still genuinely positive words, both
+  now a different length. Published packs now have ZERO ambiguous questions.
+  THE SYSTEMIC HOLE: **pm_lint never checked for this.** It checked missing-alt, duplicates, thin packs
+  and bad templates — but not the one defect that actually breaks the game. So the app's own health
+  check reported everything was fine while two broken questions were live. The AI validator catches
+  this for NEW content; nothing was catching it for EXISTING content. pm_lint and pm_lint_details now
+  check: ambiguous (ERROR — the headline), same_word, multi_blank, bad_chars, reused_word. The Health
+  page leads with "Two correct answers" as its first stat and shows a red banner explaining, in plain
+  words, why it harms a child.
+  NEW TEST LAYERS (the previous audits could not see any of this):
+  • RUNTIME MOUNT — actually mounts every page in a real DOM and captures React's warnings. SSR shows
+    none of these. Result: 12/12 pages clean, no key warnings, no controlled/uncontrolled switches.
+  • INTERACTION — actually CLICKS things. 41 buttons clicked, 55 inputs changed across every page.
+    Nothing broke. (Nothing in any previous audit had ever clicked a button.)
+  • ENGINE STRESS — 1,725 cases across all three copies of maskWord: byte-identical, and every
+    invariant holds (length preserved, characters uncorrupted, blank count exact, deterministic).
+  • SECURITY — attack-tested the newest tables. Anon reading pm_review_queue → [], reading pm_ai_usage
+    → [], INJECTING into pm_review_queue → 401 RLS violation (they cannot smuggle content into the
+    approval pipeline hoping you bulk-approve it).
+  ALSO: hardened DeriveLevelDialog's array guard (\`|| []\` only catches null/undefined; an object still
+  throws and white-screens the page — Array.isArray is the correct guard).
+  NOTED, NOT CHANGED: devdocs.jsx is 29% of the source (162KB of prose every user downloads for one
+  page). It gzips well and the total is 160KB, so it is a deliberate trade-off — the docs living inside
+  the app is what stops them going stale.
 - **Real-DOM inspection pass — stopped auditing the source and started inspecting the RESULT.** My
   previous passes read the code and grepped for suspicious patterns. That is not inspection. This pass
   renders every page and modal into a real DOM (jsdom) with the real EVALUATED stylesheet, then walks
@@ -4466,6 +4521,11 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    written via pm_ai_set_key and read ONLY server-side by the edge function (service role). The UI
    reads pm_ai_status, which returns a masked hint and NEVER the key. Never add a select policy to
    pm_ai_config, never return api_key from an RPC, never send a key to the client "just to show it".
+4p. **The lint must check the defect that actually breaks the game.** pm_lint checked four cosmetic
+   things and missed the ONE that harms a child: an alternate the same length as the answer. Two
+   broken questions sat LIVE in a published pack while the health check said all was well. Any check
+   the AI validator performs on new content, the lint must perform on existing content — above all
+   \`ambiguous\`. A health page that cannot see the worst defect is worse than none: it is false comfort.
 4n. **Inspect the RESULT, not the source.** Grepping code for suspicious patterns is not a UI audit.
    Render into a real DOM with the real evaluated stylesheet and walk the computed styles. And VALIDATE
    YOUR ORACLE FIRST: extracting CSS by regex left \`\${...}\` placeholders that jsdom silently rejected,
@@ -5606,7 +5666,9 @@ function DeriveLevelDialog({ pack, questions, levels, onClose, onDone }) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
 
-  const activeQs = (questions || []).filter(q => q.status === "active");
+  // Array.isArray, not `|| []` — the latter only catches null/undefined. If this prop ever arrives
+  // as an object (a shape change upstream), .filter() throws and the whole page goes white.
+  const activeQs = (Array.isArray(questions) ? questions : []).filter(q => q.status === "active");
   const lvlDef = (levels || []).find(l => l.level === targetLevel);
 
   // Preview the first few masked results for the chosen level.
