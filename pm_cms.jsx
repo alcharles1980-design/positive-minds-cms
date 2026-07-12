@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.05-14", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.05-15", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -1731,6 +1731,12 @@ function BulkImport({ packId, onDone, onClose, levels, packLevel }) {
 
   // Normalize a sentence for comparison: lowercase, blank/tokens collapsed, whitespace/punct trimmed.
   const normSentence = (t) => (t || "").toLowerCase().replace(/\{blank\}/g, "▢").replace(/\{[a-zA-Z][\w-]*\}/g, "▢").replace(/[^a-z0-9▢]+/g, " ").trim();
+  // The validator needs the pack's existing content to catch duplicates and reused answer words.
+  const existingForValidator = useMemo(
+    () => (existing || []).map(q => ({ template: q.template, answer: q.answer, source: "live" })),
+    [existing]
+  );
+
   const existingIndex = useMemo(() => {
     const bySentence = new Map(); const byAnswer = new Map();
     for (const q of existing) {
@@ -1780,9 +1786,18 @@ function BulkImport({ packId, onDone, onClose, levels, packLevel }) {
       let dup = "none";
       if (exactExisting || inBatchDup) dup = "exact";
       else if (sentenceHits.length || answerHits.length) dup = "near";
-      return { ...r, dup, bandWarn: bandCheck(r.answer), dupInfo: dup === "exact" ? (inBatchDup ? "duplicate within this batch" : "already in this pack") : (sentenceHits.length ? "same sentence exists" : "answer word already used") };
+      // Run the SAME validator the AI pipeline uses, against the SAME rendering engine, at EVERY
+      // level. Imported content is not special — a same-length alternate breaks the puzzle whether
+      // a human typed it or an AI wrote it. (BRIGHT/GENTLE reached children through this exact
+      // path.)
+      const validation = validateQuestion(
+        { template: r.template, answer: r.answer, alt_answer: r.alt_answer },
+        levels || [],
+        { targetLevel: packLevel, existing: existingForValidator }
+      );
+      return { ...r, dup, validation, bandWarn: bandCheck(r.answer), dupInfo: dup === "exact" ? (inBatchDup ? "duplicate within this batch" : "already in this pack") : (sentenceHits.length ? "same sentence exists" : "answer word already used") };
     });
-  }, [raw, existingIndex, levelDef]);
+  }, [raw, existingIndex, levelDef, existingForValidator, levels, packLevel]);
 
   // Default skip: exact duplicates are skipped unless the user un-skips them.
   useEffect(() => {
@@ -1804,19 +1819,52 @@ function BulkImport({ packId, onDone, onClose, levels, packLevel }) {
     if (!toImport.length) { setErr("Nothing selected to import."); return; }
     setBusy(true); setErr("");
     try {
-      // Imported questions inherit the pack's level (level=null). The level system drives
-      // rendering — there are no per-question difficulty/letters fields.
-      await onDone(toImport.map((v, i) => ({ pack_id: packId, template: v.template, answer: v.answer, alt_answer: v.alt_answer, status: "active", sort_order: 100 + i, ...(v.frame_slots ? { frame_slots: v.frame_slots } : {}) })));
+      // EVERYTHING goes to the review queue — never straight into the pack.
+      //
+      // There used to be two ways content got in and only one was gated: generation via API key went
+      // to the queue, but pasting AI output here went STRAIGHT INTO THE LIVE PACK. Same AI, same
+      // risks, no gate. That is the exact path by which BRIGHT/GENTLE (two same-length words, so
+      // both fit the blank) reached children.
+      //
+      // We do not try to guess whether a paste "came from AI" — we usually cannot tell, and a wrong
+      // guess means unchecked content reaches a child. So it all goes through the gate.
+      const res = await rpc("pm_review_enqueue", {
+        p_pack_id: packId,
+        p_items: toImport.map(v => ({
+          template: v.template,
+          answer: v.answer,
+          alt_answer: v.alt_answer,
+          ...(v.frame_slots ? { frame_slots: v.frame_slots } : {}),
+          validation: v.validation || null,
+        })),
+        p_source: "import",
+        p_target_level: packLevel ?? null,
+      });
+      const n = res?.queued ?? toImport.length;
+      const flagged = toImport.filter(v => v.validation && !v.validation.ok).length;
+      notify(
+        flagged
+          ? `${n} question${n === 1 ? "" : "s"} sent for review — ${flagged} flagged`
+          : `${n} question${n === 1 ? "" : "s"} sent for review`
+      );
+      onDone && onDone(n);
       onClose();
-    } catch (e) { setErr(e.message); setBusy(false); }
+    } catch (e) { setErr(friendlyError(0, String(e?.message || e))); setBusy(false); }
   };
 
   const dupStyle = { exact: { fg: C.danger, label: "Duplicate" }, near: { fg: C.warn, label: "Similar" }, none: null };
 
   return (
     <>
-      <ModalHead title="Bulk import questions" subtitle="Paste pipe-format lines or a JSON array" id="pm-imp-title" />
+      <ModalHead title="Import questions" subtitle="Everything you import goes to AI Review for your approval" id="pm-imp-title" />
       <div style={{ padding: S.xl + 2, display: "grid", gap: S.md + 2 }}>
+        <div className="pm-readable" style={{ fontSize: 12.5, color: C.brandInk, background: C.brandSoft,
+          padding: "10px 13px", borderRadius: R.md, lineHeight: 1.55 }}>
+          <b>These go to AI Review, not straight into the pack.</b> Every question is checked against
+          the real game engine first — including whether the two words are the same length, which would
+          give the child <i>two correct answers</i>. Approve them from <b>AI Review</b> when you're happy.
+        </div>
+
         <div style={{ fontSize: 12.5, color: C.sub, background: C.lineSoft, padding: "8px 12px", borderRadius: R.sm, lineHeight: 1.5 }}>
           <b>Pipe:</b> <code>Sentence with {"{blank}"} | ANSWER | ALT</code><br />
           <b>JSON:</b> <code>{'[{"template":"…{blank}…","answer":"BRAVE","alt_answer":"BOLD"}]'}</code>
@@ -1844,6 +1892,26 @@ function BulkImport({ packId, onDone, onClose, levels, packLevel }) {
                   {p.ok && <span style={{ color: C.brandInk, fontWeight: 700, fontSize: 12 }}>{[p.answer, p.alt_answer].filter(Boolean).join(" / ")}</span>}
                   {ds && <span title={p.dupInfo} style={{ color: ds.fg, fontWeight: 700, fontSize: 11, padding: "1px 7px", borderRadius: R.pill, border: "1px solid " + ds.fg + "66", whiteSpace: "nowrap" }}>{ds.label}</span>}
                   {p.ok && p.bandWarn && <span title={p.bandWarn} style={{ color: C.warn, fontWeight: 700, fontSize: 11, padding: "1px 7px", borderRadius: R.pill, border: "1px solid " + C.warn + "66", whiteSpace: "nowrap" }}>Length</span>}
+                  {/* Show what the real engine found, BEFORE you commit — not after. The important
+                      one is "Two answers": both words the same length, so both fit the blank. */}
+                  {p.ok && p.validation && !p.validation.ok && p.validation.flags.map((fl, fi) => {
+                    const hard = fl.code === "ambiguous" || fl.code === "same_word" || fl.code === "no_blank" || fl.code === "multi_blank";
+                    const col = hard ? C.danger : C.warn;
+                    const label = fl.code === "ambiguous" ? "Two answers"
+                      : fl.code === "same_word" ? "Same word"
+                      : fl.code === "no_blank" ? "No blank"
+                      : fl.code === "multi_blank" ? "Too many blanks"
+                      : fl.code === "answer_reused" ? "Word reused"
+                      : fl.code === "same_sentence" ? "Sentence reused"
+                      : fl.code === "duplicate" ? "Duplicate"
+                      : fl.code;
+                    return (
+                      <span key={fi} title={fl.detail} style={{ color: col, fontWeight: 700, fontSize: 11,
+                        padding: "1px 7px", borderRadius: R.pill, border: "1px solid " + col + "66", whiteSpace: "nowrap" }}>
+                        {label}
+                      </span>
+                    );
+                  })}
                   {p.ok && p.dup !== "none" && (
                     <button type="button" onClick={() => toggleSkip(i)} style={{ background: "none", border: "1px solid " + C.line, borderRadius: R.sm, padding: "2px 8px", fontSize: 11, fontWeight: 700, cursor: "pointer", color: C.sub, whiteSpace: "nowrap" }}>
                       {skipped ? "Keep" : "Skip"}
@@ -1858,7 +1926,7 @@ function BulkImport({ packId, onDone, onClose, levels, packLevel }) {
       </div>
       <ModalFoot>
         <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
-        <Btn onClick={submit} disabled={busy || !toImport.length || loadingExisting}>{busy ? "Importing…" : loadingExisting ? "Checking…" : `Import ${toImport.length} question${toImport.length === 1 ? "" : "s"}`}</Btn>
+        <Btn onClick={submit} disabled={busy || !toImport.length || loadingExisting}>{busy ? "Sending…" : loadingExisting ? "Checking…" : `Send ${toImport.length} for review`}</Btn>
       </ModalFoot>
     </>
   );
@@ -3710,6 +3778,32 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **ALL imported content now goes through the human review queue.** There were TWO ways content got
+  into a pack and only ONE was gated:
+    generate-questions (API key) → review queue → human approval  ✓
+    Bulk Import (paste)          → STRAIGHT INTO THE LIVE PACK    ✗
+  Same AI, same risks, no gate. That is the exact path by which BRIGHT/GENTLE reached children.
+  DESIGN DECISION: everything imported goes to the queue — we do NOT try to guess whether a paste
+  "came from AI". We usually cannot tell, and a wrong guess means unchecked content reaches a child.
+  The gate protects children regardless of where the content came from, so there is no bypass and no
+  judgement call.
+  WHAT CHANGED:
+  • New RPC \`pm_review_enqueue(pack_id, items, source, target_level)\` — pushes a batch into
+    pm_review_queue with source 'import' or 'ai-paste'.
+  • BulkImport now runs the REAL validator (same engine, every level) on every pasted row and shows
+    the flags BEFORE you commit — "Two answers", "Same word", "No blank", "Word reused". You see a
+    broken pair in the preview, not after it is live.
+  • BulkImport no longer writes to pm_questions at all (verified: zero \`createQuestions\` calls
+    remain in editors.jsx). The ONLY path into live content is still pm_review_approve.
+  • The review queue labels the source: "Imported" / "Pasted from AI" / the provider name.
+  PACK-FILE IMPORT (restore a backup / move packs between environments) is deliberately NOT queued —
+  putting a 200-question restore through one-by-one approval would be absurd, and those packs land as
+  DRAFTS so nothing reaches a child until you publish. But it no longer imports silently: every
+  question is validated and you get a clear warning ("N imported questions have problems — check Health
+  before publishing"). Defence in depth without making a restore unusable.
+  VERIFIED END-TO-END: mounted BulkImport, pasted three questions including the exact BRIGHT/GENTLE
+  pair that reached children, and confirmed — flagged "Two answers" in the preview; button reads "Send
+  3 for review"; on submit it calls pm_review_enqueue and makes ZERO direct writes to pm_questions.
 - **Comprehensive audit — found TWO BROKEN QUESTIONS LIVE IN A PUBLISHED PACK, and the systemic hole
   that let them sit there.**
   THE SERIOUS ONE: \`BRIGHT/GENTLE\` and \`SURE/GLAD\` were live in the published \`confidence\` pack and
@@ -4521,6 +4615,13 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    written via pm_ai_set_key and read ONLY server-side by the edge function (service role). The UI
    reads pm_ai_status, which returns a masked hint and NEVER the key. Never add a select policy to
    pm_ai_config, never return api_key from an RPC, never send a key to the client "just to show it".
+4q. **EVERY content-entry path goes through the review queue.** Not just AI generation — imports
+   too. There were two ways in and only one was gated, and the ungated one (Bulk Import) is how
+   BRIGHT/GENTLE reached children. Do NOT try to detect whether content "came from AI": you usually
+   cannot tell, and a wrong guess means unchecked content reaches a child. The ONLY path into
+   pm_questions is pm_review_approve. If you add a new way to create content, it goes through the gate
+   or it does not ship. (The one deliberate exception is whole-pack file RESTORE, which lands as a
+   DRAFT and is validated with a loud warning — but it must never be published unchecked.)
 4p. **The lint must check the defect that actually breaks the game.** pm_lint checked four cosmetic
    things and missed the ONE that harms a child: an alternate the same length as the answer. Two
    broken questions sat LIVE in a published pack while the health check said all was well. Any check
@@ -4928,6 +5029,13 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    COUNTS: never download the whole queue to the browser to count it - use a server-side counts RPC.
    MOBILE: the phone drawer MUST be derived from NAV (NAV.filter(n => !NAV_PHONE.includes(n.id))), or
    new pages end up unreachable on a phone.
+   EVERY CONTENT-ENTRY PATH GOES THROUGH THE QUEUE — not just the API-key generator. Bulk Import
+   (pasting AI output, or your own lines) must ALSO enqueue, never write to pm_questions directly.
+   Do NOT try to detect whether a paste "came from AI": you usually cannot tell, and a wrong guess
+   means unchecked content reaches a child. Validate every imported row with the SAME validator and
+   show the flags BEFORE the user commits. The single exception is whole-pack file RESTORE (a backup,
+   or moving packs between environments) — queueing a 200-question restore one-by-one would be absurd,
+   so it lands as a DRAFT instead, but it must still be validated and warn loudly.
    REMEMBER WHY THE HUMAN IS THERE: the machine judges mechanics; only a person judges tone and
    meaning. "PERFECT" passes every automated check and is still the wrong word to teach a child.
 7. **Activity log:** every mutation recorded (who/what/when) via pm_log.
@@ -6066,7 +6174,13 @@ function AIReviewView({ packs, levels }) {
                       </span>
                       {pack && <Pill tone="muted">{pack.emoji} {pack.name}</Pill>}
                       {r.target_level != null && <LevelChip level={r.target_level} levels={levels} />}
-                      {r.provider && <Pill tone="muted">{r.provider}</Pill>}
+                      {r.provider && (
+                        <Pill tone="muted">
+                          {r.provider === "import" ? "Imported"
+                            : r.provider === "ai-paste" ? "Pasted from AI"
+                            : r.provider}
+                        </Pill>
+                      )}
                       {r.edited && <Pill tone="muted">edited by you</Pill>}
                     </div>
 
@@ -7629,7 +7743,9 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
   const afterChange = async () => { await load(); refreshPacks(); setSel(new Set()); };
 
   const saveQ = async (payload, id) => { id ? await db.updateQuestion(id, payload) : await db.createQuestion(payload); await afterChange(); notify(id ? "Question updated" : "Question added"); };
-  const importQ = async (r) => { try { await db.createQuestions(r); await afterChange(); notify(`${r.length} questions imported`); } catch (e) { notify("Import failed: " + e.message, { kind: "error" }); } };
+  // Imports no longer land in the pack — they go to the AI Review queue for approval. So there is
+  // nothing to insert here; just refresh (the queue count updates) and point the user at Review.
+  const importQ = async () => { await afterChange(); };
   const delQ = async (q) => {
     const ok = await confirmDialog({ title: "Delete question?", message: "This can't be undone.", confirmLabel: "Delete", danger: true });
     if (!ok) return;
@@ -8212,17 +8328,33 @@ function App() {
       const ok = await confirmDialog({ title: `Import ${arr.length} packs?`, message: "Packs are added as drafts. Existing packs with the same slug are skipped.", confirmLabel: `Import ${arr.length}` });
       if (!ok) return;
       const existing = new Set((packs || []).map(p => p.slug));
-      let created = 0, skipped = 0;
+      let created = 0, skipped = 0, flagged = 0;
       for (const p of arr) {
         if (existing.has(p.slug)) { skipped++; continue; }
         const newPack = await db.createPack({ slug: p.slug, name: p.name, emoji: p.emoji || "💡", description: p.description || "", color: p.color || C.brand, difficulty: p.difficulty || "basic", status: "draft", is_custom: !!p.is_custom, sort_order: (packs?.length || 0) + created + 1, level: p.level ?? 1, purpose: p.purpose || null, focus_areas: p.focus_areas || null, style_approach: p.style_approach || null, example_objectives: p.example_objectives || null });
         if (newPack && p.questions?.length) {
+          // This is a RESTORE path (a backup, or moving packs between environments), not authoring —
+          // so it does not go through the review queue; putting a 200-question restore through a
+          // one-by-one approval would be absurd. But broken questions must not ride in SILENTLY and
+          // then go live the moment the pack is published. So: validate, import, and say plainly what
+          // is wrong. (The Health page also flags these now, so they cannot hide.)
+          for (const q of p.questions) {
+            const v = validateQuestion(
+              { template: q.template, answer: q.answer, alt_answer: q.alt_answer },
+              levels || [],
+              { targetLevel: q.level ?? p.level ?? 1 }
+            );
+            if (!v.ok) flagged++;
+          }
           await db.createQuestions(p.questions.map((q, i) => ({ pack_id: newPack.id, template: q.template, answer: (q.answer || "").toUpperCase(), alt_answer: (q.alt_answer || "").toUpperCase(), status: q.status || "active", sort_order: i, level: q.level ?? null, letter_position: q.letter_position ?? null, letter_grouping: q.letter_grouping ?? null, frame_slots: (q.frame_slots && typeof q.frame_slots === "object") ? q.frame_slots : {} })));
         }
         created++;
       }
       await reloadPacks();
       notify(`Imported ${created} pack${created === 1 ? "" : "s"}${skipped ? `, skipped ${skipped}` : ""}`);
+      if (flagged) {
+        notify(`${flagged} imported question${flagged === 1 ? " has a problem" : "s have problems"} — check Health before publishing`, { kind: "error" });
+      }
     } catch (err) { notify("Import failed: " + err.message, { kind: "error" }); }
   };
 
