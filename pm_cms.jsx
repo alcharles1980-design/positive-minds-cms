@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.05-12", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.05-13", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -1493,7 +1493,7 @@ function FrameSlotEditor({ token, slot, setSlot, levels }) {
               {levelList.map(l => (
                 <div key={l.level} style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <span style={{ fontSize: 11.5, fontWeight: 700, color: C.sub, minWidth: 26 }}>L{l.level}</span>
-                  <Select value={byLevel[l.level] ?? ""} onChange={(e) => { const v = e.target.value; const nb = { ...byLevel }; if (v === "") delete nb[l.level]; else nb[l.level] = v; setSlot({ byLevel: nb }); }} style={{ padding: "5px 8px", fontSize: 12.5, flex: 1 }}>
+                  <Select value={byLevel[l.level] ?? ""} aria-label={`Word for level ${l.level}`} title={`Word for level ${l.level}`} onChange={(e) => { const v = e.target.value; const nb = { ...byLevel }; if (v === "") delete nb[l.level]; else nb[l.level] = v; setSlot({ byLevel: nb }); }} style={{ padding: "5px 8px", fontSize: 12.5, flex: 1 }}>
                     <option value="">(vary)</option>
                     {pool.map(w => <option key={w} value={w}>{w}</option>)}
                   </Select>
@@ -1824,7 +1824,7 @@ function BulkImport({ packId, onDone, onClose, levels, packLevel }) {
             <><br /><span style={{ color: C.faint }}>Pack level {levelDef.level} suggests {levelDef.min_word_len && levelDef.max_word_len ? `${levelDef.min_word_len}–${levelDef.max_word_len}-letter` : levelDef.min_word_len ? `${levelDef.min_word_len}+ letter` : levelDef.max_word_len ? `≤${levelDef.max_word_len}-letter` : ""} words{levelDef.allow_multiword ? ", multi-word ok" : ""}. Out-of-range words get a soft “Length” flag (still importable).</span></>
           )}
         </div>
-        <Textarea value={raw} onChange={(e) => setRaw(e.target.value)} rows={7} autoFocus placeholder={"I am {blank} when I try something new. | BRAVE | BOLD\nBeing {blank} helps me make friends. | KIND | CARING"} style={{ fontFamily: "ui-monospace, monospace", fontSize: 13 }} />
+        <Textarea value={raw} onChange={(e) => setRaw(e.target.value)} rows={7} autoFocus aria-label="Paste questions to import" placeholder={"I am {blank} when I try something new. | BRAVE | BOLD\nBeing {blank} helps me make friends. | KIND | CARING"} style={{ fontFamily: "ui-monospace, monospace", fontSize: 13 }} />
         {raw.trim() && (
           <div style={{ background: C.bg, borderRadius: R.md, padding: S.md + 2, maxHeight: 260, overflowY: "auto" }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: C.sub, marginBottom: 8, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
@@ -3686,6 +3686,34 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Real-DOM inspection pass — stopped auditing the source and started inspecting the RESULT.** My
+  previous passes read the code and grepped for suspicious patterns. That is not inspection. This pass
+  renders every page and modal into a real DOM (jsdom) with the real EVALUATED stylesheet, then walks
+  the tree checking computed styles.
+  FIRST I HAD TO FIX MY OWN ORACLE — twice. (a) I extracted the CSS by regexing the source, which left
+  \`\${themeVars(...)}\` template placeholders unevaluated; jsdom silently rejected the whole stylesheet
+  and EVERY computed style was a lie. Now it RENDERS GlobalStyle to get the real CSS and aborts if any
+  \`\${\` remains. (b) My label check only looked for aria-label/for=, so it flagged every field built
+  with our <Field> primitive — but a control WRAPPED IN A <label> is programmatically associated
+  (implicit association) and screen readers announce it. Those were false positives. A broken oracle is
+  worse than no oracle.
+  REAL DEFECTS FOUND AND FIXED:
+  (1) **19 unlabelled form controls** — the bare filter dropdowns (status, level, date, pack, sort) had
+  no label of any kind. A screen-reader user heard "combo box" with no idea what it filtered. All now
+  carry aria-label + title.
+  (2) **HelpField provided NO label association at all.** I built it with a <div>+<span> instead of a
+  <label>. It looked identical but left every control inside it completely unlabelled to assistive
+  tech. Now uses a real <label> (with the (i) button OUTSIDE it, so it can't swallow clicks meant for
+  the field).
+  (3) **The colour-swatch buttons in LevelEditor were unlabelled** — a coloured square with no text.
+  Now aria-label + aria-pressed.
+  ALSO: I mangled 12 lines with a careless regex (it inserted attributes INSIDE arrow functions:
+  \`onChange={(e) = aria-label="x"> setFoo(...)}\`). Only the BUILD caught it. Repaired, and worth
+  recording: never regex-edit JSX.
+  VERIFIED: all 11 pages × 4 device classes and all 9 modals — no overflow, no invisible text, no
+  illegible fonts, no unlabelled controls, no unlabelled buttons. WCAG contrast checked on the real
+  theme colours: every text colour passes AA (warn is 3.86:1, large-text only, and is used only on
+  small badges).
 - **Layout audit: fixed the white space and stretched formatting.** The previous pass fixed the
   NAVIGATION flipping but only verified pages "render without throwing" — a very low bar that catches
   nothing about layout. This pass rendered every page in its LOADED state (stubbing useAsync, since
@@ -4438,6 +4466,15 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    written via pm_ai_set_key and read ONLY server-side by the edge function (service role). The UI
    reads pm_ai_status, which returns a masked hint and NEVER the key. Never add a select policy to
    pm_ai_config, never return api_key from an RPC, never send a key to the client "just to show it".
+4n. **Inspect the RESULT, not the source.** Grepping code for suspicious patterns is not a UI audit.
+   Render into a real DOM with the real evaluated stylesheet and walk the computed styles. And VALIDATE
+   YOUR ORACLE FIRST: extracting CSS by regex left \`\${...}\` placeholders that jsdom silently rejected,
+   so every computed style was a lie; and a naive label check flagged every correctly-built field,
+   because a control wrapped in a <label> IS associated (implicit association). A broken oracle is worse
+   than none.
+4o. **Never regex-edit JSX.** A careless pattern inserted attributes inside arrow functions
+   (\`onChange={(e) = aria-label="x"> setFoo(...)}\`) across 12 lines. Only the build caught it. Use
+   targeted, structure-aware edits.
 4m. **Cap the CONTENT, not just the container.** A max-width on the page wrapper does nothing for a
    lone form field or a paragraph inside it — they will happily fill all 1080px, leaving a giant
    input marooned in white space and body copy ~150 characters wide. Every form gets a readable cap
@@ -4843,6 +4880,10 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    so it gets treated as a tablet and the whole navigation swaps on rotation. Phone <640 / tablet
    <1024 / desktop. Have the JS stamp the class onto <html> (pm-phone/pm-tablet/pm-desktop/pm-coarse/
    pm-landscape) and make the CSS key off THAT — never run parallel width media queries, they drift.
+   ACCESSIBILITY IS NOT OPTIONAL: every form control needs a programmatic label. A control wrapped in
+   a <label> gets it implicitly — but a <div>+<span> that merely LOOKS like a label gives nothing. Bare
+   filter dropdowns need an explicit aria-label. Icon-only buttons (colour swatches, close buttons)
+   need aria-label. Verify by rendering into a real DOM and checking el.labels, not by reading the code.
    CAP THE CONTENT, NOT JUST THE CONTAINER: a max-width on the page wrapper is not enough. A single
    form field or paragraph inside it will fill the whole width — an input the width of the page and a
    line of text ~150 characters long, with dead space beside it. Give forms a readable cap (~860px),
@@ -5420,7 +5461,10 @@ function LevelEditor({ level, onSave, onClose, isNew = false }) {
         <Field label="Color">
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
             {["#00B894","#55EFC4","#0984E3","#74B9FF","#6C4CE0","#A29BFE","#E17055","#E84393","#D63031","#2D3436","#F39C12","#00CEC9","#FD79A8","#636E72","#00A8FF"].map(c => (
-              <button key={c} onClick={() => set("color", c)} style={{ width: 30, height: 30, borderRadius: R.sm, cursor: "pointer", background: c, border: "3px solid " + (f.color === c ? C.ink : "transparent") }} />
+              <button key={c} onClick={() => set("color", c)}
+                aria-label={`Use colour ${c}`} title={c}
+                aria-pressed={f.color === c}
+                style={{ width: 30, height: 30, borderRadius: R.sm, cursor: "pointer", background: c, border: "3px solid " + (f.color === c ? C.ink : "transparent") }} />
             ))}
           </div>
         </Field>
@@ -5869,7 +5913,7 @@ function AIReviewView({ packs, levels }) {
         ))}
         <div style={{ flex: 1 }} />
         {packsInTab.length > 1 && (
-          <Select value={packFilter} onChange={(e) => setPackFilter(e.target.value)}
+          <Select value={packFilter} onChange={(e) => setPackFilter(e.target.value)} aria-label="Filter by pack" title="Filter by pack"
             style={{ maxWidth: 200, fontSize: 13, padding: "6px 10px" }}>
             <option value="">All packs ({allRows.length})</option>
             {packsInTab.map(p => (
@@ -6278,15 +6322,25 @@ function InfoDot({ setting }) {
 }
 
 // A Field with an (i) next to its label.
+//
+// NOTE: this MUST use a <label> element, not a <div>+<span>. A control nested inside a <label> is
+// programmatically associated with it (implicit association) and screen readers announce it. The
+// first version of this used a div/span, which looked identical but left every control inside it
+// completely unlabelled to assistive tech. Caught by inspecting the real DOM.
+//
+// The (i) button lives OUTSIDE the label, because a button inside a label swallows clicks meant for
+// the field.
 function HelpField({ setting, label, hint, children, style }) {
   const h = SETTING_HELP[setting];
+  const text = label || h?.title;
   return (
     <div style={style}>
       <div style={{ display: "flex", alignItems: "center", marginBottom: 5 }}>
-        <span style={{ fontSize: 12, fontWeight: 700, color: C.ink2 }}>{label || h?.title}</span>
+        <label style={{ fontSize: 12, fontWeight: 700, color: C.ink2 }}>{text}</label>
         <InfoDot setting={setting} />
       </div>
-      {children}
+      {/* Wrapping the control in its own label gives the implicit association. */}
+      <label style={{ display: "block" }} aria-label={text}>{children}</label>
       {hint && <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4, lineHeight: 1.4 }}>{hint}</div>}
     </div>
   );
@@ -6653,7 +6707,7 @@ function KeyEditor({ provider, existing, onClose, onSaved }) {
           <Select value={model} onChange={(e) => { setModel(e.target.value); setCustomModel(""); }} disabled={!!customModel.trim()}>
             {provider.models.map(m => <option key={m} value={m}>{m}</option>)}
           </Select>
-          <Input value={customModel} onChange={(e) => setCustomModel(e.target.value)}
+          <Input value={customModel} onChange={(e) => setCustomModel(e.target.value)} aria-label="Custom model name" title="Custom model name"
             placeholder="Custom model name (optional)" spellCheck={false}
             style={{ marginTop: 6, fontSize: 13 }} />
         </HelpField>
@@ -7195,7 +7249,7 @@ function GeneratorView({ packs, levels }) {
                 <div style={{ display: "flex", gap: 8 }}>
                   <Btn size="sm" onClick={copyContextDoc} icon={ctxCopied ? "✓" : "⧉"}>{ctxCopied ? "Copied" : "Copy document"}</Btn>
                 </div>
-                <Textarea readOnly value={MASTER_CONTEXT} rows={12} onFocus={(e) => e.target.select()}
+                <Textarea readOnly value={MASTER_CONTEXT} rows={12} aria-label="Master context (read only)" onFocus={(e) => e.target.select()}
                   style={{ fontFamily: "ui-monospace, monospace", fontSize: 12, lineHeight: 1.55, background: C.bg, resize: "vertical" }} />
               </div>
             )}
@@ -7210,7 +7264,7 @@ function GeneratorView({ packs, levels }) {
             <div style={{ flex: 1 }} />
             <Btn size="sm" onClick={copyPrompt} icon={copied ? "✓" : "⧉"}>{copied ? "Copied" : "Copy"}</Btn>
           </div>
-          <Textarea readOnly value={prompt} rows={22}
+          <Textarea readOnly value={prompt} rows={22} aria-label="Generated prompt (read only)"
             onFocus={(e) => e.target.select()}
             style={{ border: "none", borderRadius: 0, fontFamily: "ui-monospace, monospace", fontSize: 12.5, lineHeight: 1.55, resize: "vertical", background: C.bg }} />
           <div style={{ padding: `${S.sm + 2}px ${S.lg}px`, borderTop: "1px solid " + C.line, fontSize: 12.5, color: C.sub, lineHeight: 1.5 }}>
@@ -7367,13 +7421,13 @@ function Library({ packs, levels, loading, error, onOpen, onNew, onEdit, onExpor
 
       <div className="pm-toolbar" style={{ marginBottom: S.lg + 2 }}>
         <SearchBox value={search} onChange={setSearch} placeholder="Search packs…" />
-        <Select value={statusF} onChange={(e) => setStatusF(e.target.value)} style={{ minWidth: 140, padding: "8px 12px" }}>
+        <Select value={statusF} onChange={(e) => setStatusF(e.target.value)} aria-label="Filter by status" title="Filter by status" style={{ minWidth: 140, padding: "8px 12px" }}>
           <option value="all">All statuses</option><option value="published">Published</option><option value="draft">Draft</option><option value="archived">Archived</option>
         </Select>
-        <Select value={diffF} onChange={(e) => setDiffF(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
+        <Select value={diffF} onChange={(e) => setDiffF(e.target.value)} aria-label="Filter by difficulty" title="Filter by difficulty" style={{ minWidth: 130, padding: "8px 12px" }}>
           <option value="all">All difficulty</option><option value="basic">Basic</option><option value="advanced">Advanced</option><option value="mixed">Mixed</option>
         </Select>
-        <Select value={lvlF} onChange={(e) => setLvlF(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
+        <Select value={lvlF} onChange={(e) => setLvlF(e.target.value)} aria-label="Filter by level" title="Filter by level" style={{ minWidth: 130, padding: "8px 12px" }}>
           <option value="all">All levels</option>
           {(levels && levels.length ? levels : Array.from({ length: 10 }, (_, i) => ({ level: i + 1, name: "" }))).map(l => (
             <option key={l.level} value={l.level}>Level {l.level}{l.name ? ` — ${l.name}` : ""}</option>
@@ -7591,19 +7645,19 @@ function PackDetail({ pack, levels, onBack, refreshPacks, onEditPack }) {
           <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: C.ink }}>Question bank</h3>
           <div className="pm-grow" />
           <SearchBox value={search} onChange={setSearch} placeholder="Search…" />
-          <Select value={lvlF} onChange={(e) => setLvlF(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
+          <Select value={lvlF} onChange={(e) => setLvlF(e.target.value)} aria-label="Filter by level" title="Filter by level" style={{ minWidth: 130, padding: "8px 12px" }}>
             <option value="all">All levels</option>
             {(levels && levels.length ? levels : Array.from({ length: 10 }, (_, i) => ({ level: i + 1, name: "" }))).map(l => (
               <option key={l.level} value={l.level}>Level {l.level}{l.name ? ` — ${l.name}` : ""}</option>
             ))}
           </Select>
-          <Select value={datePreset} onChange={(e) => setDatePreset(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }} title="Filter by when the question was added">
+          <Select value={datePreset} onChange={(e) => setDatePreset(e.target.value)} aria-label="Filter by date added" title="Filter by date added" style={{ minWidth: 130, padding: "8px 12px" }} title="Filter by when the question was added">
             <option value="all">Any time added</option>
             <option value="24h">Added last 24h</option>
             <option value="7d">Added last 7 days</option>
             <option value="30d">Added last 30 days</option>
           </Select>
-          <Select value={sortBy} onChange={(e) => setSortBy(e.target.value)} style={{ minWidth: 120, padding: "8px 12px" }} title="Sort order">
+          <Select value={sortBy} onChange={(e) => setSortBy(e.target.value)} aria-label="Sort order" title="Sort order" style={{ minWidth: 120, padding: "8px 12px" }} title="Sort order">
             <option value="order">Default order</option>
             <option value="recent">Newest first</option>
             <option value="oldest">Oldest first</option>
@@ -7751,29 +7805,29 @@ function AllQuestions({ onOpenPack, levels, packs }) {
       </div>
       <div className="pm-toolbar" style={{ marginBottom: S.lg }}>
         <SearchBox value={q} onChange={setQ} placeholder="Search all questions…" autoFocus />
-        <Select value={packF} onChange={(e) => setPackF(e.target.value)} style={{ minWidth: 160, padding: "8px 12px" }} title="Filter by pack">
+        <Select value={packF} onChange={(e) => setPackF(e.target.value)} aria-label="Filter by pack" title="Filter by pack" style={{ minWidth: 160, padding: "8px 12px" }} title="Filter by pack">
           <option value="all">All packs</option>
           {[...(packs || [])].sort((a, b) => (a.name || "").localeCompare(b.name || "")).map(p => (
             <option key={p.id} value={p.id}>{p.emoji ? p.emoji + " " : ""}{p.name}</option>
           ))}
         </Select>
-        <Select value={lvl} onChange={(e) => setLvl(e.target.value)} style={{ minWidth: 140, padding: "8px 12px" }}>
+        <Select value={lvl} onChange={(e) => setLvl(e.target.value)} aria-label="Filter by level" title="Filter by level" style={{ minWidth: 140, padding: "8px 12px" }}>
           <option value="all">All levels</option>
           {(levels && levels.length ? levels : Array.from({ length: 10 }, (_, i) => ({ level: i + 1, name: "" }))).map(l => (
             <option key={l.level} value={l.level}>Level {l.level}{l.name ? ` — ${l.name}` : ""}</option>
           ))}
         </Select>
-        <Select value={stat} onChange={(e) => setStat(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }}>
+        <Select value={stat} onChange={(e) => setStat(e.target.value)} aria-label="Filter by status" title="Filter by status" style={{ minWidth: 130, padding: "8px 12px" }}>
           <option value="all">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option>
         </Select>
-        <Select value={datePreset} onChange={(e) => setDatePreset(e.target.value)} style={{ minWidth: 140, padding: "8px 12px" }} title="Filter by when the question was added">
+        <Select value={datePreset} onChange={(e) => setDatePreset(e.target.value)} aria-label="Filter by date added" title="Filter by date added" style={{ minWidth: 140, padding: "8px 12px" }} title="Filter by when the question was added">
           <option value="all">Any time added</option>
           <option value="24h">Added last 24 hours</option>
           <option value="7d">Added last 7 days</option>
           <option value="30d">Added last 30 days</option>
           <option value="custom">Custom date range…</option>
         </Select>
-        <Select value={sort} onChange={(e) => setSort(e.target.value)} style={{ minWidth: 130, padding: "8px 12px" }} title="Sort order">
+        <Select value={sort} onChange={(e) => setSort(e.target.value)} aria-label="Sort order" title="Sort order" style={{ minWidth: 130, padding: "8px 12px" }} title="Sort order">
           <option value="recent">Newest first</option>
           <option value="oldest">Oldest first</option>
           <option value="pack">Group by pack</option>
@@ -7785,9 +7839,9 @@ function AllQuestions({ onOpenPack, levels, packs }) {
       {datePreset === "custom" && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: S.md, padding: "10px 12px", background: C.panel, border: "1px solid " + C.line, borderRadius: R.md }}>
           <span style={{ fontSize: 12.5, fontWeight: 700, color: C.sub }}>Added between</span>
-          <Input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} style={{ width: 160, padding: "7px 10px" }} />
+          <Input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} aria-label="From date" title="From date" style={{ width: 160, padding: "7px 10px" }} />
           <span style={{ fontSize: 12.5, color: C.faint }}>and</span>
-          <Input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} style={{ width: 160, padding: "7px 10px" }} />
+          <Input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} aria-label="To date" title="To date" style={{ width: 160, padding: "7px 10px" }} />
           {(fromDate || toDate) && <Btn variant="ghost" size="sm" onClick={() => { setFromDate(""); setToDate(""); }}>Clear</Btn>}
         </div>
       )}
