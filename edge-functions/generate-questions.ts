@@ -425,6 +425,11 @@ Deno.serve(async (req) => {
     if (!cfg?.api_key) {
       return json({ error: 'no_key', provider, message: `No API key saved for ${provider}. Add one in Settings.` }, 400);
     }
+    // `enabled` existed as a column and was reported by pm_ai_status, but was NEVER checked — so
+    // turning a provider "off" did nothing and the config lied to you. Enforce it.
+    if (cfg.enabled === false) {
+      return json({ error: 'provider_disabled', provider, message: `${provider} is turned off in AI Settings. Turn it back on, or switch to another provider.` }, 400);
+    }
     const model = cfg.model || DEFAULT_MODELS[provider];
 
     // Generation parameters from the stored config. Anything null is OMITTED from the request —
@@ -585,14 +590,29 @@ Deno.serve(async (req) => {
     });
 
     const clean = rows.filter((r: any) => r.validation?.ok).length;
+    const asked = Math.min(Math.max(count, 1), 30);
+    const short = rows.length < asked;
+
+    // A short batch is a QUIET failure: you asked for 20, got 8, and nothing said why. Surface it —
+    // truncation (hit the token ceiling) is the usual cause and is fixable in settings.
+    let warning: string | null = null;
+    if (truncated) {
+      warning = `The model hit its output ceiling (max_tokens = ${genParams.maxTokens ?? DEFAULT_MAX_TOKENS}) and stopped early, so you got ${rows.length} of the ${asked} you asked for. Raise "Max tokens" in AI Settings, or ask for fewer per batch.`;
+    } else if (short) {
+      warning = `The model returned ${rows.length} of the ${asked} questions you asked for. It may have run out of distinct ideas for this pack — try a different level, add guidance, or ask for fewer.`;
+    }
+
     return json({
       ok: true,
       batch_id,
       provider, model,
+      requested: asked,
       generated: rows.length,
       clean,
       flagged: rows.length - clean,
       repaired,
+      truncated,
+      warning,
       message: `${rows.length} question${rows.length === 1 ? '' : 's'} queued for review (${clean} clean, ${rows.length - clean} flagged).`,
     });
   } catch (e) {

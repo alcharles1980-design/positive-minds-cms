@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.05-09", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.05-10", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -3312,6 +3312,20 @@ Per-provider mapping (they differ, and getting it wrong fails silently):
 | top-p | top_p | top_p | generationConfig.topP |
 | system prompt | \`system\` field | a system MESSAGE | \`systemInstruction\` (separate field) |
 
+**The \`enabled\` flag is now ENFORCED.** It existed as a column and was reported by pm_ai_status,
+but NOTHING ever checked it — so a provider marked "disabled" was still used. Dead config that lies is
+worse than no config. The edge fn now refuses with \`provider_disabled\`, and there is a Turn on/off
+button (pm_ai_set_enabled). Verified live: a disabled-but-keyed provider returns 400.
+
+**Clearing the system prompt actually clears it.** The UI used to send null when you emptied the
+textarea — but null means "don't change" in the setter, so a custom brief could NEVER be removed and
+the UI lied (empty box, old prompt still in use). It now sends an empty string, which the RPC treats
+as an explicit clear.
+
+**A short batch no longer fails quietly.** If you asked for 20 and got 8, nothing said why. The
+response now carries \`requested\`, \`truncated\` and a \`warning\`, and the UI shows it — naming the
+likely cause (hit the token ceiling) and the fix.
+
 **Truncation is now surfaced.** A too-low max_tokens cuts the JSON off mid-array and used to appear as
 a baffling parse error. All three adapters report stop_reason/finish_reason, and the error now says
 plainly: "ran out of output tokens — raise Max tokens or generate fewer questions."
@@ -3618,6 +3632,23 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Review of the AI-parameters work — three real bugs found and fixed.**
+  (1) **Clearing the system prompt did nothing.** Emptying the textarea sent null, and null means
+  "don't change" in the setter — so a custom brief could NEVER be removed, and the UI actively lied to
+  you (empty box, old prompt still driving the AI). Now sends an empty string, which the RPC already
+  treated as an explicit clear. Found by tracing the round-trip, not by reading the code.
+  (2) **The \`enabled\` flag was dead config that lied.** The column existed and pm_ai_status reported
+  it, but NOTHING ever checked it — a provider you had "disabled" would still be used. Now enforced in
+  the edge fn (400 \`provider_disabled\`) with a Turn on/off button and a pm_ai_set_enabled RPC.
+  Verified live: a disabled-but-keyed provider is refused.
+  (3) **A short batch failed quietly.** Ask for 20, get 8, and nothing told you why. The response now
+  returns \`requested\`, \`truncated\` and a \`warning\`, and the UI surfaces it — naming the likely cause
+  (hit the token ceiling) and how to fix it.
+  Also verified (not assumed): the client→RPC contract works over REST with the exact 9-param payload
+  the browser sends (PostgREST resolves by argument name — 200 OK); numeric params serialise as JSON
+  NUMBERS not strings, so the UI and edge fn handle them correctly; an untouched save preserves every
+  value; a params-only save still does not wipe the key. Prod restored (no keys, active=anthropic, 12
+  questions, empty queue).
 - **Exposed the generation parameters (they were hardcoded or missing entirely), each with an (i)
   explaining what it does.** Before: max_tokens was HARDCODED at 4000; temperature was NEVER SENT (so
   you silently got the default 1.0 — maximally creative, which is the wrong end of the dial for
@@ -4310,6 +4341,14 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    written via pm_ai_set_key and read ONLY server-side by the edge function (service role). The UI
    reads pm_ai_status, which returns a masked hint and NEVER the key. Never add a select policy to
    pm_ai_config, never return api_key from an RPC, never send a key to the client "just to show it".
+4j. **Config must never lie.** If a flag exists and is reported to the UI, something must ENFORCE
+   it. \`pm_ai_config.enabled\` sat unchecked for a while: you could "disable" a provider and it would
+   still be used. Either enforce a flag or delete it — dead config that lies is worse than none.
+4k. **"Null means don't change" needs an escape hatch for every field.** The setter treats null as
+   "leave it alone", which is right for a key you can't read back — but it means an empty value cannot
+   be expressed. Temperature/top_p have explicit clear flags; the system prompt uses an empty string.
+   Any new nullable setting needs one or the other, or users will be unable to UNSET it and the UI
+   will silently lie.
 4h. **NEVER send temperature/top_p unconditionally.** Anthropic returns 400 for them on Opus 4.7+;
    OpenAI rejects them on GPT-5 reasoning models. They must be nullable and OMITTED from the request
    body when unset. A "sensible default" here breaks generation entirely on those models. Because null
@@ -4659,6 +4698,15 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    just looks like a baffling JSON parse error. A params-only save must NOT wipe the API key (it can
    never be read back) - accept a null key meaning "keep the existing one", and never create a second
    overload of the setter or the call becomes ambiguous.
+   ENFORCE WHAT YOU EXPOSE: if the config has an \`enabled\` flag (or any flag the UI shows), the edge
+   fn MUST check it. A flag that is reported but never enforced is config that lies. Give it a Turn
+   on/off control and refuse with a clear error when it's off.
+   EVERY NULLABLE SETTING NEEDS A WAY TO UNSET IT: the setter treats null as "don't change" (correct
+   for a key you can't read back), so an empty value cannot otherwise be expressed. Use explicit clear
+   flags (temperature/top_p) or an empty string (the system prompt). Without this, users can never
+   remove a value and the UI silently lies to them.
+   SURFACE A SHORT BATCH: if the model returns fewer questions than asked, say so and name the likely
+   cause (usually the token ceiling). Return 'requested', 'truncated' and a 'warning' and show it.
    EXPLAIN EVERY SETTING: each field gets an (i) that opens a plain-English explanation - what it is,
    why it matters FOR THIS JOB (writing children's puzzle content), a suggested value, and a warning
    where one is warranted. Do not write generic API documentation; write what it does HERE.
@@ -6134,6 +6182,7 @@ const db_ai = {
     p_clear_top_p: !!o.clear_top_p,
   }),
   clearKey: (provider) => rpc("pm_ai_clear_key", { p_provider: provider }),
+  setEnabled: (provider, enabled) => rpc("pm_ai_set_enabled", { p_provider: provider, p_enabled: enabled }),
   settings: () => rest("pm_ai_settings?id=eq.1&limit=1").then(r => (r.data || [])[0] || null),
   saveSettings: (patch) => rest("pm_ai_settings?id=eq.1", { method: "PATCH", body: patch }).then(r => r.data?.[0]),
   test: (provider) => callFn("generate-questions", { test_only: true, provider }),
@@ -6160,6 +6209,11 @@ function AISettingsView({ packs, levels }) {
 
   const saveSetting = async (patch) => {
     try { await db_ai.saveSettings({ ...patch, updated_at: new Date().toISOString() }); await settingsState.reload(); }
+    catch (e) { notify(friendlyError(0, String(e?.message || e)), "error"); }
+  };
+
+  const toggleEnabled = async (p, on) => {
+    try { await db_ai.setEnabled(p.id, on); await statusState.reload(); notify(on ? `${p.name} turned on` : `${p.name} turned off`); }
     catch (e) { notify(friendlyError(0, String(e?.message || e)), "error"); }
   };
 
@@ -6229,6 +6283,7 @@ function AISettingsView({ packs, levels }) {
                         {configured
                           ? <span style={{ fontSize: 12, fontWeight: 700, color: C.ok }}>✓ Key saved <span style={{ fontFamily: "ui-monospace, monospace", color: C.faint }}>{st.hint}</span></span>
                           : <span style={{ fontSize: 12, fontWeight: 700, color: C.faint }}>No key yet</span>}
+                        {configured && st.enabled === false && <Pill tone="danger">Turned off</Pill>}
                       </div>
 
                       {configured && st.updated_at && (
@@ -6260,7 +6315,12 @@ function AISettingsView({ packs, levels }) {
                     </div>
 
                     <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 130 }}>
-                      {!isActive && configured && <Btn size="sm" variant="soft" onClick={() => setActive(p.id)}>Use this one</Btn>}
+                      {!isActive && configured && st.enabled !== false && <Btn size="sm" variant="soft" onClick={() => setActive(p.id)}>Use this one</Btn>}
+                      {configured && (
+                        <Btn size="sm" variant="ghost" onClick={() => toggleEnabled(p, st.enabled === false)}>
+                          {st.enabled === false ? "Turn on" : "Turn off"}
+                        </Btn>
+                      )}
                       <Btn size="sm" variant={configured ? "ghost" : "primary"} onClick={() => setEditKey(p.id)}>
                         {configured ? "Settings" : "Add key"}
                       </Btn>
@@ -6423,7 +6483,9 @@ function KeyEditor({ provider, existing, onClose, onSaved }) {
         max_tokens: mt,
         temperature: tp,
         top_p: pp,
-        system_prompt: systemPrompt.trim() || null,
+        // Empty string means "clear it". Sending null would mean "don't change" — so clearing the
+        // textarea would silently do nothing and you'd be stuck with a custom brief you can't remove.
+        system_prompt: systemPrompt.trim(),
         // null means "don't change", so an explicit clear is needed to actually UNSET these.
         clear_temperature: temperature === "" && existing?.temperature != null,
         clear_top_p: topP === "" && existing?.top_p != null,
@@ -6601,14 +6663,23 @@ function GeneratePanel({ packs, levels, settings, status }) {
       </Btn>
 
       {result && (
-        <div style={{ marginTop: S.md, background: C.ok + "10", border: "1px solid " + C.ok + "44",
-          borderRadius: R.md, padding: "11px 14px", fontSize: 13, color: C.ink, lineHeight: 1.55 }}>
-          <b>{result.generated}</b> question{result.generated === 1 ? "" : "s"} queued —{" "}
-          <b style={{ color: C.ok }}>{result.clean}</b> passed every check
-          {result.flagged > 0 && <> · <b style={{ color: C.danger }}>{result.flagged}</b> flagged</>}
-          {result.repaired > 0 && <> · {result.repaired} auto-fixed</>}.
-          {" "}Go to <b>AI Review</b> to approve them.
-        </div>
+        <>
+          <div style={{ marginTop: S.md, background: C.ok + "10", border: "1px solid " + C.ok + "44",
+            borderRadius: R.md, padding: "11px 14px", fontSize: 13, color: C.ink, lineHeight: 1.55 }}>
+            <b>{result.generated}</b> question{result.generated === 1 ? "" : "s"} queued —{" "}
+            <b style={{ color: C.ok }}>{result.clean}</b> passed every check
+            {result.flagged > 0 && <> · <b style={{ color: C.danger }}>{result.flagged}</b> flagged</>}
+            {result.repaired > 0 && <> · {result.repaired} auto-fixed</>}.
+            {" "}Go to <b>AI Review</b> to approve them.
+          </div>
+          {/* A short batch is a quiet failure — say why. */}
+          {result.warning && (
+            <div style={{ marginTop: 8, background: C.warn + "12", border: "1px solid " + C.warn + "44",
+              borderRadius: R.md, padding: "11px 14px", fontSize: 12.5, color: C.ink2, lineHeight: 1.55 }}>
+              <b style={{ color: C.warn }}>Heads up.</b> {result.warning}
+            </div>
+          )}
+        </>
       )}
     </div>
   );
