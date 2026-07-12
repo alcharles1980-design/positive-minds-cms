@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.05-08", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.05-09", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -3292,6 +3292,34 @@ at all). The settings page writes keys via \`pm_ai_set_key\` and displays status
 someone with the admin login, or an XSS in this app, cannot lift the keys. Empirically verified.
 Rotate by saving a new key over the old one. \`callFn()\` in core.jsx invokes verify_jwt edge fns with
 
+**GENERATION PARAMETERS (per provider, in pm_ai_config):** max_tokens, temperature, top_p,
+system_prompt — all editable in AI Settings, each with an (i) explaining what it does FOR THIS JOB.
+Originally max_tokens was HARDCODED at 4000, temperature was never sent at all (so you silently got
+the default 1.0 — maximally creative, the wrong end of the dial for rule-compliant structured output),
+and the game rules were stuffed into the USER turn rather than a system prompt.
+
+**CRITICAL: temperature and top_p are NULLABLE and are OMITTED from the request when unset.** This is
+not laziness — it is REQUIRED. Anthropic returns 400 for temperature on Opus 4.7+, and OpenAI rejects
+it on GPT-5 reasoning models. Sending a "harmless default" would break generation ENTIRELY on those
+models. Because null means "don't change" in the setter, there are explicit p_clear_temperature /
+p_clear_top_p flags so a value can actually be UNSET. The UI warns about this in the Advanced section.
+
+Per-provider mapping (they differ, and getting it wrong fails silently):
+| Param | Anthropic | OpenAI | Gemini |
+|---|---|---|---|
+| max tokens | max_tokens | max_completion_tokens | generationConfig.maxOutputTokens |
+| temperature | temperature | temperature | generationConfig.temperature |
+| top-p | top_p | top_p | generationConfig.topP |
+| system prompt | \`system\` field | a system MESSAGE | \`systemInstruction\` (separate field) |
+
+**Truncation is now surfaced.** A too-low max_tokens cuts the JSON off mid-array and used to appear as
+a baffling parse error. All three adapters report stop_reason/finish_reason, and the error now says
+plainly: "ran out of output tokens — raise Max tokens or generate fewer questions."
+
+**Saving params must not wipe the key.** You can never read a key back, so pm_ai_set_key accepts a
+null key meaning "keep the existing one". (A previous 3-arg overload of this function had to be
+DROPPED — it made the call ambiguous, "function is not unique".)
+
 **COST + RATE CONTROL (this was completely missing):** AI generation is the ONLY operation in this app
 that spends real money, and it originally had NO brake and NO audit trail at all - no run count, no
 token counts, no way to notice a runaway. Now: every provider call (generate / repair / test, success
@@ -3590,6 +3618,23 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Exposed the generation parameters (they were hardcoded or missing entirely), each with an (i)
+  explaining what it does.** Before: max_tokens was HARDCODED at 4000; temperature was NEVER SENT (so
+  you silently got the default 1.0 — maximally creative, which is the wrong end of the dial for
+  rule-compliant structured output and meant more broken questions); the game rules were stuffed into
+  the USER turn instead of a system prompt (models follow system prompts far more reliably); and the
+  model list was a static array that would rot. Now per-provider in pm_ai_config: max_tokens,
+  temperature, top_p, system_prompt, plus a free-text model box so a new model doesn't need a redeploy.
+  THE IMPORTANT PART: temperature and top_p are OMITTED when unset, because Anthropic returns 400 for
+  temperature on Opus 4.7+ and OpenAI rejects it on GPT-5 reasoning models — a naive "sensible default"
+  slider would have broken generation entirely on those models. The Advanced section warns about
+  exactly this. Each of the seven settings has an (i) explaining what it is, why it matters FOR THIS
+  JOB, a suggested value, and (for the two dangerous ones) a warning.
+  Also: truncation is now surfaced — a too-low max_tokens cut the JSON off mid-array and appeared as a
+  baffling parse error; all three adapters now report it and the message says to raise Max tokens.
+  Also: saving params must not wipe the key (you can never read one back), so the setter accepts a null
+  key meaning "keep the existing one" — and the old 3-arg overload had to be DROPPED because it made
+  the call ambiguous ("function is not unique"), which I hit while testing.
 - **Deep audit of the AI feature — found what we hadn't thought about.** Verified the one integration
   nobody had tested: approving an AI question DOES bump the pack's content_version and the sync
   manifest's global_version, so Firebase actually pulls it (proved live end-to-end; without that the
@@ -4265,6 +4310,13 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    written via pm_ai_set_key and read ONLY server-side by the edge function (service role). The UI
    reads pm_ai_status, which returns a masked hint and NEVER the key. Never add a select policy to
    pm_ai_config, never return api_key from an RPC, never send a key to the client "just to show it".
+4h. **NEVER send temperature/top_p unconditionally.** Anthropic returns 400 for them on Opus 4.7+;
+   OpenAI rejects them on GPT-5 reasoning models. They must be nullable and OMITTED from the request
+   body when unset. A "sensible default" here breaks generation entirely on those models. Because null
+   means "don't change" in the setter, keep the explicit clear flags so a value can actually be unset.
+4i. **A params-only save must never wipe the API key.** The key can never be read back, so the setter
+   takes a null key to mean "keep the existing one". Never add an overload of pm_ai_set_key — two
+   signatures make the call ambiguous and every save fails.
 4f. **Anything that spends money must be logged and rate-limited.** AI generation is the only
    operation in this app with a real cost. Every provider call (generate/repair/test, success AND
    failure) goes to pm_ai_usage with token counts and the actor; the edge fn checks pm_ai_rate_check
@@ -4593,6 +4645,23 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    the blank shape at every level, highlighting the levels that are ambiguous - so you can see the
    moment a fix actually clears the problem.
 
+   GENERATION PARAMETERS: expose max_tokens, temperature, top_p and system_prompt per provider
+   (store them in pm_ai_config), plus a free-text model box so a new model doesn't need a redeploy.
+   CRITICAL: temperature and top_p must be NULLABLE and OMITTED from the request body when unset -
+   Anthropic returns 400 for temperature on Opus 4.7+ and OpenAI rejects it on GPT-5 reasoning models,
+   so a "sensible default" slider BREAKS generation on those models. Since null means "don't change"
+   in the setter, add explicit clear flags so a value can actually be unset, and warn about this in
+   the UI. Per-provider mapping differs and silently fails if you get it wrong: max tokens is
+   max_tokens / max_completion_tokens / generationConfig.maxOutputTokens; the system prompt is a
+   top-level 'system' field (Anthropic) / a system MESSAGE (OpenAI) / a separate 'systemInstruction'
+   (Gemini). Put the game's rules in the SYSTEM prompt, not the user turn - models follow them more
+   reliably. Detect truncation (stop_reason/finish_reason) and say so plainly, or a too-low max_tokens
+   just looks like a baffling JSON parse error. A params-only save must NOT wipe the API key (it can
+   never be read back) - accept a null key meaning "keep the existing one", and never create a second
+   overload of the setter or the call becomes ambiguous.
+   EXPLAIN EVERY SETTING: each field gets an (i) that opens a plain-English explanation - what it is,
+   why it matters FOR THIS JOB (writing children's puzzle content), a suggested value, and a warning
+   where one is warranted. Do not write generic API documentation; write what it does HERE.
    COST + RATE CONTROL (do not skip this): generation is the only paid operation. Log EVERY provider
    call (generate/repair/test, success AND failure) to a pm_ai_usage table with provider, model, pack,
    batch, input/output tokens, questions returned, ok, error and the actor (read the email out of the
@@ -5948,10 +6017,122 @@ const PROVIDERS = [
   },
 ];
 
+// What each setting actually DOES — explained for THIS job (writing children's puzzle content),
+// not as generic API documentation. Shown behind an (i) on each field.
+const SETTING_HELP = {
+  model: {
+    title: "Model",
+    what: "Which version of the AI writes your content.",
+    why: "Bigger models follow the rules more reliably and need fewer repair rounds; smaller ones are cheaper and faster. For this job — short sentences with strict constraints — a mid-tier model is usually plenty.",
+    tip: "If you're seeing a lot of flagged questions, try a stronger model before fiddling with anything else.",
+  },
+  max_tokens: {
+    title: "Max tokens",
+    what: "A hard ceiling on how much the AI may write in one reply.",
+    why: "This is a safety limit, not a target — it doesn't make the AI write more. But if it's too LOW the reply gets cut off mid-sentence, the JSON is broken, and the whole batch fails.",
+    tip: "Roughly 150 tokens per question. 20 questions ≈ 3,000. Leave headroom. If a batch fails with 'ran out of output tokens', raise this or ask for fewer questions.",
+  },
+  temperature: {
+    title: "Temperature",
+    what: "How adventurous the AI is. 0 = careful and repetitive. 1 = creative and unpredictable.",
+    why: "Your content has strict mechanical rules (different-length words, exactly one blank). Lower temperatures follow rules more faithfully. Higher ones write more varied sentences but break the rules more often — which means more flagged questions to fix.",
+    tip: "0.3–0.6 is a good range here: varied enough to be interesting, disciplined enough to stay valid. Leave it BLANK to use the model's default.",
+    warn: "Some newer models (Claude Opus 4.7+, OpenAI's reasoning models) REJECT this parameter outright and will error. If generation suddenly fails after you set it, clear it.",
+  },
+  top_p: {
+    title: "Top-p",
+    what: "An alternative way to control randomness, by limiting the pool of words the AI chooses from.",
+    why: "It does a similar job to temperature. Adjust one or the other — not both.",
+    tip: "Most people should leave this blank and just use temperature.",
+    warn: "Like temperature, some newer models reject this outright.",
+  },
+  system_prompt: {
+    title: "System prompt",
+    what: "The standing instructions the AI is given before it sees your request — its brief.",
+    why: "This is where the game's rules live: both words must be positive, they must be different lengths, output only JSON. Models follow system instructions far more reliably than the same words buried in a request.",
+    tip: "Leave blank to use the built-in brief (recommended). Only edit if you want to permanently change how the AI approaches every batch — e.g. a house style, or a reading age.",
+  },
+  batch_size: {
+    title: "Questions per batch",
+    what: "How many questions to ask for in one go.",
+    why: "Bigger batches are more efficient, but a large batch is more likely to hit the token ceiling and more likely to repeat itself.",
+    tip: "10–15 is a comfortable size. If batches keep failing, come down.",
+  },
+  auto_repair: {
+    title: "Auto-fix flagged questions",
+    what: "When a question fails the automatic checks, send it straight back to the AI with the exact problem and ask it to fix it.",
+    why: "It catches most mechanical mistakes (same-length words, a missing blank) without you doing anything — you just see fewer flagged rows to deal with.",
+    tip: "Costs one extra request per batch. Worth it. The human review gate is unaffected — you still approve everything either way.",
+  },
+};
+
+// An (i) that opens a plain-English explanation of a setting.
+function InfoDot({ setting }) {
+  const [open, setOpen] = useState(false);
+  const h = SETTING_HELP[setting];
+  if (!h) return null;
+  return (
+    <>
+      <button onClick={() => setOpen(true)} title={`What is ${h.title}?`} aria-label={`What is ${h.title}?`}
+        style={{ width: 16, height: 16, borderRadius: "50%", border: "1px solid " + C.line, background: C.bg,
+          color: C.faint, fontSize: 10.5, fontWeight: 800, cursor: "pointer", lineHeight: 1, padding: 0,
+          display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+          fontFamily: "inherit", marginLeft: 5, verticalAlign: "middle" }}>i</button>
+      <Modal open={open} onClose={() => setOpen(false)} width={460}>
+        <ModalHead title={h.title} subtitle={h.what} />
+        <div style={{ padding: S.xl, display: "grid", gap: S.md }}>
+          <div>
+            <div style={{ fontSize: 10.5, fontWeight: 800, color: C.faint, letterSpacing: .3, textTransform: "uppercase", marginBottom: 5 }}>Why it matters here</div>
+            <div style={{ fontSize: 13.5, color: C.ink2, lineHeight: 1.6 }}>{h.why}</div>
+          </div>
+          <div style={{ background: C.brandSoft, borderRadius: R.md, padding: "11px 14px" }}>
+            <div style={{ fontSize: 10.5, fontWeight: 800, color: C.brandInk, letterSpacing: .3, textTransform: "uppercase", marginBottom: 5 }}>Suggested</div>
+            <div style={{ fontSize: 13.5, color: C.brandInk, lineHeight: 1.6 }}>{h.tip}</div>
+          </div>
+          {h.warn && (
+            <div style={{ background: C.danger + "10", border: "1px solid " + C.danger + "33", borderRadius: R.md, padding: "11px 14px" }}>
+              <div style={{ fontSize: 10.5, fontWeight: 800, color: C.danger, letterSpacing: .3, textTransform: "uppercase", marginBottom: 5 }}>Careful</div>
+              <div style={{ fontSize: 13.5, color: C.danger, lineHeight: 1.6 }}>{h.warn}</div>
+            </div>
+          )}
+        </div>
+        <ModalFoot><Btn onClick={() => setOpen(false)}>Got it</Btn></ModalFoot>
+      </Modal>
+    </>
+  );
+}
+
+// A Field with an (i) next to its label.
+function HelpField({ setting, label, hint, children, style }) {
+  const h = SETTING_HELP[setting];
+  return (
+    <div style={style}>
+      <div style={{ display: "flex", alignItems: "center", marginBottom: 5 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: C.ink2 }}>{label || h?.title}</span>
+        <InfoDot setting={setting} />
+      </div>
+      {children}
+      {hint && <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4, lineHeight: 1.4 }}>{hint}</div>}
+    </div>
+  );
+}
+
 const db_ai = {
   status: () => rpc("pm_ai_status"),
   usage: () => rpc("pm_ai_usage_summary"),
-  setKey: (provider, key, model) => rpc("pm_ai_set_key", { p_provider: provider, p_key: key, p_model: model || null }),
+  // Params can be saved WITHOUT a key (you can never read a key back, so a params-only save must
+  // not wipe it). Pass p_key = null to keep the existing one.
+  save: (provider, o = {}) => rpc("pm_ai_set_key", {
+    p_provider: provider,
+    p_key: o.key || null,
+    p_model: o.model || null,
+    p_max_tokens: o.max_tokens ?? null,
+    p_temperature: o.temperature ?? null,
+    p_top_p: o.top_p ?? null,
+    p_system_prompt: o.system_prompt ?? null,
+    p_clear_temperature: !!o.clear_temperature,
+    p_clear_top_p: !!o.clear_top_p,
+  }),
   clearKey: (provider) => rpc("pm_ai_clear_key", { p_provider: provider }),
   settings: () => rest("pm_ai_settings?id=eq.1&limit=1").then(r => (r.data || [])[0] || null),
   saveSettings: (patch) => rest("pm_ai_settings?id=eq.1", { method: "PATCH", body: patch }).then(r => r.data?.[0]),
@@ -6056,20 +6237,16 @@ function AISettingsView({ packs, levels }) {
                         </div>
                       )}
 
-                      {/* Model */}
+                      {/* What it's actually configured to do */}
                       {configured && (
-                        <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                          <span style={{ fontSize: 12, color: C.sub, fontWeight: 600 }}>Model</span>
-                          <Select value={st.model || p.defaultModel}
-                            onChange={async (e) => {
-                              try { await db_ai.setKey(p.id, "__KEEP__", e.target.value); }
-                              catch { /* handled below */ }
-                            }}
-                            style={{ maxWidth: 220, fontSize: 13, padding: "5px 9px" }}
-                            disabled>
-                            <option>{st.model || p.defaultModel}</option>
-                          </Select>
-                          <span style={{ fontSize: 11.5, color: C.faint }}>set when you save the key</span>
+                        <div style={{ marginTop: 9, display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center" }}>
+                          <Pill tone="muted">{st.model || p.defaultModel}</Pill>
+                          <Pill tone="muted">{(st.max_tokens ?? 4000).toLocaleString()} max tokens</Pill>
+                          {st.temperature != null
+                            ? <Pill tone="muted">temp {Number(st.temperature).toFixed(2)}</Pill>
+                            : <span style={{ fontSize: 11.5, color: C.faint }}>default temperature</span>}
+                          {st.top_p != null && <Pill tone="muted">top-p {Number(st.top_p).toFixed(2)}</Pill>}
+                          {st.system_prompt && <Pill tone="muted">custom brief</Pill>}
                         </div>
                       )}
 
@@ -6085,7 +6262,7 @@ function AISettingsView({ packs, levels }) {
                     <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 130 }}>
                       {!isActive && configured && <Btn size="sm" variant="soft" onClick={() => setActive(p.id)}>Use this one</Btn>}
                       <Btn size="sm" variant={configured ? "ghost" : "primary"} onClick={() => setEditKey(p.id)}>
-                        {configured ? "Replace key" : "Add key"}
+                        {configured ? "Settings" : "Add key"}
                       </Btn>
                       {configured && (
                         <Btn size="sm" variant="ghost" onClick={() => testConn(p)} disabled={testing === p.id}>
@@ -6108,18 +6285,22 @@ function AISettingsView({ packs, levels }) {
           <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg, marginBottom: S.xl }}>
             <div style={{ fontSize: 15, fontWeight: 800, color: C.ink, marginBottom: S.md }}>Generation defaults</div>
             <div className="pm-form-2">
-              <Field label="Questions per batch" hint="1–30">
+              <HelpField setting="batch_size" hint="1–30. Around 10–15 is comfortable.">
                 <Input type="number" min={1} max={30} value={settings.batch_size ?? 10}
                   onChange={(e) => saveSetting({ batch_size: Math.min(30, Math.max(1, parseInt(e.target.value) || 10)) })} />
-              </Field>
-              <Field label=" " hint="Send failures back to the AI once with the exact problem">
-                <label style={{ display: "flex", alignItems: "center", gap: 9, cursor: "pointer", fontSize: 13.5, color: C.ink2, paddingTop: 8 }}>
+              </HelpField>
+              <div>
+                <div style={{ display: "flex", alignItems: "center", marginBottom: 5 }}>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: C.ink2 }}>Auto-fix flagged questions</span>
+                  <InfoDot setting="auto_repair" />
+                </div>
+                <label style={{ display: "flex", alignItems: "center", gap: 9, cursor: "pointer", fontSize: 13.5, color: C.ink2, paddingTop: 6 }}>
                   <input type="checkbox" checked={settings.auto_repair !== false}
                     onChange={(e) => saveSetting({ auto_repair: e.target.checked })}
                     style={{ width: 16, height: 16 }} />
-                  Auto-fix flagged questions
+                  Send failures back to the AI once
                 </label>
-              </Field>
+              </div>
             </div>
           </div>
 
@@ -6207,18 +6388,47 @@ function UsagePanel() {
   );
 }
 
-// Write-only key entry. Nothing is ever read back — you can only overwrite.
+// Provider settings: the key (write-only — never read back) plus every generation parameter.
+// Each field has an (i) explaining what it does FOR THIS JOB.
 function KeyEditor({ provider, existing, onClose, onSaved }) {
   const [key, setKey] = useState("");
   const [model, setModel] = useState(existing?.model || provider.defaultModel);
+  const [customModel, setCustomModel] = useState(
+    existing?.model && !provider.models.includes(existing.model) ? existing.model : ""
+  );
+  const [maxTokens, setMaxTokens] = useState(existing?.max_tokens ?? "");
+  const [temperature, setTemperature] = useState(existing?.temperature ?? "");
+  const [topP, setTopP] = useState(existing?.top_p ?? "");
+  const [systemPrompt, setSystemPrompt] = useState(existing?.system_prompt || "");
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  const isNew = !existing?.configured;
+  const effectiveModel = customModel.trim() || model;
+
   const submit = async () => {
-    if (!key.trim() || key.trim().length < 8) { notify("That key looks too short", "error"); return; }
+    if (isNew && (!key.trim() || key.trim().length < 8)) { notify("That key looks too short", "error"); return; }
+    const mt = maxTokens === "" ? null : parseInt(maxTokens);
+    const tp = temperature === "" ? null : parseFloat(temperature);
+    const pp = topP === "" ? null : parseFloat(topP);
+    if (mt != null && (mt < 256 || mt > 64000)) { notify("Max tokens must be between 256 and 64,000", "error"); return; }
+    if (tp != null && (tp < 0 || tp > 1)) { notify("Temperature must be between 0 and 1", "error"); return; }
+    if (pp != null && (pp <= 0 || pp > 1)) { notify("Top-p must be between 0 and 1", "error"); return; }
+
     setBusy(true);
     try {
-      await db_ai.setKey(provider.id, key.trim(), model);
-      setKey(""); // never keep it in memory
+      await db_ai.save(provider.id, {
+        key: key.trim() || null,          // blank => keep the existing key
+        model: effectiveModel,
+        max_tokens: mt,
+        temperature: tp,
+        top_p: pp,
+        system_prompt: systemPrompt.trim() || null,
+        // null means "don't change", so an explicit clear is needed to actually UNSET these.
+        clear_temperature: temperature === "" && existing?.temperature != null,
+        clear_top_p: topP === "" && existing?.top_p != null,
+      });
+      setKey("");                          // never keep it in memory
       onSaved();
     } catch (e) {
       setBusy(false);
@@ -6226,32 +6436,85 @@ function KeyEditor({ provider, existing, onClose, onSaved }) {
     }
   };
 
+  // Warn when the token ceiling looks too low for the batch size the user is likely to ask for.
+  const mtNum = maxTokens === "" ? null : parseInt(maxTokens);
+  const tokenWarning = mtNum != null && mtNum < 2500
+    ? "That's tight. Around 150 tokens per question — this may cut off larger batches."
+    : null;
+
   return (
     <>
-      <ModalHead title={`${existing?.configured ? "Replace" : "Add"} ${provider.name} key`}
-        subtitle={`Get one from ${provider.where}`} />
-      <div style={{ padding: S.xl, display: "grid", gap: S.md }}>
+      <ModalHead title={`${isNew ? "Set up" : "Settings for"} ${provider.name}`}
+        subtitle={isNew ? `Get a key from ${provider.where}` : "Change the key, model, or how it writes"} />
+      <div style={{ padding: S.xl, display: "grid", gap: S.md, maxHeight: "64vh", overflowY: "auto" }}>
+
         {existing?.configured && (
-          <div style={{ background: C.bg, borderRadius: R.md, padding: "10px 13px", fontSize: 12.5, color: C.sub }}>
-            A key is already saved <span style={{ fontFamily: "ui-monospace, monospace" }}>{existing.hint}</span>. Saving a new one replaces it. The old key can't be shown.
+          <div style={{ background: C.bg, borderRadius: R.md, padding: "10px 13px", fontSize: 12.5, color: C.sub, lineHeight: 1.5 }}>
+            A key is saved <span style={{ fontFamily: "ui-monospace, monospace" }}>{existing.hint}</span>. It can never be shown again — leave the box blank to keep it, or paste a new one to replace it.
           </div>
         )}
-        <Field label="API key" hint={provider.keyHint}>
-          <Input type="password" value={key} onChange={(e) => setKey(e.target.value)} autoFocus
-            placeholder="Paste the key here" autoComplete="off" spellCheck={false} />
+
+        <Field label={existing?.configured ? "Replace API key (optional)" : "API key"} hint={provider.keyHint}>
+          <Input type="password" value={key} onChange={(e) => setKey(e.target.value)}
+            autoFocus={isNew} placeholder={existing?.configured ? "Leave blank to keep the current key" : "Paste the key here"}
+            autoComplete="off" spellCheck={false} />
         </Field>
-        <Field label="Model">
-          <Select value={model} onChange={(e) => setModel(e.target.value)}>
+
+        <HelpField setting="model" hint={customModel.trim() ? "Using your custom model name" : "Or type a model name below if it's not listed"}>
+          <Select value={model} onChange={(e) => { setModel(e.target.value); setCustomModel(""); }} disabled={!!customModel.trim()}>
             {provider.models.map(m => <option key={m} value={m}>{m}</option>)}
           </Select>
-        </Field>
-        <div style={{ fontSize: 12, color: C.faint, lineHeight: 1.5 }}>
-          Once saved, this key is stored on the server and shared by everyone who logs in. It can't be read back from here — only replaced.
-        </div>
+          <Input value={customModel} onChange={(e) => setCustomModel(e.target.value)}
+            placeholder="Custom model name (optional)" spellCheck={false}
+            style={{ marginTop: 6, fontSize: 13 }} />
+        </HelpField>
+
+        <HelpField setting="max_tokens" hint={tokenWarning || `Blank = default (${4000}). About 150 tokens per question.`}>
+          <Input type="number" min={256} max={64000} step={256} value={maxTokens}
+            onChange={(e) => setMaxTokens(e.target.value)} placeholder="4000 (default)" />
+        </HelpField>
+        {tokenWarning && (
+          <div style={{ fontSize: 12.5, color: C.warn, marginTop: -8, lineHeight: 1.5 }}>⚠ {tokenWarning}</div>
+        )}
+
+        {/* Advanced — collapsed by default. Most people never need these, and two of them can
+            actively BREAK generation on newer models. */}
+        <button onClick={() => setShowAdvanced(v => !v)}
+          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit",
+            fontSize: 12.5, fontWeight: 700, color: C.brand, textAlign: "left" }}>
+          {showAdvanced ? "− Hide" : "+ Show"} advanced settings
+        </button>
+
+        {showAdvanced && (
+          <div style={{ display: "grid", gap: S.md, borderLeft: "2px solid " + C.line, paddingLeft: S.md }}>
+            <div style={{ background: C.danger + "0D", border: "1px solid " + C.danger + "33", borderRadius: R.md,
+              padding: "10px 13px", fontSize: 12.5, color: C.danger, lineHeight: 1.55 }}>
+              <b>Read this first.</b> Some newer models (Claude Opus 4.7+, OpenAI's reasoning models) <b>reject</b> Temperature and Top-p outright and every request will fail with an error. If generation stops working right after you set one, clear it. Blank is safe.
+            </div>
+
+            <HelpField setting="temperature" hint="Blank = the model's own default. 0.3–0.6 works well here.">
+              <Input type="number" min={0} max={1} step={0.05} value={temperature}
+                onChange={(e) => setTemperature(e.target.value)} placeholder="Leave blank (recommended)" />
+            </HelpField>
+
+            <HelpField setting="top_p" hint="Blank = unused. Adjust this OR temperature, not both.">
+              <Input type="number" min={0.01} max={1} step={0.05} value={topP}
+                onChange={(e) => setTopP(e.target.value)} placeholder="Leave blank (recommended)" />
+            </HelpField>
+
+            <HelpField setting="system_prompt" hint="Blank = the built-in brief (recommended). This is the AI's standing instructions.">
+              <Textarea rows={5} value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)}
+                placeholder={"Leave blank to use the built-in brief, which already covers:\n• both words must be positive\n• the two words must be different lengths\n• output only JSON"}
+                style={{ fontSize: 12.5, fontFamily: "ui-monospace, Menlo, monospace" }} />
+            </HelpField>
+          </div>
+        )}
       </div>
       <ModalFoot>
         <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
-        <Btn onClick={submit} disabled={busy || !key.trim()}>{busy ? "Saving…" : "Save key"}</Btn>
+        <Btn onClick={submit} disabled={busy || (isNew && !key.trim())}>
+          {busy ? "Saving…" : isNew ? "Save key" : "Save settings"}
+        </Btn>
       </ModalFoot>
     </>
   );

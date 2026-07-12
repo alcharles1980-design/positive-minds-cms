@@ -159,51 +159,104 @@ const DEFAULT_MODELS: Record<string, string> = {
   openai: 'gpt-4o',
   gemini: 'gemini-2.0-flash',
 };
+const DEFAULT_MAX_TOKENS = 4000;
 
-async function callAnthropic(key: string, model: string, prompt: string, maxTokens: number) {
+// The default system prompt. Instructions belong in `system`, not the user turn — models follow
+// them more reliably. Editable per provider in AI Settings.
+const DEFAULT_SYSTEM = `You are an expert author of therapeutic content for children aged 5-12.
+You write for a CBMT (Cognitive Bias Modification Therapy) SPELLING game.
+
+Non-negotiable rules:
+- BOTH answer words are ALWAYS positive. Never show a child a negative word about themselves.
+- The two words MUST be different lengths. At high levels the whole word is hidden, so length is
+  the only clue — equal-length options give the puzzle TWO correct answers and break it.
+- Sentences are warm, simple, first-person and self-affirming.
+- Output ONLY the JSON array that is asked for. No preamble, no markdown, no explanation.`;
+
+// Generation parameters. temperature/top_p are OPTIONAL and are OMITTED when unset — this is not
+// laziness, it is REQUIRED: Anthropic returns 400 for temperature on Opus 4.7+, and OpenAI rejects
+// it on GPT-5 reasoning models. Sending a "harmless default" would break generation entirely on
+// those models.
+type GenParams = {
+  maxTokens?: number | null;
+  temperature?: number | null;
+  topP?: number | null;
+  system?: string | null;
+};
+
+async function callAnthropic(key: string, model: string, prompt: string, p: GenParams) {
+  const body: any = {
+    model,
+    max_tokens: p.maxTokens ?? DEFAULT_MAX_TOKENS,
+    system: p.system || DEFAULT_SYSTEM,
+    messages: [{ role: 'user', content: prompt }],
+  };
+  if (p.temperature != null) body.temperature = p.temperature;
+  if (p.topP != null) body.top_p = p.topP;
+
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
+    body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`Anthropic ${r.status}: ${(await r.text()).slice(0, 300)}`);
   const d = await r.json();
   const text = (d.content || []).filter((c: any) => c.type === 'text').map((c: any) => c.text).join('');
-  return { text, usage: { input: d.usage?.input_tokens ?? null, output: d.usage?.output_tokens ?? null } };
+  return { text, usage: { input: d.usage?.input_tokens ?? null, output: d.usage?.output_tokens ?? null }, truncated: d.stop_reason === 'max_tokens' };
 }
 
-async function callOpenAI(key: string, model: string, prompt: string, maxTokens: number) {
+async function callOpenAI(key: string, model: string, prompt: string, p: GenParams) {
+  const body: any = {
+    model,
+    max_completion_tokens: p.maxTokens ?? DEFAULT_MAX_TOKENS,
+    messages: [
+      { role: 'system', content: p.system || DEFAULT_SYSTEM },
+      { role: 'user', content: prompt },
+    ],
+  };
+  if (p.temperature != null) body.temperature = p.temperature;
+  if (p.topP != null) body.top_p = p.topP;
+
   const r = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, max_completion_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
+    body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`OpenAI ${r.status}: ${(await r.text()).slice(0, 300)}`);
   const d = await r.json();
   const text = d.choices?.[0]?.message?.content || '';
-  return { text, usage: { input: d.usage?.prompt_tokens ?? null, output: d.usage?.completion_tokens ?? null } };
+  return { text, usage: { input: d.usage?.prompt_tokens ?? null, output: d.usage?.completion_tokens ?? null }, truncated: d.choices?.[0]?.finish_reason === 'length' };
 }
 
-async function callGemini(key: string, model: string, prompt: string, maxTokens: number) {
+async function callGemini(key: string, model: string, prompt: string, p: GenParams) {
+  // Gemini nests generation params under generationConfig, and takes the system prompt as a
+  // SEPARATE systemInstruction field (not a message).
+  const gen: any = { maxOutputTokens: p.maxTokens ?? DEFAULT_MAX_TOKENS };
+  if (p.temperature != null) gen.temperature = p.temperature;
+  if (p.topP != null) gen.topP = p.topP;
+
+  const body: any = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: gen,
+    systemInstruction: { parts: [{ text: p.system || DEFAULT_SYSTEM }] },
+  };
+
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
   const r = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { maxOutputTokens: maxTokens },
-    }),
+    body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error(`Gemini ${r.status}: ${(await r.text()).slice(0, 300)}`);
   const d = await r.json();
-  const text = (d.candidates?.[0]?.content?.parts || []).map((p: any) => p.text || '').join('');
-  return { text, usage: { input: d.usageMetadata?.promptTokenCount ?? null, output: d.usageMetadata?.candidatesTokenCount ?? null } };
+  const text = (d.candidates?.[0]?.content?.parts || []).map((pt: any) => pt.text || '').join('');
+  return { text, usage: { input: d.usageMetadata?.promptTokenCount ?? null, output: d.usageMetadata?.candidatesTokenCount ?? null }, truncated: d.candidates?.[0]?.finishReason === 'MAX_TOKENS' };
 }
 
-async function callProvider(provider: string, key: string, model: string, prompt: string, maxTokens = 4000) {
-  if (provider === 'anthropic') return callAnthropic(key, model, prompt, maxTokens);
-  if (provider === 'openai') return callOpenAI(key, model, prompt, maxTokens);
-  if (provider === 'gemini') return callGemini(key, model, prompt, maxTokens);
+async function callProvider(provider: string, key: string, model: string, prompt: string, p: GenParams = {}) {
+  if (provider === 'anthropic') return callAnthropic(key, model, prompt, p);
+  if (provider === 'openai') return callOpenAI(key, model, prompt, p);
+  if (provider === 'gemini') return callGemini(key, model, prompt, p);
   throw new Error(`Unknown provider: ${provider}`);
 }
 
@@ -374,10 +427,21 @@ Deno.serve(async (req) => {
     }
     const model = cfg.model || DEFAULT_MODELS[provider];
 
+    // Generation parameters from the stored config. Anything null is OMITTED from the request —
+    // required, because temperature is rejected outright by Anthropic Opus 4.7+ and OpenAI GPT-5
+    // reasoning models.
+    const genParams = {
+      maxTokens: cfg.max_tokens ?? null,
+      temperature: cfg.temperature != null ? Number(cfg.temperature) : null,
+      topP: cfg.top_p != null ? Number(cfg.top_p) : null,
+      system: cfg.system_prompt ?? null,
+    };
+
     // ---- Test-connection mode: smallest possible round-trip, nothing written ----
     if (test_only) {
       try {
-        const t = await callProvider(provider, cfg.api_key, model, 'Reply with exactly: OK', 32);
+        const t = await callProvider(provider, cfg.api_key, model, 'Reply with exactly: OK',
+          { maxTokens: 32, temperature: genParams.temperature, topP: genParams.topP, system: 'Reply exactly as asked.' });
         await logUsage(db, { provider, model, kind: 'test', usage: t.usage, ok: true, actor });
         return json({ ok: true, provider, model, reply: (t.text || '').trim().slice(0, 40) });
       } catch (e) {
@@ -430,9 +494,11 @@ Deno.serve(async (req) => {
 
     let raw: string;
     let genUsage: any = { input: null, output: null };
+    let truncated = false;
     try {
-      const res = await callProvider(provider, cfg.api_key, model, prompt, 4000);
+      const res = await callProvider(provider, cfg.api_key, model, prompt, genParams);
       raw = res.text; genUsage = res.usage;
+      truncated = !!res.truncated;
     } catch (e) {
       await logUsage(db, { provider, model, pack_id, kind: 'generate', ok: false, error: String(e).slice(0, 300), actor });
       return json({ error: 'provider_error', provider, message: String(e).slice(0, 400) }, 502);
@@ -440,7 +506,18 @@ Deno.serve(async (req) => {
 
     let items: any[];
     try { items = parseQuestions(raw); }
-    catch (e) { return json({ error: 'parse_error', message: String(e), raw: raw.slice(0, 600) }, 502); }
+    catch (e) {
+      await logUsage(db, { provider, model, pack_id, kind: 'generate', usage: genUsage, ok: false, error: truncated ? 'truncated' : 'parse_error', actor });
+      // A too-low max_tokens truncates the JSON mid-array and surfaces as a baffling parse error.
+      // Say so plainly instead of leaving the user to guess.
+      return json({
+        error: truncated ? 'truncated' : 'parse_error',
+        message: truncated
+          ? `The model ran out of output tokens (max_tokens = ${genParams.maxTokens ?? DEFAULT_MAX_TOKENS}) and its JSON was cut off mid-way. Raise "Max tokens" in AI Settings, or generate fewer questions per batch.`
+          : String(e),
+        raw: raw.slice(0, 600),
+      }, 502);
+    }
 
     // ---- Validate every item against the REAL engine at EVERY level ----
     // Validate a list cumulatively: each item is checked against `existing` PLUS everything already
@@ -463,7 +540,7 @@ Deno.serve(async (req) => {
     if (autoRepair && bad.length) {
       try {
         const rprompt = buildRepairPrompt(bad, levels || [], tLevel);
-        const rres = await callProvider(provider, cfg.api_key, model, rprompt, 4000);
+        const rres = await callProvider(provider, cfg.api_key, model, rprompt, genParams);
         await logUsage(db, { provider, model, pack_id, kind: 'repair', usage: rres.usage, ok: true, actor });
         const fixed = parseQuestions(rres.text);
         // Re-validate the fixes AGAINST the items we're keeping — a "fix" must not collide with a
