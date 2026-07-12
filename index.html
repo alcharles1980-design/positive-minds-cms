@@ -73,7 +73,7 @@ function _extends(){return _extends=Object.assign?Object.assign.bind():function(
 //   - App shell (auth gate, routing via history, command surface)
 // ============================================================
 // ---------- config ----------
-const CFG={build:"2026.07.05-10",// bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+const CFG={build:"2026.07.05-11",// bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
 url:"https://tytrmjjucqijzcrbwjfm.supabase.co",key:"sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",adminEmail:"admin@positiveminds.app",sessionStore:"pm_admin_session_v2",sessionMaxAgeMs:7*24*60*60*1000,// keep users logged in for 7 days
 pageSize:40};// ============================================================
 // Session + Auth
@@ -175,7 +175,29 @@ const previewAtLevel=(q,levels,packLevel)=>{const lvlNum=q?.level??packLevel??1;
 if(!def)def={level:lvlNum,hidden_mode:"letters",letters_hidden_default:2,letter_position:"end",letter_grouping:"grouped"};const v=buildLevelVariants(q,[def],{})[0];return v?{sentence:v.sentence,opts:v.opts,blank:v.blank,letters:v.letters}:{sentence:q?.template||"",opts:""};};// ============================================================
 // Hooks
 // ============================================================
-const useBreakpoint=()=>{const[w,setW]=useState(typeof window!=="undefined"?window.innerWidth:1200);useEffect(()=>{let raf;const on=()=>{cancelAnimationFrame(raf);raf=requestAnimationFrame(()=>setW(window.innerWidth));};window.addEventListener("resize",on);window.addEventListener("orientationchange",on);return()=>{window.removeEventListener("resize",on);window.removeEventListener("orientationchange",on);cancelAnimationFrame(raf);};},[]);return{w,isPhone:w<640,isTablet:w>=640&&w<1024,isDesktop:w>=1024};};// Toast system via a tiny event bus
+// Device class, NOT raw width.
+//
+// THE BUG THIS FIXES: the old version keyed purely off window.innerWidth (phone < 640). Rotate any
+// phone to landscape and its width becomes 667-932px — so the app decided it was a TABLET, swapped
+// the bottom nav for an icon side-rail, dropped the phone CSS (two-column forms came back, modals
+// stopped being bottom sheets, and iOS started auto-zooming on every input focus). Rotating back
+// flipped it all again. That is the "flipping between layouts with menus appearing from the side".
+//
+// A phone is a phone in ANY orientation. Two signals make that stable:
+//   • the SHORT side of the screen — a phone's short side is always small, rotated or not
+//   • pointer:coarse — a touch device rather than a mouse
+// Width alone is not a device class; it never was.
+const useBreakpoint=()=>{const read=()=>{if(typeof window==="undefined")return{w:1200,h:800,coarse:false};return{w:window.innerWidth,h:window.innerHeight,// Touch device (no fine pointer). Guard matchMedia — older/embedded webviews may lack it.
+coarse:typeof window.matchMedia==="function"?window.matchMedia("(pointer: coarse)").matches:false};};const[s,setS]=useState(read);useEffect(()=>{let raf;const on=()=>{cancelAnimationFrame(raf);raf=requestAnimationFrame(()=>setS(read()));};window.addEventListener("resize",on);window.addEventListener("orientationchange",on);return()=>{window.removeEventListener("resize",on);window.removeEventListener("orientationchange",on);cancelAnimationFrame(raf);};},[]);const{w,h,coarse}=s;const shortSide=Math.min(w,h);// THE PRINCIPLE: pick a layout the device can support in EITHER orientation, then keep it.
+// Rotating a device should change how much you can see — never rearrange the navigation.
+// So the decision is made on the SHORT side, which is invariant under rotation.
+//
+// For a non-touch window (a desktop browser you can freely resize) there is no "device" to speak
+// of — the live width IS the constraint, so we key off that instead.
+const basis=coarse?shortSide:w;const isPhone=basis<640;// any phone, either way up
+const isTablet=!isPhone&&basis<1024;// tablet, or a narrow desktop window
+const isDesktop=!isPhone&&!isTablet;// iPad Pro-class and up: room for the full sidebar
+return{w,h,shortSide,coarse,isPhone,isTablet,isDesktop,landscape:w>h};};// Toast system via a tiny event bus
 const toastBus=(()=>{let listeners=[];return{emit:t=>listeners.forEach(l=>l(t)),sub:fn=>{listeners.push(fn);return()=>{listeners=listeners.filter(l=>l!==fn);};}};})();const notify=(message,opts={})=>toastBus.emit({id:uid(),message,kind:opts.kind||"success",action:opts.action,duration:opts.duration??3200});const useHotkey=(key,handler,active=true)=>{useEffect(()=>{if(!active)return;const on=e=>{const k=e.key.toLowerCase();const combo=(e.metaKey||e.ctrlKey?"mod+":"")+k;if(combo===key||k===key){handler(e);}};window.addEventListener("keydown",on);return()=>window.removeEventListener("keydown",on);},[key,handler,active]);};// Focus trap + Escape for modals/sheets
 const useFocusTrap=(ref,active,onClose)=>{useEffect(()=>{if(!active||!ref.current)return;const node=ref.current;const sel='a[href],button:not([disabled]),textarea,input,select,[tabindex]:not([tabindex="-1"])';const first=node.querySelectorAll(sel)[0];first&&first.focus();const onKey=e=>{if(e.key==="Escape"){e.stopPropagation();onClose&&onClose();return;}if(e.key!=="Tab")return;const items=[...node.querySelectorAll(sel)].filter(el=>el.offsetParent!==null);if(!items.length)return;const f=items[0],l=items[items.length-1];if(e.shiftKey&&document.activeElement===f){e.preventDefault();l.focus();}else if(!e.shiftKey&&document.activeElement===l){e.preventDefault();f.focus();}};node.addEventListener("keydown",onKey);return()=>node.removeEventListener("keydown",onKey);},[active,ref,onClose]);};// generic async runner with loading/error
 const useAsync=(fn,deps=[])=>{const[state,setState]=useState({loading:true,error:null,data:null});const run=useCallback(async()=>{setState(s=>({...s,loading:true,error:null}));try{const data=await fn();setState({loading:false,error:null,data});return data;}catch(e){setState({loading:false,error:e.message,data:null});}},deps);// eslint-disable-line
@@ -523,7 +545,14 @@ config → data layer → design tokens → hooks → primitives → feature vie
   their backgrounds). Inputs use the panel token (never hardcoded white — that broke dark
   mode), 1.5px borders, and an explicit ::placeholder color (the 'sub' token) so search
   fields stay legible while typing.
-- **Hooks:** useBreakpoint (phone<640/tablet 640–1024/desktop>1024), useAsync,
+- **Hooks:** useBreakpoint — **device class, NOT raw width**. It decides on the SHORT side of the
+  screen for touch devices (invariant under rotation) and on live width for a resizable desktop
+  window: \`basis = coarse ? min(w,h) : w\`, then phone <640 / tablet <1024 / desktop. THE BUG THIS
+  FIXED: the old version keyed purely off innerWidth (phone<640), so rotating any phone to landscape
+  (667–932px) made the app think it was a TABLET — the bottom nav vanished, an icon side-rail
+  appeared, two-column forms came back, modals stopped being bottom sheets, and iOS resumed
+  auto-zooming on input focus. Rotating back flipped it all again. A phone is a phone in ANY
+  orientation. Also: useAsync,
   useHotkey, useFocusTrap, useDebounced, useTheme; toast bus (notify), confirm bus.
 
 ## 5. Data model (Supabase, all with RLS)
@@ -1060,6 +1089,29 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Fixed the mobile layout flipping between different navigations (reported: "flipping in different
+  layouts with different menus from the side").** ROOT CAUSE: useBreakpoint keyed purely off
+  window.innerWidth (phone < 640). Rotate ANY phone to landscape and its width becomes 667–932px, so
+  the app decided it was a TABLET: the bottom nav disappeared, an icon-only side rail appeared, and —
+  because the CSS had its OWN parallel breakpoints (@media max-width:639px) — the phone rules were
+  lost too, so two-column forms came back, modals stopped being bottom sheets, and iOS resumed
+  AUTO-ZOOMING on every input focus. Rotating back flipped everything again.
+  THE FIX (three parts):
+  (1) useBreakpoint now decides on DEVICE CLASS, not raw width: for a touch device it keys off the
+  SHORT side of the screen (invariant under rotation), for a resizable desktop window off live width.
+  A phone stays a phone in any orientation; an iPad stays a tablet in any orientation. Verified across
+  15 real devices: rotating NEVER rearranges the navigation now.
+  (2) Killed the two-parallel-breakpoint-systems problem. The JS now stamps a device class on <html>
+  (pm-phone / pm-tablet / pm-desktop / pm-coarse / pm-landscape) and the CSS keys off THAT, so the two
+  can never drift apart again. (The old width media queries remain only as a pre-mount fallback.)
+  (3) Added the mobile foundations that were missing and whose absence makes a page feel broken rather
+  than merely ugly: a global overflow-x guard (one stubborn element shifts the whole page), safe-area
+  padding for left/right (viewport-fit=cover was letting landscape content slide UNDER the notch),
+  overflow-wrap for long slugs/model names, momentum scrolling + overscroll containment in modals,
+  and tap-highlight/touch-action fixes. Coarse-pointer devices get 40px minimum hit targets and 16px
+  inputs regardless of screen size.
+  VERIFIED: all 12 pages render on all 4 device classes (48 combinations, zero failures), and the full
+  App renders correctly at every real device size with the expected layout.
 - **Review of the AI-parameters work — three real bugs found and fixed.**
   (1) **Clearing the system prompt did nothing.** Emptying the textarea sent null, and null means
   "don't change" in the setter — so a custom brief could NEVER be removed, and the UI actively lied to
@@ -1767,6 +1819,12 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    written via pm_ai_set_key and read ONLY server-side by the edge function (service role). The UI
    reads pm_ai_status, which returns a masked hint and NEVER the key. Never add a select policy to
    pm_ai_config, never return api_key from an RPC, never send a key to the client "just to show it".
+4l. **Device class is decided on the SHORT side, never on raw width.** A phone in landscape is
+   667–932px wide — wider than many tablets. Keying layout off innerWidth alone made rotating a phone
+   swap the entire navigation and drop every phone-specific rule (including the 16px inputs that stop
+   iOS auto-zooming). Decide on min(w,h) for touch devices; only a resizable desktop window should key
+   off live width. And there must be ONE breakpoint system: the JS stamps a class on <html> and the
+   CSS keys off it. Never reintroduce parallel width media queries — they WILL drift.
 4j. **Config must never lie.** If a flag exists and is reported to the UI, something must ENFORCE
    it. \`pm_ai_config.enabled\` sat unchecked for a while: you could "disable" a provider and it would
    still be used. Either enforce a flag or delete it — dead config that lies is worse than none.
@@ -2153,6 +2211,19 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
 8. **Developer Notes page:** hardcoded architecture doc + CLAUDE.md + this build prompt,
    each viewable with copy + download, plus an editable scratchpad saved to pm_dev_notes.
    These docs MUST be kept in sync with the app on every subsequent change.
+8b. **RESPONSIVE — get this right or the app is broken on a phone.** Decide the DEVICE CLASS on the
+   SHORT side of the screen for touch devices (min(w,h)) and on live width only for a resizable
+   desktop window. Keying off innerWidth alone is the classic bug: a phone in landscape is 667–932px,
+   so it gets treated as a tablet and the whole navigation swaps on rotation. Phone <640 / tablet
+   <1024 / desktop. Have the JS stamp the class onto <html> (pm-phone/pm-tablet/pm-desktop/pm-coarse/
+   pm-landscape) and make the CSS key off THAT — never run parallel width media queries, they drift.
+   Non-negotiable mobile foundations: overflow-x hidden on html/body (one stubborn element shifts the
+   whole page); safe-area padding left/right if you use viewport-fit=cover, or landscape content slides
+   under the notch; 16px inputs on touch (anything smaller makes iOS auto-zoom on focus); 40px minimum
+   hit targets; modals as bottom sheets on phone; single-column forms on phone; overflow-wrap for long
+   slugs. Three nav patterns is the maximum: bottom bar + drawer (phone), icon rail (tablet), full
+   sidebar (desktop) — and every one must be DERIVED from the nav list so a new page cannot be
+   stranded.
 9. **Levels (progression structure, EXPANDABLE 1–100):** a pm_levels table defining the levels
    (ship with 1–10; support adding more above the top, CHECK ceiling 100 on pm_levels.level AND
    pm_questions.level AND pm_question_levels.level). Each level has a name, tagline, letter-hiding
@@ -2544,7 +2615,16 @@ const NAV_PHONE=["dashboard","library","questions","publish"];// ===============
 // Root App
 // ============================================================
 // Fire-and-forget activity logger (never blocks the UI)
-const logActivity=(entity,id,name,action,detail="")=>{rpc("pm_log",{_entity:entity,_entity_id:id||null,_entity_name:name||"",_action:action,_detail:detail}).catch(()=>{});};function App(){const bp=useBreakpoint();const theme=useTheme();const[authed,setAuthed]=useState(()=>!!session.load());// URL-hash routing so a refresh keeps you where you were (e.g. #/questions, #/pack/<id>).
+const logActivity=(entity,id,name,action,detail="")=>{rpc("pm_log",{_entity:entity,_entity_id:id||null,_entity_name:name||"",_action:action,_detail:detail}).catch(()=>{});};function App(){const bp=useBreakpoint();const theme=useTheme();// ONE SOURCE OF TRUTH for the device class.
+//
+// The CSS used to have its OWN breakpoints (@media max-width:639px / 1023px) running in parallel
+// with the JS ones. Two independent systems that could disagree — and did: on a landscape phone
+// the JS said "tablet" (side rail) while the CSS said "not a phone" (so two-column forms came
+// back, modals stopped being bottom sheets, and iOS resumed auto-zooming inputs).
+//
+// Now the JS decides ONCE and stamps the answer onto <html>. The CSS keys off that class, so the
+// two can never drift apart again.
+useEffect(()=>{const el=document.documentElement;el.classList.remove("pm-phone","pm-tablet","pm-desktop");el.classList.add(bp.isPhone?"pm-phone":bp.isTablet?"pm-tablet":"pm-desktop");el.classList.toggle("pm-coarse",!!bp.coarse);el.classList.toggle("pm-landscape",!!bp.landscape);},[bp.isPhone,bp.isTablet,bp.isDesktop,bp.coarse,bp.landscape]);const[authed,setAuthed]=useState(()=>!!session.load());// URL-hash routing so a refresh keeps you where you were (e.g. #/questions, #/pack/<id>).
 const VALID_NAV=["dashboard","library","questions","generator","levels","aireview","aisettings","health","publish","activity","devnotes"];const parseHash=()=>{const raw=(window.location.hash||"").replace(/^#\/?/,"").trim();// "questions" | "pack/<id>" | ""
 if(!raw)return{nav:"dashboard",packId:null};const[head,id]=raw.split("/");if(head==="pack"&&id)return{nav:"library",packId:id};if(VALID_NAV.includes(head))return{nav:head,packId:null};return{nav:"dashboard",packId:null};};const initial=parseHash();const[nav,setNav]=useState(initial.nav);const[active,setActive]=useState(null);// open pack (hydrated from packId once packs load)
 const pendingPackId=useRef(initial.packId);// pack id from the URL, resolved when packs arrive
@@ -2578,6 +2658,31 @@ function GlobalStyle(){return/*#__PURE__*/React.createElement("style",null,`
     :root, [data-theme="light"]{ ${themeVars("light")} }
     [data-theme="dark"]{ ${themeVars("dark")} }
     *{box-sizing:border-box}
+
+    /* ---- MOBILE FOUNDATIONS ----
+       These are the things whose absence makes a page feel "broken" rather than just ugly. */
+
+    /* 1. Never scroll sideways. One stubborn element is all it takes to shift the whole page and
+          make everything feel misaligned. This is the safety net. */
+    html, body{ max-width:100%; overflow-x:hidden; }
+
+    /* 2. viewport-fit=cover lets content run under the notch and home indicator. That is only safe
+          if we then pad for them. Without this, landscape content slides UNDER the notch. */
+    html.pm-coarse .pm-main{
+      padding-left: max(16px, env(safe-area-inset-left));
+      padding-right: max(16px, env(safe-area-inset-right));
+    }
+
+    /* 3. Long words (a slug, a model name, a URL) must not force the page wider. */
+    .pm-main{ overflow-wrap:anywhere; }
+
+    /* 4. iOS momentum scrolling inside modals/scroll areas, and stop the rubber-band chaining. */
+    .pm-modal-card{ -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
+
+    /* 5. Kill the grey tap flash and the double-tap-to-zoom delay on touch. */
+    html.pm-coarse *{ -webkit-tap-highlight-color:transparent; }
+    html.pm-coarse button, html.pm-coarse a, html.pm-coarse [role=button]{ touch-action:manipulation; }
+
     html,body{margin:0;padding:0}
     html{ -webkit-text-size-adjust:100%; transition:background .2s; }
     body{ background:${C.bg}; transition:background .2s, color .2s; }
@@ -2614,6 +2719,24 @@ function GlobalStyle(){return/*#__PURE__*/React.createElement("style",null,`
     .pm-qrow-actions{ display:flex; gap:6px; flex-shrink:0; }
     .pm-qrow-pack{ flex-shrink:0; }
 
+    /* Below desktop — driven by the DEVICE CLASS the JS stamps on <html>, not by raw width, so it
+       can never disagree with the JS. (A landscape phone is still a phone.) */
+    html.pm-phone .pm-main, html.pm-tablet .pm-main{ padding:24px 20px; }
+    html.pm-phone .pm-pack-grid, html.pm-tablet .pm-pack-grid{ grid-template-columns:repeat(2,1fr); }
+    html.pm-phone .pm-dash-2, html.pm-tablet .pm-dash-2{ grid-template-columns:1fr !important; }
+    html.pm-phone .pm-qrow, html.pm-tablet .pm-qrow{ display:block; position:relative; padding:15px 16px 13px; }
+    html.pm-phone .pm-qrow-check, html.pm-tablet .pm-qrow-check{ position:absolute; top:15px; right:15px; width:20px; height:20px; z-index:1; }
+    html.pm-phone .pm-qrow-main, html.pm-tablet .pm-qrow-main{ padding-right:34px; }
+    html.pm-phone .pm-qrow-sentence, html.pm-tablet .pm-qrow-sentence{ font-size:15.5px; }
+    html.pm-phone .pm-qrow-meta, html.pm-tablet .pm-qrow-meta{ margin-top:13px; padding-top:12px; border-top:1px solid var(--lineSoft); gap:10px; }
+    html.pm-phone .pm-qrow-actions, html.pm-tablet .pm-qrow-actions{ margin-top:10px; gap:8px; }
+    html.pm-phone .pm-qrow-actions button, html.pm-tablet .pm-qrow-actions button{ flex:1; min-height:40px; }
+    html.pm-phone .pm-qrow-search .pm-qrow-pack, html.pm-tablet .pm-qrow-search .pm-qrow-pack{ position:absolute; top:13px; right:13px; max-width:55%; }
+    html.pm-phone .pm-qrow-search .pm-qrow-main, html.pm-tablet .pm-qrow-search .pm-qrow-main{ padding-right:0; margin-top:2px; }
+    html.pm-phone .pm-qrow-search .pm-qrow-pack + .pm-qrow-main, html.pm-tablet .pm-qrow-search .pm-qrow-pack + .pm-qrow-main{ margin-top:34px; }
+
+    /* Legacy width fallback — kept ONLY so the layout is sane for the split-second before React
+       mounts and stamps the class. The class rules above win once it does. */
     @media (max-width:1023px){
       .pm-main{ padding:24px 20px; }
       .pm-pack-grid{ grid-template-columns:repeat(2,1fr); }
@@ -2633,6 +2756,38 @@ function GlobalStyle(){return/*#__PURE__*/React.createElement("style",null,`
       .pm-qrow-search .pm-qrow-main{ padding-right:0; margin-top:2px; }
       .pm-qrow-search .pm-qrow-pack + .pm-qrow-main{ margin-top:34px; }
     }
+    /* PHONE — including a phone in LANDSCAPE. These are the rules that make it usable at all:
+       single-column forms, modals as bottom sheets, and 16px inputs (anything smaller makes iOS
+       auto-zoom on focus). They used to be locked behind max-width:639px, so a rotated phone lost
+       every one of them. */
+    html.pm-phone .pm-main{ padding:16px 14px; }
+    html.pm-phone .pm-stats{ grid-template-columns:repeat(2,1fr); gap:10px; }
+    html.pm-phone .pm-pack-grid{ grid-template-columns:1fr; gap:12px; }
+    html.pm-phone .pm-index-grid{ grid-template-columns:1fr 1fr; gap:7px; }
+    html.pm-phone .pm-form-2{ grid-template-columns:1fr; gap:14px; }
+    html.pm-phone .pm-toolbar > *{ flex:1 1 auto; }
+    html.pm-phone .pm-search{ width:100%; order:-1; flex-basis:100%; }
+    html.pm-phone .pm-grow{ flex-basis:100%; height:0; }
+    html.pm-phone .pm-qrow-sentence{ font-size:16px; }
+    html.pm-phone .pm-about-grid{ grid-template-columns:1fr !important; }
+    html.pm-phone .pm-gen-grid{ grid-template-columns:1fr !important; }
+    html.pm-phone .pm-modal-backdrop{ align-items:flex-end; padding:0; }
+    html.pm-phone .pm-modal-card{ max-width:100% !important; border-radius:20px 20px 0 0; max-height:94vh; overflow-y:auto; animation:pm-sheet .22s ease-out; }
+    html.pm-phone .pm-input{ font-size:16px !important; }
+
+    /* A phone in LANDSCAPE is short. Let a bottom-sheet modal use the height it has, and keep the
+       two-column pack grid (there IS horizontal room) — but never re-introduce cramped forms. */
+    html.pm-phone.pm-landscape .pm-modal-card{ max-height:88vh; }
+    html.pm-phone.pm-landscape .pm-pack-grid{ grid-template-columns:repeat(2,1fr); }
+    html.pm-phone.pm-landscape .pm-stats{ grid-template-columns:repeat(4,1fr); }
+
+    /* ANY touch device gets finger-sized hit targets, regardless of screen size. */
+    html.pm-coarse button, html.pm-coarse .pm-input, html.pm-coarse select{ min-height:40px; }
+    html.pm-coarse .pm-input, html.pm-coarse select, html.pm-coarse textarea{ font-size:16px !important; }
+
+    @keyframes pm-sheet{ from{ transform:translateY(100%);} to{ transform:translateY(0);} }
+
+    /* Legacy width fallback — pre-mount only. */
     @media (max-width:639px){
       .pm-main{ padding:16px 14px; }
       .pm-stats{ grid-template-columns:repeat(2,1fr); gap:10px; }
