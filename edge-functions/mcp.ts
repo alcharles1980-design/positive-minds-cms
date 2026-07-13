@@ -13,10 +13,23 @@
 //   There is deliberately NO tool to publish, delete, or edit a pack. If a partner needs to do more
 //   than propose content, they should be in the CMS, not a chat window.
 //
-// AUTH: a shared-secret token per partner (Authorization: Bearer pmk_...). NOT OAuth — with three
-// trusted people, OAuth 2.1 with PKCE would be pure ceremony. The token gives us what we actually
-// need: we know WHO proposed each question, and we can revoke one partner without touching others.
-// Tokens are stored as sha256 hashes; the raw token is shown once and never recoverable.
+// AUTH: OAuth 2.1 with PKCE. This is NOT optional — Claude's "Add custom connector" screen offers a
+// URL and an OAuth client ID/secret, and NOTHING else. There is no field to paste a bearer token, so
+// a shared-secret header simply could not be used: Claude would never send it. The MCP spec is
+// unambiguous — a protected server does OAuth 2.1, or it is authless.
+//
+// We are therefore a (small) authorization server as well as a resource server. Because the partners
+// are three trusted people, the consent screen is just "paste the token Albert sent you" — their
+// pmk_ token becomes the LOGIN CREDENTIAL rather than a request header. From their side it is simply:
+// click Connect → a page appears → paste → done.
+//
+// Endpoints Claude requires:
+//   GET  /.well-known/oauth-protected-resource   "here is my authorization server"   (RFC 9728)
+//   GET  /.well-known/oauth-authorization-server "here are my endpoints"             (RFC 8414)
+//   POST /register                                Claude registers itself             (RFC 7591)
+//   GET  /authorize                               the partner's login screen
+//   POST /token                                   code → access token (PKCE verified)
+// And a 401 MUST carry WWW-Authenticate pointing at the metadata, or Claude never starts the flow.
 
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 
@@ -163,22 +176,93 @@ async function sha256(s: string): Promise<string> {
   return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-async function authenticate(db: any, req: Request): Promise<{ partner: string; id: string } | null> {
-  const auth = req.headers.get('authorization') || '';
-  const raw = auth.replace(/^Bearer\s+/i, '').trim();
-  if (!raw.startsWith('pmk_')) return null;
+// base64url — PKCE S256 challenges are base64url of the sha256 of the verifier.
+function b64url(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+async function sha256b64url(s: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return b64url(new Uint8Array(buf));
+}
+function randomToken(prefix: string): string {
+  const b = new Uint8Array(32);
+  crypto.getRandomValues(b);
+  return prefix + b64url(b);
+}
 
-  const hash = await sha256(raw);
-  const { data } = await db.from('pm_mcp_tokens')
-    .select('id, partner, active').eq('token_hash', hash).eq('active', true).maybeSingle();
-  if (!data) return null;
+// Verify the ACCESS TOKEN Claude sends on every MCP call. Returns which partner it belongs to.
+async function authenticate(db: any, req: Request) {
+  const auth = req.headers.get('authorization') || '';
+  const token = auth.replace(/^Bearer\s+/i, '').trim();
+  if (!token) return null;
+
+  const { data: at } = await db.from('pm_oauth_tokens')
+    .select('access_token, token_id, expires_at')
+    .eq('access_token', token).maybeSingle();
+  if (!at) return null;
+  if (new Date(at.expires_at) < new Date()) return null;   // expired
+
+  // Which partner? And are they still allowed?
+  const { data: partner } = await db.from('pm_mcp_tokens')
+    .select('id, partner, active, calls_made').eq('id', at.token_id).maybeSingle();
+  if (!partner || !partner.active) return null;            // revoked mid-session
 
   // Best-effort usage tracking — never let it break the request.
-  db.from('pm_mcp_tokens')
-    .update({ last_used_at: new Date().toISOString(), calls_made: (data.calls_made ?? 0) + 1 })
-    .eq('id', data.id).then(() => {}).catch(() => {});
+  try {
+    await db.from('pm_mcp_tokens')
+      .update({ last_used_at: new Date().toISOString(), calls_made: (partner.calls_made ?? 0) + 1 })
+      .eq('id', partner.id);
+    await db.from('pm_oauth_tokens')
+      .update({ last_used_at: new Date().toISOString() }).eq('access_token', token);
+  } catch { /* ignore */ }
 
-  return { partner: data.partner, id: data.id };
+  return { partner: partner.partner, id: partner.id };
+}
+
+// The partner's login screen. Deliberately plain — they paste the token you sent them.
+function loginPage(state: string, clientId: string, redirectUri: string, challenge: string, error?: string): string {
+  const esc = (x: string) => String(x || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  const errBlock = error ? '<div class="err">' + esc(error) + '</div>' : '';
+  return '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">' +
+'<meta name="viewport" content="width=device-width, initial-scale=1">' +
+'<title>Connect to Positive Minds</title>' +
+'<style>' +
+'*{box-sizing:border-box}' +
+'body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;' +
+'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;' +
+'background:#F7F6FB;color:#191728;padding:20px}' +
+'.card{background:#fff;border-radius:18px;padding:34px 30px;max-width:420px;width:100%;' +
+'box-shadow:0 12px 40px rgba(25,23,40,.10);border:1px solid #E8E6F0}' +
+'h1{margin:0 0 6px;font-size:21px;font-weight:800;letter-spacing:-.2px}' +
+'p{margin:0 0 20px;color:#6E6B85;font-size:14px;line-height:1.6}' +
+'label{display:block;font-size:12px;font-weight:700;color:#4A4763;margin-bottom:6px}' +
+'input{width:100%;padding:13px 14px;border:1px solid #E8E6F0;border-radius:10px;font-size:16px;' +
+'font-family:ui-monospace,Menlo,monospace;background:#FBFAFE;color:#191728}' +
+'input:focus{outline:none;border-color:#6C4CE0;box-shadow:0 0 0 3px rgba(108,76,224,.12)}' +
+'button{width:100%;margin-top:16px;padding:13px;border:none;border-radius:10px;background:#6C4CE0;' +
+'color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit}' +
+'button:hover{background:#5B3FCC}' +
+'.err{background:#FDECEC;border:1px solid #F3C7C7;color:#C2352F;padding:11px 13px;border-radius:9px;' +
+'font-size:13.5px;margin-bottom:16px;line-height:1.5}' +
+'.note{margin-top:18px;font-size:12.5px;color:#8B87A3;line-height:1.6}' +
+'</style></head><body>' +
+'<div class="card">' +
+'<h1>Connect to Positive Minds</h1>' +
+'<p>Paste the token you were sent. You will then be able to write questions just by asking Claude.</p>' +
+errBlock +
+'<form method="POST" action="/functions/v1/mcp/authorize">' +
+'<input type="hidden" name="state" value="' + esc(state) + '">' +
+'<input type="hidden" name="client_id" value="' + esc(clientId) + '">' +
+'<input type="hidden" name="redirect_uri" value="' + esc(redirectUri) + '">' +
+'<input type="hidden" name="code_challenge" value="' + esc(challenge) + '">' +
+'<label for="tk">Your token</label>' +
+'<input id="tk" name="token" type="password" placeholder="pmk_..." autocomplete="off" autofocus required>' +
+'<button type="submit">Connect</button>' +
+'</form>' +
+'<div class="note">Anything you write goes to a review queue for approval first — nothing you send goes live on its own.</div>' +
+'</div></body></html>';
 }
 
 // ============================================================
@@ -426,15 +510,215 @@ async function callTool(db: any, partner: string, name: string, args: any) {
 }
 
 // ============================================================
-// MCP protocol (JSON-RPC 2.0 over Streamable HTTP)
+// ROUTING: the OAuth endpoints, then the MCP endpoint itself.
 // ============================================================
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
 
   const db = createClient(SUPABASE_URL, SERVICE_KEY);
-  const json = (b: unknown, s = 200) =>
-    new Response(JSON.stringify(b), { status: s, headers: { ...cors, 'Content-Type': 'application/json' } });
+  const url = new URL(req.url);
+  const path = url.pathname;
 
+  // BUILD THE PUBLIC BASE URL CORRECTLY. Two bugs live here if you don't:
+  //   1. Supabase terminates TLS at the edge, so url.origin sees plain HTTP. Advertising an http://
+  //      OAuth endpoint makes Claude reject the server outright — an insecure authorization server is
+  //      not acceptable.
+  //   2. The function is served at /functions/v1/mcp, NOT /mcp. Advertising /mcp/authorize sends
+  //      Claude to a URL that does not exist.
+  //   3. The `host` header inside the container is Supabase's INTERNAL one
+  //      (edge-runtime.supabase.com), not the project's public domain. Deriving the base from the
+  //      request would send Claude to the wrong server entirely. SUPABASE_URL is the authoritative
+  //      public origin — use that.
+  const BASE = `${SUPABASE_URL}/functions/v1/mcp`;
+
+  const json = (b: unknown, s = 200, extra: Record<string, string> = {}) =>
+    new Response(JSON.stringify(b), { status: s, headers: { ...cors, 'Content-Type': 'application/json', ...extra } });
+
+  // ---------- 1. Protected Resource Metadata (RFC 9728) ----------
+  // "I am a protected resource; here is who issues tokens for me."
+  if (path.endsWith('/.well-known/oauth-protected-resource')) {
+    return json({
+      resource: BASE,
+      authorization_servers: [BASE],
+      scopes_supported: ['mcp:tools'],
+      bearer_methods_supported: ['header'],
+    });
+  }
+
+  // ---------- 2. Authorization Server Metadata (RFC 8414) ----------
+  // "Here are my endpoints." Claude looks for this at the MCP server's own domain.
+  if (path.endsWith('/.well-known/oauth-authorization-server')) {
+    return json({
+      issuer: BASE,
+      authorization_endpoint: `${BASE}/authorize`,
+      token_endpoint: `${BASE}/token`,
+      registration_endpoint: `${BASE}/register`,
+      response_types_supported: ['code'],
+      grant_types_supported: ['authorization_code'],
+      code_challenge_methods_supported: ['S256'],   // OAuth 2.1 requires PKCE
+      token_endpoint_auth_methods_supported: ['none'],
+      scopes_supported: ['mcp:tools'],
+    });
+  }
+
+  // ---------- 3. Dynamic Client Registration (RFC 7591) ----------
+  // Claude registers itself, so nobody has to copy a client ID around.
+  if (path.endsWith('/register') && req.method === 'POST') {
+    let reg: any = {};
+    try { reg = await req.json(); } catch { /* tolerate empty */ }
+
+    const redirectUris: string[] = Array.isArray(reg.redirect_uris) ? reg.redirect_uris : [];
+    if (!redirectUris.length) {
+      return json({ error: 'invalid_redirect_uri', error_description: 'redirect_uris is required' }, 400);
+    }
+
+    const clientId = randomToken('cli_');
+    await db.from('pm_oauth_clients').insert({
+      client_id: clientId,
+      client_name: reg.client_name || 'MCP client',
+      redirect_uris: redirectUris,
+    });
+
+    return json({
+      client_id: clientId,
+      client_name: reg.client_name || 'MCP client',
+      redirect_uris: redirectUris,
+      grant_types: ['authorization_code'],
+      response_types: ['code'],
+      token_endpoint_auth_method: 'none',   // public client — PKCE is what protects it
+    }, 201);
+  }
+
+  // ---------- 4a. Authorize (GET) — show the partner the login screen ----------
+  if (path.endsWith('/authorize') && req.method === 'GET') {
+    const clientId = url.searchParams.get('client_id') || '';
+    const redirectUri = url.searchParams.get('redirect_uri') || '';
+    const state = url.searchParams.get('state') || '';
+    const challenge = url.searchParams.get('code_challenge') || '';
+    const method = url.searchParams.get('code_challenge_method') || '';
+
+    if (!clientId || !redirectUri) {
+      return new Response('Missing client_id or redirect_uri', { status: 400, headers: cors });
+    }
+    // OAuth 2.1: PKCE is mandatory, and S256 only (plain is forbidden).
+    if (!challenge || method !== 'S256') {
+      return new Response('PKCE with S256 is required', { status: 400, headers: cors });
+    }
+
+    // The redirect_uri must be one this client actually registered — otherwise an attacker could
+    // point the code at a URL they control.
+    const { data: client } = await db.from('pm_oauth_clients')
+      .select('client_id, redirect_uris').eq('client_id', clientId).maybeSingle();
+    if (!client || !(client.redirect_uris || []).includes(redirectUri)) {
+      return new Response('Unknown client, or redirect_uri was not registered.', { status: 400, headers: cors });
+    }
+
+    return new Response(loginPage(state, clientId, redirectUri, challenge), {
+      status: 200,
+      headers: { ...cors, 'Content-Type': 'text/html; charset=utf-8' },
+    });
+  }
+
+  // ---------- 4b. Authorize (POST) — the partner pasted their token ----------
+  if (path.endsWith('/authorize') && req.method === 'POST') {
+    const form = await req.formData();
+    const raw = String(form.get('token') || '').trim();
+    const clientId = String(form.get('client_id') || '');
+    const redirectUri = String(form.get('redirect_uri') || '');
+    const state = String(form.get('state') || '');
+    const challenge = String(form.get('code_challenge') || '');
+
+    const reject = (msg: string) =>
+      new Response(loginPage(state, clientId, redirectUri, challenge, msg), {
+        status: 200, headers: { ...cors, 'Content-Type': 'text/html; charset=utf-8' },
+      });
+
+    if (!raw.startsWith('pmk_')) return reject("That doesn't look like a Positive Minds token. It should start with pmk_.");
+
+    const hash = await sha256(raw);
+    const { data: partner } = await db.from('pm_mcp_tokens')
+      .select('id, partner, active').eq('token_hash', hash).eq('active', true).maybeSingle();
+    if (!partner) return reject('That token was not recognised, or access has been revoked. Ask Albert for a new one.');
+
+    // Re-verify the redirect_uri (do not trust the form).
+    const { data: client } = await db.from('pm_oauth_clients')
+      .select('redirect_uris').eq('client_id', clientId).maybeSingle();
+    if (!client || !(client.redirect_uris || []).includes(redirectUri)) {
+      return new Response('Bad redirect_uri.', { status: 400, headers: cors });
+    }
+
+    // Issue a short-lived, single-use, PKCE-bound authorization code.
+    const code = randomToken('cod_');
+    await db.from('pm_oauth_codes').insert({
+      code,
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      code_challenge: challenge,
+      token_id: partner.id,
+      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),   // 10 minutes
+    });
+
+    const back = new URL(redirectUri);
+    back.searchParams.set('code', code);
+    if (state) back.searchParams.set('state', state);
+    return Response.redirect(back.toString(), 302);
+  }
+
+  // ---------- 5. Token — exchange the code for an access token ----------
+  if (path.endsWith('/token') && req.method === 'POST') {
+    let params: URLSearchParams;
+    const ct = req.headers.get('content-type') || '';
+    if (ct.includes('application/json')) {
+      const b = await req.json();
+      params = new URLSearchParams(Object.entries(b).map(([k, v]) => [k, String(v)]));
+    } else {
+      params = new URLSearchParams(await req.text());
+    }
+
+    const grant = params.get('grant_type');
+    if (grant !== 'authorization_code') {
+      return json({ error: 'unsupported_grant_type' }, 400);
+    }
+
+    const code = params.get('code') || '';
+    const verifier = params.get('code_verifier') || '';
+    const redirectUri = params.get('redirect_uri') || '';
+
+    const { data: row } = await db.from('pm_oauth_codes')
+      .select('*').eq('code', code).maybeSingle();
+    if (!row) return json({ error: 'invalid_grant', error_description: 'Unknown code' }, 400);
+    if (row.used) return json({ error: 'invalid_grant', error_description: 'Code already used' }, 400);
+    if (new Date(row.expires_at) < new Date()) return json({ error: 'invalid_grant', error_description: 'Code expired' }, 400);
+    if (row.redirect_uri !== redirectUri) return json({ error: 'invalid_grant', error_description: 'redirect_uri mismatch' }, 400);
+
+    // PKCE: the verifier must hash to the challenge we stored at /authorize.
+    if (!verifier) return json({ error: 'invalid_request', error_description: 'code_verifier required' }, 400);
+    const computed = await sha256b64url(verifier);
+    if (computed !== row.code_challenge) {
+      return json({ error: 'invalid_grant', error_description: 'PKCE verification failed' }, 400);
+    }
+
+    // Burn the code — single use, so a replay fails.
+    await db.from('pm_oauth_codes').update({ used: true }).eq('code', code);
+
+    const accessToken = randomToken('at_');
+    const expiresIn = 60 * 60 * 24 * 30;   // 30 days
+    await db.from('pm_oauth_tokens').insert({
+      access_token: accessToken,
+      token_id: row.token_id,
+      client_id: row.client_id,
+      expires_at: new Date(Date.now() + expiresIn * 1000).toISOString(),
+    });
+
+    return json({
+      access_token: accessToken,
+      token_type: 'Bearer',
+      expires_in: expiresIn,
+      scope: 'mcp:tools',
+    });
+  }
+
+  // ---------- The MCP endpoint itself ----------
   if (req.method !== 'POST') {
     return json({ error: 'This is an MCP endpoint. POST JSON-RPC.' }, 405);
   }
@@ -447,7 +731,7 @@ Deno.serve(async (req) => {
   const rpcErr = (code: number, message: string) => json({ jsonrpc: '2.0', id: id ?? null, error: { code, message } });
   const rpcOk = (result: unknown) => json({ jsonrpc: '2.0', id: id ?? null, result });
 
-  // initialize + notifications need no auth (the handshake happens before the token is used)
+  // initialize + notifications need no auth (the handshake precedes the token).
   if (method === 'initialize') {
     return rpcOk({
       protocolVersion: '2025-06-18',
@@ -462,18 +746,19 @@ Deno.serve(async (req) => {
   }
   if (method === 'notifications/initialized') return new Response(null, { status: 202, headers: cors });
 
-  // Everything else needs a valid partner token.
+  // Everything else needs a valid OAuth access token.
   const who = await authenticate(db, req);
   if (!who) {
+    // CRITICAL: the WWW-Authenticate header is how Claude discovers it needs to run the OAuth flow.
+    // Without it, the connector just fails and never offers to sign in.
     return json(
-      { jsonrpc: '2.0', id: id ?? null, error: { code: -32001, message: 'Unauthorized — a valid partner token is required.' } },
+      { jsonrpc: '2.0', id: id ?? null, error: { code: -32001, message: 'Unauthorized' } },
       401,
-      );
+      { 'WWW-Authenticate': `Bearer resource_metadata="${BASE}/.well-known/oauth-protected-resource"` },
+    );
   }
 
-  if (method === 'tools/list') {
-    return rpcOk({ tools: TOOLS });
-  }
+  if (method === 'tools/list') return rpcOk({ tools: TOOLS });
 
   if (method === 'tools/call') {
     const name = params?.name;

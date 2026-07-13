@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.05-19", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.05-20", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -3772,7 +3772,42 @@ before proposing, so it catches and fixes the same-length-words bug itself. Veri
 BRIGHT/GENTLE it correctly reported "GENTLE also fits the blank at levels 7, 8, 9, 10 — two correct
 answers", AND noticed BRIGHT was already used. The queue gets BETTER content, not just more.
 
-**AUTH:** a shared-secret token per partner (\`Authorization: Bearer pmk_...\`). NOT OAuth — with three
+**AUTH: OAuth 2.1 with PKCE — and this was NOT a choice.** I first built a shared-secret bearer
+token, then discovered that Claude's "Add custom connector" screen offers a URL and an OAuth client
+ID/secret and NOTHING else. There is no field to paste a bearer token, so Claude would simply never
+send that header. The MCP spec is unambiguous: a protected server does OAuth 2.1, or it is authless.
+
+THE LESSON, worth writing down: ask "how will someone ACTUALLY use this?" BEFORE building, not after.
+I assumed a token field existed because that is how most APIs work, built for it, and only found out
+when Albert asked how partners connect.
+
+The partner's pmk_ token was not wasted — it became the LOGIN CREDENTIAL. Because the partners are
+three trusted people, the consent screen is just "paste the token you were sent". From their side:
+click Connect → a sign-in page opens → paste → done.
+
+Five endpoints, all on the \`mcp\` function:
+| Endpoint | Purpose |
+|---|---|
+| \`/.well-known/oauth-protected-resource\` | RFC 9728 — "here is my authorization server" |
+| \`/.well-known/oauth-authorization-server\` | RFC 8414 — "here are my endpoints" |
+| \`POST /register\` | RFC 7591 — Claude registers itself |
+| \`GET/POST /authorize\` | the partner's sign-in page |
+| \`POST /token\` | code → access token, PKCE verified |
+A 401 MUST carry \`WWW-Authenticate\` or Claude never starts the flow.
+
+**THREE BUGS IN THE BASE URL**, all real, all caught by testing rather than assuming:
+1. Supabase terminates TLS at the edge, so \`url.origin\` sees plain HTTP — and Claude rejects an
+   insecure OAuth server outright.
+2. The function is served at \`/functions/v1/mcp\`, not \`/mcp\` — so it advertised URLs that did not exist.
+3. The \`host\` header INSIDE the container is Supabase's internal one (edge-runtime.supabase.com), not
+   the project's domain — so it sent Claude to the wrong server entirely.
+All three vanish if you derive the base from \`SUPABASE_URL\`, which is the authoritative public origin.
+Every one of these returned HTTP 200 while being completely wrong: "it responded" is not "it works".
+
+Tables (all RLS-on, ZERO policies — the browser cannot read any of them): pm_oauth_clients,
+pm_oauth_codes (PKCE-bound, single-use, 10-minute), pm_oauth_tokens (30-day).
+
+**The old shared-secret note, for reference:** a token per partner (\`Authorization: Bearer pmk_...\`). NOT OAuth — with three
 trusted people, OAuth 2.1 with PKCE would be pure ceremony. The token gives us what we actually need:
 we know WHO proposed each question (queued rows are tagged \`partner:sarah\`) and we can revoke one
 partner without touching the others.
@@ -4792,6 +4827,14 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    the manual one (no themes, no frame words). One page, one set of options, two ways to run it. How
    you run something must never change what you're allowed to ask for. And never show a control that
    does nothing in the current mode: hide it.
+4x. **Ask "how will someone ACTUALLY use this?" BEFORE building the auth model.** I built the MCP
+   connector with a shared-secret bearer token, because that is how most APIs work. Claude's connector
+   screen has no field for one — it does OAuth or nothing — so the whole auth model was unusable, and
+   I only found out when Albert asked how partners connect. Check the actual UI the user will face
+   before designing for it.
+4y. **"It returned 200" is not "it works".** All three base-URL bugs in the OAuth server (http instead
+   of https, wrong path, Supabase's INTERNAL hostname) returned a perfectly healthy 200 while telling
+   Claude to go somewhere that did not exist. Read what the response SAYS, not just its status code.
 4w. **The MCP connector must never grow a write tool beyond propose_questions.** Partners can read
    packs and propose to the queue. That is all. The moment you add publish/delete/edit, the blast
    radius stops being "a queue full of things Albert rejects" and becomes "a partner can reach a
@@ -7327,9 +7370,10 @@ function ConnectorView() {
         padding: S.lg, marginTop: S.xl }} className="pm-readable">
         <h2 style={{ margin: "0 0 10px", fontSize: 15, fontWeight: 800, color: C.ink }}>What your partner does</h2>
         <ol style={{ margin: 0, paddingLeft: 20, fontSize: 13.5, color: C.ink2, lineHeight: 1.85 }}>
-          <li>In Claude, they go to <b>Settings → Connectors → Add custom connector</b>.</li>
-          <li>They paste the URL above, and their token as the authentication.</li>
-          <li>Then they just talk to it: <i>"Write me 15 questions for the Calmness pack about worries at bedtime."</i></li>
+          <li>In Claude: <b>Settings → Connectors → Add custom connector</b>.</li>
+          <li>They paste <b>just the URL</b> above and click Add. (Nothing goes in the OAuth boxes.)</li>
+          <li>They click <b>Connect</b>. A Positive Minds sign-in page opens — they paste their token there.</li>
+          <li>Then they simply talk to it: <i>"Write me 15 questions for the Calmness pack about worries at bedtime."</i></li>
         </ol>
         <div style={{ fontSize: 13, color: C.sub, marginTop: 12, lineHeight: 1.65, paddingTop: 12, borderTop: "1px solid " + C.lineSoft }}>
           Behind the scenes, Claude reads the pack so it doesn't repeat words you've already used,
@@ -7432,9 +7476,11 @@ function TokenReveal({ result, onClose }) {
           <div style={{ fontSize: 10.5, fontWeight: 800, color: C.faint, letterSpacing: .3,
             textTransform: "uppercase", marginBottom: 7 }}>Send them this</div>
           <div style={{ fontSize: 13, color: C.ink2, lineHeight: 1.75 }}>
-            In Claude: <b>Settings → Connectors → Add custom connector</b><br />
-            URL: <code style={{ fontSize: 12, fontFamily: "ui-monospace, monospace" }}>{MCP_URL}</code><br />
-            Token: the one above
+            1. In Claude: <b>Settings → Connectors → Add custom connector</b><br />
+            2. Paste this URL and click Add:<br />
+            <code style={{ fontSize: 11.5, fontFamily: "ui-monospace, monospace", wordBreak: "break-all" }}>{MCP_URL}</code><br />
+            3. Click <b>Connect</b> — a sign-in page opens.<br />
+            4. Paste the token above into it.
           </div>
         </div>
       </div>
