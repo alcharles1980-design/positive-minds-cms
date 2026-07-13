@@ -114,15 +114,9 @@ function validateQuestion(q: any, levels: any[], opts: any = {}) {
   if (alt && /[^A-Z\s'-]/.test(alt)) flags.push({ code: 'bad_chars_alt', detail: `"${alt}" contains characters other than letters.` });
 
   const norm = (s: string) => (s || '').toLowerCase().replace(/\{blank\}/g, '___').replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
-  // Duplicate detection has THREE distinct cases, because they mean different things:
-  //   duplicate      — same sentence AND same answer. Definitely reject.
-  //   same_sentence  — same sentence, different answer. Repetitive phrasing.
-  //   answer_reused  — this answer word is already taught elsewhere. In a 10–20 question pack,
-  //                    teaching BRAVE twice is a real quality problem, and it is INVISIBLE if you
-  //                    only compare whole questions.
-  // `existing` includes live questions AND anything already pending/rejected in the review queue —
-  // otherwise two generate runs before a review duplicate each other, and a rejected question gets
-  // cheerfully regenerated.
+
+  // ---- Duplicate / repetition checks ----
+  // These mirror the client's validateQuestion EXACTLY (parity invariant) and the Health lint.
   if (ans) {
     const tplN = norm(tpl);
     let exact = false, sameSentence = false, reusedIn: any = null;
@@ -142,8 +136,27 @@ function validateQuestion(q: any, levels: any[], opts: any = {}) {
           : reusedIn.source === 'rejected' ? 'was already rejected'
           : reusedIn.source === 'batch' ? 'is used by another question in this same batch'
           : 'is already used in this pack';
-        flags.push({ code: 'answer_reused', detail: `The answer "${ans}" ${where}${reusedIn.template ? ` — “${String(reusedIn.template).replace(/\{blank\}/g, '____')}”` : ''}.` });
+        flags.push({ code: 'answer_reused', detail: `The answer "${ans}" ${where}${reusedIn.template ? ` — "${String(reusedIn.template).replace(/\{blank\}/g, '____')}"` : ''}.` });
       }
+    }
+  }
+
+  // REVERSED PAIR: the same two words offered as the choice, just swapped over. A different
+  // sentence, so not a "duplicate" — but the child faces the identical two-word decision twice.
+  // The Health lint catches this; the validator must too, or the AI can generate one and the review
+  // queue will show it as clean.
+  if (ans && alt) {
+    const pairKey = [ans, alt].sort().join('|');
+    const twin = (opts.existing || []).find((e: any) => {
+      const ea = (e.answer || '').toUpperCase(), eb = (e.alt_answer || '').toUpperCase();
+      if (!ea || !eb) return false;
+      return [ea, eb].sort().join('|') === pairKey && !(ea === ans && eb === alt);
+    });
+    if (twin) {
+      flags.push({
+        code: 'reversed_pair',
+        detail: `The same two words (${[ans, alt].sort().join(' / ')}) are already the choice in another question — just swapped over. The child would see the identical pair twice.`,
+      });
     }
   }
 
@@ -493,7 +506,7 @@ Deno.serve(async (req) => {
     const { data: liveQs } = await db
       .from('pm_questions').select('template,answer,alt_answer').eq('pack_id', pack_id).limit(2000);
     const { data: queuedQs } = await db
-      .from('pm_review_queue').select('template,answer,status')
+      .from('pm_review_queue').select('template,answer,alt_answer,status')
       .eq('pack_id', pack_id).in('status', ['pending', 'rejected']).limit(2000);
 
     const existing = [
@@ -544,7 +557,7 @@ Deno.serve(async (req) => {
       const seen: any[] = [...seed];
       return list.map((q: any) => {
         const result = validateQuestion(q, levels || [], { targetLevel: tLevel, existing: seen });
-        seen.push({ template: q.template, answer: q.answer, source: 'batch' });
+        seen.push({ template: q.template, answer: q.answer, alt_answer: q.alt_answer, source: 'batch' });
         return { q, result };
       });
     };
@@ -565,7 +578,7 @@ Deno.serve(async (req) => {
         const goodOnes = checked.filter((c) => c.result.ok);
         const seed = [
           ...(existing || []),
-          ...goodOnes.map((c) => ({ template: c.q.template, answer: c.q.answer, source: 'batch' })),
+          ...goodOnes.map((c) => ({ template: c.q.template, answer: c.q.answer, alt_answer: c.q.alt_answer, source: 'batch' })),
         ];
         const refixed = validateList(fixed, seed);
         repaired = refixed.filter((c) => c.result.ok).length;

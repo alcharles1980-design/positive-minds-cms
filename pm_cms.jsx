@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.05-17", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.05-18", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -484,7 +484,25 @@ const validateQuestion = (q, levels, opts = {}) => {
           : reusedIn.source === "rejected" ? "was already rejected"
           : reusedIn.source === "batch" ? "is used by another question in this same batch"
           : "is already used in this pack";
-        flags.push({ code: "answer_reused", detail: `The answer "${ans}" ${where}${reusedIn.template ? ` — “${String(reusedIn.template).replace(/\{blank\}/g, "____")}”` : ""}.` });
+        flags.push({ code: "answer_reused", detail: `The answer "${ans}" ${where}${reusedIn.template ? ` — "${String(reusedIn.template).replace(/\{blank\}/g, "____")}"` : ""}.` });
+      }
+    }
+    // REVERSED PAIR: the same two words offered as the choice, just swapped over. Different
+    // sentence, so not a "duplicate" — but the child faces the identical two-word decision twice.
+    // (The Health lint catches this; without it here, the AI could generate one and the review queue
+    // would show it as clean. The two must agree.)
+    if (alt) {
+      const pairKey = [ans, alt].sort().join("|");
+      const twin = (opts.existing || []).find(e => {
+        const ea = (e.answer || "").toUpperCase(), eb = (e.alt_answer || "").toUpperCase();
+        if (!ea || !eb) return false;
+        return [ea, eb].sort().join("|") === pairKey && !(ea === ans && eb === alt);
+      });
+      if (twin) {
+        flags.push({
+          code: "reversed_pair",
+          detail: `The same two words (${[ans, alt].sort().join(" / ")}) are already the choice in another question — just swapped over. The child would see the identical pair twice.`,
+        });
       }
     }
   }
@@ -2163,6 +2181,8 @@ function HealthView({ onOpenPack }) {
     missing_alt: "Missing 2nd option",
     bad_chars: "Odd characters",
     reused_word: "Word used twice",
+    reversed_pair: "Same pair, swapped",
+    overused_alt: "Predictable distractor",
     duplicate: "Duplicate",
     revealed_answer: "Answer revealed",
   };
@@ -3500,7 +3520,19 @@ identical words; word-length band + multi-word rule for the target level; bad ch
 and above all **ambiguous** — the alternate ALSO fits the blank at some level, so the puzzle has TWO
 correct answers and a child is marked wrong for a right answer.
 
-**DUPLICATE HANDLING (three distinct cases, because they mean different things):**
+**REPETITION CHECKS — five distinct cases, because they mean different things:**
+- \`duplicate\` — same sentence AND same answer. A true repeat.
+- \`same_sentence\` — same sentence, different answer. Repetitive phrasing.
+- \`answer_reused\` — the ANSWER WORD is already taught elsewhere.
+- \`reversed_pair\` — **the same two words offered as the choice, just swapped over.** CALM/PROUD and
+  PROUD/CALM. Different sentences, so NOT a duplicate — but the child faces the identical two-word
+  decision twice. Found by reading the LIVE feed, not by testing code: the confidence pack really had
+  both. Invisible to every check before, because they all grouped by ANSWER only.
+- \`overused_alt\` — the same word used as the DISTRACTOR three or more times. A predictable wrong
+  option teaches the child "it is never that one" instead of teaching them to read the blank. Also
+  invisible before, because nothing ever looked at the alternate.
+
+**DUPLICATE HANDLING (the original three, for reference):**
 - \`duplicate\` — same sentence AND same answer. A true repeat.
 - \`same_sentence\` — same sentence, different answer. Repetitive phrasing.
 - \`answer_reused\` — the ANSWER WORD is already taught elsewhere. This is the one that matters most
@@ -3781,6 +3813,37 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Deep audit after the restructure — five real bugs, two of them found by reading the LIVE feed.**
+  I had just restructured a page, deleted a component and redeployed the edge function. That is exactly
+  when things break in ways the existing tests cannot see, because those tests were written BEFORE the
+  change. So I went looking specifically for what I had broken.
+  FOUND BY READING THE LIVE GAME FEED (not by testing code):
+  (1) **\`CALM/PROUD\` and \`PROUD/CALM\` are both live** — the same two-word choice, just swapped over.
+  Different sentences, so not a "duplicate", but the child faces the identical decision twice. EVERY
+  check was blind to it, because they all grouped by ANSWER only: they saw CALM once and PROUD once and
+  reported nothing.
+  (2) **\`KIND\` is the distractor in several questions.** Nothing had ever looked at the ALTERNATE word.
+  A wrong option that keeps reappearing becomes predictable — the child learns "it is never KIND"
+  rather than reading the blank.
+  Both are now caught: \`reversed_pair\` and \`overused_alt\` in pm_lint/pm_lint_details, AND in BOTH
+  copies of validateQuestion (so the AI cannot generate one and have the review queue call it clean).
+  FOUND WHILE FIXING:
+  (3) **A bug in my own fix.** The reversed-pair message said "(PROUD / PROUD)" instead of
+  "(CALM / PROUD)" — I had wrapped max() INSIDE least()/greatest(), so it took the max across the group
+  first and both sides collapsed to the same word. The GROUPING expressions are already the two words.
+  (4) **Three literal \`\\u2014\` escape sequences** ended up in the edge function's source instead of real
+  em-dashes — users would have seen a backslash-u in the middle of a sentence.
+  (5) **A LATENT bug, surfaced by the new check:** the queued-questions query was selecting
+  \`template,answer,status\` but NOT \`alt_answer\`. So the reversed-pair check would have been completely
+  blind to anything already sitting in the review queue. It only came to light because the new check
+  needs both words.
+  ALSO HARDENED: the Generate page's "default to API if a key exists" effect was only correct BY
+  ACCIDENT — it worked because keyReady happens not to change again. If it ever did (a key added in
+  another tab, a realtime refresh) it would have yanked the user out of the mode they deliberately
+  picked. Now guarded with a ref, so an explicit choice is never overridden.
+  VERIFIED: all four edge functions healthy; every one of the 11 live questions confirmed safe in what
+  the GAME actually receives (BRIGHT/CURIOUS 6v7, SURE/CONFIDENT 4v9); client↔edge validator parity
+  restored and re-verified across 24 cases; all six test layers pass.
 - **Generation restructured: ONE page, ONE set of options, TWO ways to run it.**
   THE PROBLEM: generation lived in two places and they disagreed. The Generator page built a prompt
   to copy (with pack, levels, themes, count, format, frames, avoid-existing). AI Settings had a
@@ -4680,6 +4743,15 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    broken questions sat LIVE in a published pack while the health check said all was well. Any check
    the AI validator performs on new content, the lint must perform on existing content — above all
    \`ambiguous\`. A health page that cannot see the worst defect is worse than none: it is false comfort.
+4u. **Read the LIVE FEED, not just the code.** Two real content defects (a reversed pair, an
+   overused distractor) were invisible to every automated check AND to reading the pages — they only
+   showed up when I looked at what the GAME actually receives. The checks were all grouped by ANSWER,
+   so a repeated PAIR and a repeated ALTERNATE were structurally invisible. Periodically pull the real
+   feed and look at it as a child would.
+4v. **If the lint catches it, the validator must too.** They were inconsistent: the Health lint flagged
+   reversed pairs, but validateQuestion did not — so the AI could generate one and the review queue
+   would show it as clean. Any check that exists for EXISTING content must exist for NEW content, in
+   both copies of the validator.
 4r. **READ the page, don't just inspect it.** A page can be structurally perfect and still say
    nothing useful. The Health page showed "(untitled)" on every row for weeks — valid markup, correct
    layout, every automated check green — because the UI read \`d.label\`/\`d.issue\` while the RPC returned
@@ -5022,7 +5094,22 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    AMBIGUOUS - the alternate ALSO fits the blank at some level, so the puzzle has TWO correct answers
    and a child is marked wrong for a right answer.
 
-   DUPLICATES need THREE distinct flags, not one: \`duplicate\` (same sentence AND same answer),
+   REPETITION needs FIVE distinct flags, not one — and two of them are easy to miss entirely:
+   \`duplicate\` (same sentence AND same answer), \`same_sentence\` (same sentence, different answer),
+   \`answer_reused\` (the ANSWER WORD is already taught elsewhere), \`reversed_pair\` (THE SAME TWO WORDS
+   offered as the choice, just swapped over — CALM/PROUD and PROUD/CALM: different sentences, so not a
+   duplicate, but the child faces the identical decision twice), and \`overused_alt\` (the same word used
+   as the DISTRACTOR 3+ times — a predictable wrong option teaches the child "it is never that one"
+   instead of teaching them to read the blank).
+   The last two are the ones you will miss: every naive check groups by ANSWER, so a repeated PAIR and
+   a repeated ALTERNATE are structurally invisible. Both were live in real content and no check saw
+   them. When you group, group by the SORTED PAIR, and separately by the ALTERNATE.
+   And CRUCIALLY: every check the Health lint performs on EXISTING content, validateQuestion must
+   perform on NEW content — in BOTH copies. They were inconsistent (the lint caught reversed pairs, the
+   validator did not), which meant the AI could generate one and the review queue would call it clean.
+   The de-dup context must therefore carry BOTH words (template, answer, AND alt_answer) — a query that
+   selects only the answer makes the pair checks silently blind.
+   DUPLICATES — the original three, for reference: \`duplicate\` (same sentence AND same answer),
    \`same_sentence\` (same sentence, different answer), and \`answer_reused\` (the ANSWER WORD is
    already taught elsewhere - the case that matters most, and the one you miss if you only compare
    whole questions; in a 10-20 question pack, teaching BRAVE twice is a real defect). The de-dup
@@ -7244,8 +7331,15 @@ function GeneratorView({ packs, levels }) {
   const active = providers.find(p => p.provider === activeProvider);
   const keyReady = !!(active?.configured && active?.enabled !== false);
 
-  // Default to whichever method can actually run.
-  useEffect(() => { if (keyReady) setMethod("api"); }, [keyReady]);
+  // Default to whichever method can actually run — but ONCE, and never after the user has chosen.
+  // (Without the ref this is only correct by accident: it works because keyReady happens not to
+  // change again. If it ever did — a key added in another tab, a realtime refresh — the effect would
+  // yank the user out of the mode they deliberately picked.)
+  const methodChosen = useRef(false);
+  useEffect(() => {
+    if (!methodChosen.current && keyReady) setMethod("api");
+  }, [keyReady]);
+  const chooseMethod = (m) => { methodChosen.current = true; setMethod(m); };
 
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
@@ -7352,7 +7446,7 @@ function GeneratorView({ packs, levels }) {
         ].map(m => {
           const on = method === m.id;
           return (
-            <button key={m.id} onClick={() => !m.disabled && setMethod(m.id)} disabled={m.disabled}
+            <button key={m.id} onClick={() => !m.disabled && chooseMethod(m.id)} disabled={m.disabled}
               aria-pressed={on} aria-label={`${m.title} — ${m.sub}`}
               style={{ flex: "1 1 240px", textAlign: "left", padding: "13px 16px", borderRadius: R.lg,
                 cursor: m.disabled ? "not-allowed" : "pointer", fontFamily: "inherit",
