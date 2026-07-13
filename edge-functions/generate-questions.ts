@@ -275,7 +275,7 @@ function parseQuestions(text: string): any[] {
 // Prompt construction
 // ============================================================
 function buildPrompt(opts: any) {
-  const { pack, levelDefs, targetLevel, count, existing, notes } = opts;
+  const { pack, levelDefs, targetLevel, count, existing, notes, themes, withFrames } = opts;
   const L = levelDefs.find((l: any) => l.level === targetLevel);
   const lines: string[] = [];
 
@@ -347,6 +347,16 @@ function buildPrompt(opts: any) {
       lines.push('');
     }
   }
+  if (themes && String(themes).trim()) {
+    lines.push(`THEMES to weave through these questions: ${String(themes).trim()}`);
+    lines.push('');
+  }
+  if (withFrames) {
+    lines.push(`FRAME WORDS: as well as {blank}, you may include ONE other {token} in the sentence — a`);
+    lines.push(`word that varies by level to suit the reading age (e.g. "{feeling}"). Return it in a`);
+    lines.push(`"frame_slots" object: {"feeling": {"pool": ["happy", "calm", "content"]}}.`);
+    lines.push('');
+  }
   if (notes) { lines.push(`ADDITIONAL INSTRUCTIONS: ${notes}`); lines.push(''); }
 
   lines.push(`Produce ${count} questions.`);
@@ -412,6 +422,8 @@ Deno.serve(async (req) => {
     const body = await req.json();
     const {
       pack_id, target_level, count = 10, notes = '',
+      themes = '',            // e.g. "friendship, courage" — was manual-prompt-only
+      with_frames = false,    // ask for frame-word slots
       provider: reqProvider, test_only = false,
     } = body || {};
 

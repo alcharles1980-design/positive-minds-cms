@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.05-16", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.05-17", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -3781,6 +3781,27 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Generation restructured: ONE page, ONE set of options, TWO ways to run it.**
+  THE PROBLEM: generation lived in two places and they disagreed. The Generator page built a prompt
+  to copy (with pack, levels, themes, count, format, frames, avoid-existing). AI Settings had a
+  SECOND, stripped-down generate panel buried under key management — same idea, but missing themes and
+  frame words for no reason. So (a) generation was hidden inside a SETTINGS page, which is the wrong
+  home — settings should CONFIGURE, a content page should CREATE; and (b) the API path was a poor
+  relation of the manual one.
+  THE FIX: the page (renamed \`Generate\`) now leads with a method switch — **Use my API key** or
+  **Copy a prompt** — and the options below are IDENTICAL either way. How you run it must not change
+  what you're allowed to ask for. Only the right-hand column differs: the API route shows a plain
+  summary of what's about to happen plus a Generate button; the prompt route shows the prompt, ready
+  to copy. Both end in the same place: the review queue.
+  The API option is offered but DISABLED with a reason when no key is saved, rather than failing when
+  pressed; and the page defaults to whichever method can actually run.
+  Prompt-only options (output format, background context, avoid-existing) are HIDDEN in API mode —
+  the edge fn always returns structured JSON, always carries the brief in its system prompt, and
+  always avoids existing words. Showing those controls in API mode would be controls that do nothing.
+  ALSO: the edge function now accepts \`themes\` and \`with_frames\`, which were manual-prompt-only. The
+  two paths are now genuinely equivalent.
+  AI Settings now only CONFIGURES: providers, keys, parameters, usage. GeneratePanel deleted (dead
+  code rots), with a clear signpost to the Generate page in its place.
 - **Visual pass — actually READ the pages, and found three bugs nothing else had caught.**
   HONEST LIMIT FIRST: I cannot take true screenshots here (no browser in the sandbox, and Chrome's
   CDN is unreachable — I tried puppeteer, resvg and sharp). So instead of pretending, I did two things
@@ -4642,6 +4663,11 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    written via pm_ai_set_key and read ONLY server-side by the edge function (service role). The UI
    reads pm_ai_status, which returns a masked hint and NEVER the key. Never add a select policy to
    pm_ai_config, never return api_key from an RPC, never send a key to the client "just to show it".
+4t. **Settings configure; content pages create.** Generation was buried inside AI Settings as a
+   stripped-down panel — which put it in two places at once, and made the API path a poor relation of
+   the manual one (no themes, no frame words). One page, one set of options, two ways to run it. How
+   you run something must never change what you're allowed to ask for. And never show a control that
+   does nothing in the current mode: hide it.
 4q. **EVERY content-entry path goes through the review queue.** Not just AI generation — imports
    too. There were two ways in and only one was gated, and the ungated one (Bulk Import) is how
    BRIGHT/GENTLE reached children. Do NOT try to detect whether content "came from AI": you usually
@@ -6755,8 +6781,15 @@ function AISettingsView({ packs, levels }) {
             </div>
           </div>
 
-          {/* Generate */}
-          <GeneratePanel packs={packs} levels={levels} settings={settings} status={byProvider} />
+          {/* Generation moved to the Generate page.
+              Settings should CONFIGURE; a content page should CREATE. Having a stripped-down
+              generate panel buried in here meant generation lived in two places — and the version
+              here was missing themes and frame words for no reason. */}
+          <div className="pm-readable" style={{ background: C.brandSoft, borderRadius: R.lg,
+            padding: "16px 18px", marginTop: S.xl, fontSize: 13.5, color: C.brandInk, lineHeight: 1.6 }}>
+            <b>Looking to generate questions?</b> That now lives on the <b>Generate</b> page, where you
+            can either use this key or copy a prompt for any AI tool — with the same options either way.
+          </div>
 
           {/* Usage — AI generation is the one thing here that spends real money. Until now it left
               no trace at all. */}
@@ -6970,109 +7003,6 @@ function KeyEditor({ provider, existing, onClose, onSaved }) {
         </Btn>
       </ModalFoot>
     </>
-  );
-}
-
-// Kick off a generation run. Everything produced goes to the AI Review queue — never straight
-// into a pack.
-function GeneratePanel({ packs, levels, settings, status }) {
-  const [packId, setPackId] = useState("");
-  const [level, setLevel] = useState("");
-  const [count, setCount] = useState(settings.batch_size ?? 10);
-  const [notes, setNotes] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState(null);
-
-  const active = settings.active_provider || "anthropic";
-  const ready = !!status[active]?.configured;
-  const pack = (packs || []).find(p => p.id === packId);
-
-  const run = async () => {
-    if (!packId) { notify("Pick a pack first", "error"); return; }
-    setBusy(true); setResult(null);
-    try {
-      const res = await db_ai.generate({
-        pack_id: packId,
-        target_level: level ? parseInt(level) : null,
-        count: Math.min(30, Math.max(1, parseInt(count) || 10)),
-        notes: notes.trim(),
-      });
-      if (res?.error === "rate_limited") {
-        notify(res.message || "Rate limit reached — try again later", "error");
-        return;
-      }
-      if (res?.error) throw new Error(res.message || res.error);
-      setResult(res);
-      notify(res.message || "Queued for review");
-    } catch (e) {
-      notify(friendlyError(0, String(e?.message || e)), "error");
-    } finally { setBusy(false); }
-  };
-
-  return (
-    <div className="pm-readable" style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg }}>
-      <div style={{ fontSize: 15, fontWeight: 800, color: C.ink, marginBottom: 4 }}>Generate questions</div>
-      <div style={{ fontSize: 13, color: C.sub, marginBottom: S.md, lineHeight: 1.5 }}>
-        Everything the AI writes goes to <b>AI Review</b> first — checked automatically, then waiting for your approval. Nothing reaches a pack until you say so.
-      </div>
-
-      {!ready && (
-        <div style={{ background: C.danger + "10", border: "1px solid " + C.danger + "33", borderRadius: R.md,
-          padding: "10px 13px", fontSize: 13, color: C.danger, marginBottom: S.md }}>
-          No API key saved for <b>{PROVIDERS.find(p => p.id === active)?.name}</b>. Add one above to start generating.
-        </div>
-      )}
-
-      <div className="pm-form-2" style={{ marginBottom: S.md }}>
-        <Field label="Pack">
-          <Select value={packId} onChange={(e) => setPackId(e.target.value)}>
-            <option value="">Choose a pack…</option>
-            {(packs || []).slice().sort((a, b) => a.name.localeCompare(b.name)).map(p => (
-              <option key={p.id} value={p.id}>{p.emoji ? p.emoji + " " : ""}{p.name}</option>
-            ))}
-          </Select>
-        </Field>
-        <Field label="Target level" hint={pack ? `Pack default is ${pack.level ?? 1}` : "Uses the pack's level"}>
-          <Select value={level} onChange={(e) => setLevel(e.target.value)}>
-            <option value="">Pack default</option>
-            {(levels || []).map(l => <option key={l.level} value={l.level}>Level {l.level}{l.name ? ` — ${l.name}` : ""}</option>)}
-          </Select>
-        </Field>
-      </div>
-
-      <div className="pm-form-2" style={{ marginBottom: S.md }}>
-        <Field label="How many" hint="1–30">
-          <Input type="number" min={1} max={30} value={count} onChange={(e) => setCount(e.target.value)} />
-        </Field>
-        <Field label="Extra instructions" hint="Optional">
-          <Input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="e.g. focus on friendship" />
-        </Field>
-      </div>
-
-      <Btn onClick={run} disabled={busy || !ready || !packId}>
-        {busy ? "Generating…" : `Generate with ${PROVIDERS.find(p => p.id === active)?.name || active}`}
-      </Btn>
-
-      {result && (
-        <>
-          <div style={{ marginTop: S.md, background: C.ok + "10", border: "1px solid " + C.ok + "44",
-            borderRadius: R.md, padding: "11px 14px", fontSize: 13, color: C.ink, lineHeight: 1.55 }}>
-            <b>{result.generated}</b> question{result.generated === 1 ? "" : "s"} queued —{" "}
-            <b style={{ color: C.ok }}>{result.clean}</b> passed every check
-            {result.flagged > 0 && <> · <b style={{ color: C.danger }}>{result.flagged}</b> flagged</>}
-            {result.repaired > 0 && <> · {result.repaired} auto-fixed</>}.
-            {" "}Go to <b>AI Review</b> to approve them.
-          </div>
-          {/* A short batch is a quiet failure — say why. */}
-          {result.warning && (
-            <div style={{ marginTop: 8, background: C.warn + "12", border: "1px solid " + C.warn + "44",
-              borderRadius: R.md, padding: "11px 14px", fontSize: 12.5, color: C.ink2, lineHeight: 1.55 }}>
-              <b style={{ color: C.warn }}>Heads up.</b> {result.warning}
-            </div>
-          )}
-        </>
-      )}
-    </div>
   );
 }
 
@@ -7300,6 +7230,26 @@ function buildGeneratorPrompt({ pack, levels, selectedLevels, themes, count, for
 }
 
 function GeneratorView({ packs, levels }) {
+  // HOW to run it. The options are identical either way — the method must not change what you're
+  // allowed to ask for. (Previously the API path lived in Settings as a stripped-down panel with no
+  // themes and no frame words: a poor relation of the manual one, for no good reason.)
+  const [method, setMethod] = useState("prompt");
+
+  // Is an API key actually usable? If not, the API option is offered but disabled with a reason,
+  // rather than silently failing when you press Generate.
+  const keyState = useAsync(() => rpc("pm_ai_status").catch(() => []), []);
+  const providers = keyState.data || [];
+  const settingsState = useAsync(() => rest("pm_ai_settings?id=eq.1&limit=1").then(r => (r.data || [])[0] || null), []);
+  const activeProvider = settingsState.data?.active_provider || "anthropic";
+  const active = providers.find(p => p.provider === activeProvider);
+  const keyReady = !!(active?.configured && active?.enabled !== false);
+
+  // Default to whichever method can actually run.
+  useEffect(() => { if (keyReady) setMethod("api"); }, [keyReady]);
+
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState(null);
+
   const realLevels = (levels && levels.length) ? levels : Array.from({ length: 10 }, (_, i) => ({ level: i + 1, name: "" }));
   const [packId, setPackId] = useState("");
   const pack = (packs || []).find(p => p.id === packId) || null;
@@ -7352,19 +7302,80 @@ function GeneratorView({ packs, levels }) {
     catch { notify("Couldn't copy — select and copy manually", { kind: "error" }); }
   };
 
-  const copyPrompt = async () => {
-    try { await navigator.clipboard.writeText(prompt); setCopied(true); setTimeout(() => setCopied(false), 1800); notify("Prompt copied"); }
+  // Run it through the API. Uses the SAME options as the prompt path — that is the whole point.
+  const runApi = async () => {
+    if (!packId) { notify("Pick a pack first", "error"); return; }
+    setRunning(true); setResult(null);
+    try {
+      const res = await callFn("generate-questions", {
+        pack_id: packId,
+        // The API takes ONE target level. If several are ticked, use the lowest — the level system
+        // renders every other level from the same question anyway, so nothing is lost.
+        target_level: selectedLevels.length ? Math.min(...selectedLevels) : null,
+        count: Math.min(30, Math.max(1, parseInt(count) || 10)),
+        notes: extraNotes.trim(),
+        themes: themes.trim(),
+        with_frames: !!withFrames,
+      });
+      if (res?.error === "rate_limited") { notify(res.message || "Rate limit reached", "error"); return; }
+      if (res?.error === "no_key") { notify("No API key saved — add one in AI Settings", "error"); return; }
+      if (res?.error === "provider_disabled") { notify(res.message || "That provider is turned off", "error"); return; }
+      if (res?.error) throw new Error(res.message || res.error);
+      setResult(res);
+      notify(res.message || "Queued for review");
+    } catch (e) {
+      notify(friendlyError(0, String(e?.message || e)), "error");
+    } finally { setRunning(false); }
+  };
+
+  const copyPrompt = async () => {    try { await navigator.clipboard.writeText(prompt); setCopied(true); setTimeout(() => setCopied(false), 1800); notify("Prompt copied"); }
     catch { notify("Couldn't copy — select and copy manually", { kind: "error" }); }
   };
 
   return (
     <div>
       <div style={{ marginBottom: S.lg }}>
-        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Content generator</h1>
-        <p style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5, lineHeight: 1.5, maxWidth: 640 }}>
-          Build a ready-to-paste prompt for an AI tool. Pick a pack, choose levels and themes, and copy the prompt — the AI returns a batch of questions in a format you can bulk-import.
+        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Generate questions</h1>
+        <p className="pm-prose" style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5, lineHeight: 1.5 }}>
+          Describe what you want, then either let your own AI key write it, or copy a prompt to paste
+          into any AI tool. Either way it lands in <b>AI Review</b> for your approval first.
         </p>
       </div>
+
+      {/* HOW to run it. The options below are the SAME either way — the method should not change
+          what you're allowed to ask for. (Before this, API generation was a stripped-down panel
+          buried in Settings, missing themes and frame words entirely.) */}
+      <div className="pm-readable" style={{ display: "flex", gap: 10, marginBottom: S.lg, flexWrap: "wrap" }}>
+        {[
+          { id: "api", title: "Use my API key", sub: keyReady ? "Writes them for you, straight into review" : "No key saved yet", icon: "⚡", disabled: !keyReady },
+          { id: "prompt", title: "Copy a prompt", sub: "Paste into ChatGPT, Claude, anything", icon: "⎘", disabled: false },
+        ].map(m => {
+          const on = method === m.id;
+          return (
+            <button key={m.id} onClick={() => !m.disabled && setMethod(m.id)} disabled={m.disabled}
+              aria-pressed={on} aria-label={`${m.title} — ${m.sub}`}
+              style={{ flex: "1 1 240px", textAlign: "left", padding: "13px 16px", borderRadius: R.lg,
+                cursor: m.disabled ? "not-allowed" : "pointer", fontFamily: "inherit",
+                border: "2px solid " + (on ? C.brand : C.line),
+                background: on ? C.brandSoft : C.panel,
+                opacity: m.disabled ? 0.55 : 1 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                <span style={{ fontSize: 17 }}>{m.icon}</span>
+                <span style={{ fontSize: 14.5, fontWeight: 800, color: on ? C.brandInk : C.ink }}>{m.title}</span>
+              </div>
+              <div style={{ fontSize: 12.5, color: on ? C.brandInk : C.sub, marginTop: 3, opacity: .85 }}>{m.sub}</div>
+            </button>
+          );
+        })}
+      </div>
+
+      {method === "api" && !keyReady && (
+        <div className="pm-readable" style={{ background: C.warn + "12", border: "1px solid " + C.warn + "44",
+          borderRadius: R.md, padding: "11px 14px", marginBottom: S.lg, fontSize: 13, color: C.ink2, lineHeight: 1.55 }}>
+          You haven't saved an API key yet, so this option can't run. Add one in <b>AI Settings</b> — or
+          use <b>Copy a prompt</b>, which works with any AI tool and needs no key.
+        </div>
+      )}
 
       <div className="pm-gen-grid" style={{ display: "grid", gridTemplateColumns: "minmax(320px, 420px) 1fr", gap: S.lg, alignItems: "start" }}>
         {/* Controls */}
@@ -7405,15 +7416,19 @@ function GeneratorView({ packs, levels }) {
               <Textarea value={themes} onChange={(e) => setThemes(e.target.value)} rows={2} placeholder="e.g. self-worth, trying new things, personal strengths" />
             </Field>
 
-            <div className="pm-form-2">
+            {/* "Output format" only means something for the copy-a-prompt path — the API always
+                returns structured JSON. Showing it in API mode would be a control that does nothing. */}
+            <div className={method === "prompt" ? "pm-form-2" : ""}>
               <Field label="How many">
-                <Input type="number" min={1} max={100} value={count} onChange={(e) => setCount(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))} />
+                <Input type="number" min={1} max={100} value={count} aria-label="How many questions" onChange={(e) => setCount(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))} />
               </Field>
-              <Field label="Output format" hint={OUTPUT_FORMATS[format]?.hint}>
-                <Select value={format} onChange={(e) => setFormat(e.target.value)}>
-                  {Object.entries(OUTPUT_FORMATS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
-                </Select>
-              </Field>
+              {method === "prompt" && (
+                <Field label="Output format" hint={OUTPUT_FORMATS[format]?.hint}>
+                  <Select value={format} onChange={(e) => setFormat(e.target.value)}>
+                    {Object.entries(OUTPUT_FORMATS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                  </Select>
+                </Field>
+              )}
             </div>
 
             <label style={{ display: "flex", alignItems: "flex-start", gap: 9, cursor: "pointer" }}>
@@ -7423,13 +7438,16 @@ function GeneratorView({ packs, levels }) {
               </span>
             </label>
 
+            {method === "prompt" && (
             <label style={{ display: "flex", alignItems: "flex-start", gap: 9, cursor: "pointer" }}>
               <input type="checkbox" checked={includeContext} onChange={(e) => setIncludeContext(e.target.checked)} style={{ width: 16, height: 16, accentColor: C.brand, marginTop: 2 }} />
               <span style={{ fontSize: 13.5, color: C.ink, fontWeight: 600 }}>Include background context
                 <div style={{ fontSize: 12, color: C.sub, fontWeight: 500, marginTop: 1 }}>Prepend a short "why this matters" so the AI writes on-model. (Full doc below.)</div>
               </span>
             </label>
+            )}
 
+            {method === "prompt" && (
             <label style={{ display: "flex", alignItems: "flex-start", gap: 9, cursor: pack ? "pointer" : "not-allowed", opacity: pack ? 1 : 0.55 }}>
               <input type="checkbox" checked={avoidExisting} disabled={!pack} onChange={(e) => setAvoidExisting(e.target.checked)} style={{ width: 16, height: 16, accentColor: C.brand, marginTop: 2 }} />
               <span style={{ fontSize: 13.5, color: C.ink, fontWeight: 600 }}>Avoid existing questions
@@ -7438,6 +7456,14 @@ function GeneratorView({ packs, levels }) {
                 </div>
               </span>
             </label>
+            )}
+
+            {method === "api" && (
+              <div style={{ fontSize: 12.5, color: C.faint, lineHeight: 1.55, paddingTop: 2 }}>
+                The API route always avoids words already used and always writes on-model — no need to
+                ask for either.
+              </div>
+            )}
 
             <Field label="Extra instructions" hint="Optional — anything specific to add to the prompt">
               <Textarea value={extraNotes} onChange={(e) => setExtraNotes(e.target.value)} rows={2} placeholder="e.g. avoid words with silent letters; keep answers under 6 letters" />
@@ -7466,7 +7492,57 @@ function GeneratorView({ packs, levels }) {
           </div>
         </div>
 
-        {/* Prompt output */}
+        {/* RIGHT COLUMN — this is the ONLY part that differs by method. */}
+        {method === "api" ? (
+          <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg,
+            padding: S.lg, position: "sticky", top: S.lg, display: "grid", gap: S.md }}>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 800, color: C.ink }}>Generate with your API key</div>
+              <div style={{ fontSize: 13, color: C.sub, marginTop: 3, lineHeight: 1.55 }}>
+                {active ? <>Using <b>{active.model || activeProvider}</b>.</> : null} Each question is checked
+                against the real game engine, then waits in <b>AI Review</b> for you to approve.
+              </div>
+            </div>
+
+            {/* A plain summary of what is about to happen — no surprises. */}
+            <div style={{ background: C.bg, borderRadius: R.md, padding: "12px 14px", fontSize: 13, color: C.ink2, lineHeight: 1.7 }}>
+              <div><b>{count}</b> question{count === 1 ? "" : "s"}</div>
+              <div>for <b>{pack ? `${pack.emoji || ""} ${pack.name}` : "— pick a pack"}</b></div>
+              <div>at <b>{selectedLevels.length ? `level${selectedLevels.length > 1 ? "s" : ""} ${selectedLevels.join(", ")}` : `the pack's level`}</b></div>
+              {themes.trim() && <div>on <b>{themes.trim()}</b></div>}
+              {withFrames && <div>with frame words</div>}
+            </div>
+
+            <Btn onClick={runApi} disabled={running || !packId || !keyReady}>
+              {running ? "Generating…" : `Generate ${count} question${count === 1 ? "" : "s"}`}
+            </Btn>
+
+            {result && (
+              <>
+                <div style={{ background: C.ok + "10", border: "1px solid " + C.ok + "44", borderRadius: R.md,
+                  padding: "12px 14px", fontSize: 13, color: C.ink, lineHeight: 1.6 }}>
+                  <b>{result.generated}</b> question{result.generated === 1 ? "" : "s"} queued —{" "}
+                  <b style={{ color: C.ok }}>{result.clean}</b> passed every check
+                  {result.flagged > 0 && <> · <b style={{ color: C.danger }}>{result.flagged}</b> flagged</>}
+                  {result.repaired > 0 && <> · {result.repaired} auto-fixed</>}.
+                  <div style={{ marginTop: 6 }}>Go to <b>AI Review</b> to approve them.</div>
+                </div>
+                {result.warning && (
+                  <div style={{ background: C.warn + "12", border: "1px solid " + C.warn + "44", borderRadius: R.md,
+                    padding: "11px 14px", fontSize: 12.5, color: C.ink2, lineHeight: 1.55 }}>
+                    <b style={{ color: C.warn }}>Heads up.</b> {result.warning}
+                  </div>
+                )}
+              </>
+            )}
+
+            <div style={{ fontSize: 12, color: C.faint, lineHeight: 1.5 }}>
+              Nothing reaches a pack until you approve it. Model, temperature and spend limits are in{" "}
+              <b>AI Settings</b>.
+            </div>
+          </div>
+        ) : (
+        /* Prompt output */
         <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, overflow: "hidden", position: "sticky", top: S.lg }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, padding: `${S.md}px ${S.lg}px`, borderBottom: "1px solid " + C.line }}>
             <span style={{ fontSize: 13, fontWeight: 800, color: C.ink }}>Generated prompt</span>
@@ -7481,6 +7557,7 @@ function GeneratorView({ packs, levels }) {
             Paste this into your AI tool, then bring the result back via <b>a pack → Import</b>{format === "table" ? " (convert the table to pipe/JSON first)" : ""}.
           </div>
         </div>
+        )}
       </div>
     </div>
   );
@@ -8188,7 +8265,7 @@ const NAV = [
   { id: "dashboard", label: "Overview", icon: "◈" },
   { id: "library", label: "Packs", icon: "▦" },
   { id: "questions", label: "Questions", icon: "⌕" },
-  { id: "generator", label: "Generator", icon: "✦" },
+  { id: "generator", label: "Generate", icon: "✦" },
   { id: "levels", label: "Levels", icon: "▲" },
   { id: "aireview", label: "AI Review", icon: "◎" },
   { id: "aisettings", label: "AI Settings", icon: "✧" },
