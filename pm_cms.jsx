@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.05-18", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.05-19", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -3747,6 +3747,49 @@ curl 'https://tytrmjjucqijzcrbwjfm.supabase.co/functions/v1/content-api?manifest
 curl 'https://tytrmjjucqijzcrbwjfm.supabase.co/functions/v1/content-api?packs=confidence&levels=1'
 \`\`\`
 
+## 7e. CLAUDE CONNECTOR (MCP) — partners write content by talking to Claude
+
+Three trusted partners connect this CMS to their OWN Claude account and propose content by simply
+asking for it: "write 15 questions for Calmness about bedtime worries". Their Claude subscription pays
+for the generation — no API key of ours is involved.
+
+**WHY IT IS SAFE, and this matters more than any permission check:** a partner CANNOT reach a child.
+\`pm_review_approve\` is the ONLY path into live content and it requires a human to press Approve. So
+the worst a partner can do — even a compromised one — is fill the review queue with things you reject.
+That is the entire blast radius. There is deliberately NO tool to publish, delete, or edit a pack.
+
+**The server:** edge function \`mcp\` (verify_jwt=FALSE — partners authenticate with their own token,
+not a Supabase JWT). Speaks JSON-RPC 2.0 over Streamable HTTP. Four tools, deliberately narrow:
+| Tool | Reads | Writes |
+|---|---|---|
+| \`list_packs\` | packs + level rules + the brief | — |
+| \`get_pack_content\` | existing questions, words already used | — |
+| \`check_questions\` | — | — (pure validation, saves nothing) |
+| \`propose_questions\` | — | **the review queue ONLY** |
+
+\`check_questions\` is the interesting one: Claude validates its OWN drafts against the real engine
+before proposing, so it catches and fixes the same-length-words bug itself. Verified live — given
+BRIGHT/GENTLE it correctly reported "GENTLE also fits the blank at levels 7, 8, 9, 10 — two correct
+answers", AND noticed BRIGHT was already used. The queue gets BETTER content, not just more.
+
+**AUTH:** a shared-secret token per partner (\`Authorization: Bearer pmk_...\`). NOT OAuth — with three
+trusted people, OAuth 2.1 with PKCE would be pure ceremony. The token gives us what we actually need:
+we know WHO proposed each question (queued rows are tagged \`partner:sarah\`) and we can revoke one
+partner without touching the others.
+
+**Table \`pm_mcp_tokens\`** — same security posture as pm_ai_config: RLS on, ZERO policies, so the
+browser cannot read it at all. Only sha256 HASHES are stored; the raw token is shown ONCE at creation
+and is genuinely unrecoverable. Verified: an authenticated admin reading the table gets [].
+RPCs: \`pm_mcp_issue_token\` (returns the raw token exactly once), \`pm_mcp_list_tokens\` (never returns
+a token), \`pm_mcp_revoke_token\`.
+
+**Page:** Claude Connector (connector.jsx). Issue a token, see usage, revoke access, and the setup
+instructions to hand a partner.
+
+**ATTACK-TESTED:** no token → 401. Forged token → 401. Forged token attempting to write → 401 and
+nothing reached the database. A successful propose landed in the QUEUE tagged \`partner:...\`, and ZERO
+questions reached the live pack.
+
 ## 8. Publishing channels
 All emit through a chosen profile:
 - **File** — download the transformed JSON bundle.
@@ -3813,6 +3856,24 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **NEW: Claude Connector (MCP) — partners write content by talking to Claude.** Three trusted
+  partners add this CMS as a custom connector in their OWN Claude account and simply ask for content.
+  Their subscription pays for it. New edge fn \`mcp\` (JSON-RPC 2.0, verify_jwt=false), new table
+  \`pm_mcp_tokens\`, new page **Claude Connector** (connector.jsx), three new RPCs.
+  FOUR TOOLS, deliberately narrow: list_packs, get_pack_content, check_questions (pure validation —
+  saves nothing), propose_questions (writes to the REVIEW QUEUE only). No publish. No delete. No pack
+  editing.
+  THE POINT: a partner cannot reach a child. pm_review_approve is still the only path into live
+  content. The worst they can do — even compromised — is fill the queue with things you reject.
+  \`check_questions\` means Claude catches its OWN mistakes before proposing. Verified live: given
+  BRIGHT/GENTLE it reported "GENTLE also fits the blank at levels 7, 8, 9, 10 — two correct answers"
+  AND noticed BRIGHT was already taken. The queue gets better content, not just more.
+  AUTH: a token per partner, NOT OAuth (with three trusted people that would be ceremony). Stored as a
+  sha256 hash; the raw token is shown once and is genuinely unrecoverable. Queued rows are tagged
+  \`partner:sarah\` so you know whose work you're reviewing.
+  ATTACK-TESTED: no token → 401; forged token → 401; forged token trying to WRITE → 401 with nothing
+  reaching the DB; an authenticated admin reading pm_mcp_tokens from the browser → []. A successful
+  propose landed in the QUEUE and ZERO questions reached the live pack.
 - **Deep audit after the restructure — five real bugs, two of them found by reading the LIVE feed.**
   I had just restructured a page, deleted a component and redeployed the edge function. That is exactly
   when things break in ways the existing tests cannot see, because those tests were written BEFORE the
@@ -4731,6 +4792,11 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    the manual one (no themes, no frame words). One page, one set of options, two ways to run it. How
    you run something must never change what you're allowed to ask for. And never show a control that
    does nothing in the current mode: hide it.
+4w. **The MCP connector must never grow a write tool beyond propose_questions.** Partners can read
+   packs and propose to the queue. That is all. The moment you add publish/delete/edit, the blast
+   radius stops being "a queue full of things Albert rejects" and becomes "a partner can reach a
+   child". If a partner needs more, they belong in the CMS, not a chat window. The validator in the
+   MCP server is a FOURTH copy — it must stay byte-identical to the other three.
 4q. **EVERY content-entry path goes through the review queue.** Not just AI generation — imports
    too. There were two ways in and only one was gated, and the ungated one (Bulk Import) is how
    BRIGHT/GENTLE reached children. Do NOT try to detect whether content "came from AI": you usually
@@ -5185,6 +5251,25 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    so it lands as a DRAFT instead, but it must still be validated and warn loudly.
    REMEMBER WHY THE HUMAN IS THERE: the machine judges mechanics; only a person judges tone and
    meaning. "PERFECT" passes every automated check and is still the wrong word to teach a child.
+6d. **CLAUDE CONNECTOR (MCP) — let trusted partners write content by talking to Claude.**
+   An edge fn \`mcp\` (verify_jwt=FALSE — partners use their OWN token, not a Supabase JWT) speaking
+   JSON-RPC 2.0 over Streamable HTTP. Handle \`initialize\` (return protocolVersion, capabilities.tools,
+   serverInfo, and instructions telling Claude the order to call things), \`notifications/initialized\`
+   (202, no body), \`tools/list\` and \`tools/call\`.
+   FOUR TOOLS AND NO MORE: list_packs (packs + level rules + THE BRIEF, so the rules are always in
+   context), get_pack_content (existing questions + every answer word already taken), check_questions
+   (validate drafts, SAVE NOTHING — this is what lets Claude fix its own mistakes before proposing),
+   propose_questions (the ONLY write, and it writes to the REVIEW QUEUE).
+   NEVER add publish, delete, or edit-pack. The safety of this whole feature rests on the blast radius
+   being "a queue full of things the reviewer rejects". A write tool beyond the queue destroys that.
+   If a partner needs more, they belong in the CMS.
+   AUTH: a shared-secret token per partner (Authorization: Bearer pmk_...). Do NOT build OAuth for a
+   handful of trusted people — it is ceremony. Store only a sha256 HASH; show the raw token ONCE and
+   never again. Put the token table under the same lockdown as the API keys (RLS on, ZERO policies, so
+   the browser cannot read it). Tag every queued row with \`partner:<name>\` so the reviewer knows whose
+   work they are looking at.
+   The validator in the MCP server is a FOURTH copy — it must stay byte-identical to core.jsx,
+   content-api and generate-questions.
 7. **Activity log:** every mutation recorded (who/what/when) via pm_log.
 8. **Developer Notes page:** hardcoded architecture doc + CLAUDE.md + this build prompt,
    each viewable with copy + download, plus an editable scratchpad saved to pm_dev_notes.
@@ -6323,7 +6408,9 @@ function AIReviewView({ packs, levels }) {
                       {r.target_level != null && <LevelChip level={r.target_level} levels={levels} />}
                       {r.provider && (
                         <Pill tone="muted">
-                          {r.provider === "import" ? "Imported"
+                          {r.provider.startsWith("partner:")
+                            ? `${r.provider.slice(8)} (via Claude)`   // a partner wrote this
+                            : r.provider === "import" ? "Imported"
                             : r.provider === "ai-paste" ? "Pasted from AI"
                             : r.provider}
                         </Pill>
@@ -7088,6 +7175,271 @@ function KeyEditor({ provider, existing, onClose, onSaved }) {
         <Btn onClick={submit} disabled={busy || (isNew && !key.trim())}>
           {busy ? "Saving…" : isNew ? "Save key" : "Save settings"}
         </Btn>
+      </ModalFoot>
+    </>
+  );
+}
+
+// ===== connector.jsx =====
+// ============================================================
+// Claude Connector — let partners write content by talking to Claude.
+//
+// A partner adds this CMS as a connector in their own Claude account, then simply says
+// "write 15 questions for Calmness about bedtime worries". Claude reads the pack, checks its own
+// drafts against the real game engine, and sends them to the AI Review queue.
+//
+// WHY THIS IS SAFE, and it matters more than any permission check:
+//   A partner CANNOT reach a child. pm_review_approve is the only path into live content and it
+//   requires a human to press Approve. The worst a partner can do — even a compromised one — is
+//   fill the review queue with things you reject. That is the entire blast radius.
+//   There is deliberately no tool to publish, delete, or edit a pack.
+//
+// TOKENS: shown ONCE at creation, then only ever stored as a sha256 hash. Not even an authenticated
+// admin can read them back from the browser (verified: the table has RLS on and zero policies).
+// ============================================================
+
+const MCP_URL = `${CFG.url}/functions/v1/mcp`;
+
+const db_mcp = {
+  list: () => rpc("pm_mcp_list_tokens"),
+  issue: (partner) => rpc("pm_mcp_issue_token", { p_partner: partner }),
+  revoke: (id) => rpc("pm_mcp_revoke_token", { p_id: id }),
+};
+
+function ConnectorView() {
+  const { loading, error, data, reload } = useAsync(() => db_mcp.list(), []);
+  const [adding, setAdding] = useState(false);
+  const [issued, setIssued] = useState(null);   // the one-time reveal
+  const [copiedUrl, setCopiedUrl] = useState(false);
+
+  const tokens = data || [];
+  const active = tokens.filter(t => t.active);
+
+  const copyUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(MCP_URL);
+      setCopiedUrl(true); setTimeout(() => setCopiedUrl(false), 1800);
+      notify("Connector URL copied");
+    } catch { notify("Couldn't copy — select and copy manually", "error"); }
+  };
+
+  const revoke = async (t) => {
+    const ok = await confirmDialog({
+      title: `Revoke ${t.partner}'s access?`,
+      body: "Their Claude connector will stop working immediately. Anything they've already sent for review stays in the queue.",
+      confirmText: "Revoke", tone: "danger",
+    });
+    if (!ok) return;
+    try { await db_mcp.revoke(t.id); await reload(); notify(`${t.partner}'s access revoked`); }
+    catch (e) { notify(friendlyError(0, String(e?.message || e)), "error"); }
+  };
+
+  if (error) return <ErrorState error={error} onRetry={reload} />;
+
+  return (
+    <div>
+      <div style={{ marginBottom: S.lg }}>
+        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>Claude Connector</h1>
+        <p className="pm-prose" style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5, lineHeight: 1.55 }}>
+          Let a partner write content just by talking to Claude. Everything they produce comes to you
+          for approval first — they can't publish anything.
+        </p>
+      </div>
+
+      {/* What a partner can and cannot do. Say it plainly — this is the whole security story. */}
+      <div className="pm-readable" style={{ background: C.brandSoft, borderRadius: R.lg, padding: "14px 17px",
+        marginBottom: S.lg, fontSize: 13.5, color: C.brandInk, lineHeight: 1.65 }}>
+        <b>A partner can only propose questions.</b> They can read your packs (so they don't repeat
+        words you've already used), and send new questions to <b>AI Review</b>. That's all. They cannot
+        publish, delete, or edit anything. The worst they can do is fill your review queue with things
+        you then reject.
+      </div>
+
+      {/* The URL partners need */}
+      <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg, marginBottom: S.lg }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: C.ink2, marginBottom: 6 }}>Connector URL</div>
+        <div style={{ display: "flex", gap: 9, alignItems: "center", flexWrap: "wrap" }}>
+          <code style={{ flex: "1 1 300px", fontSize: 12.5, fontFamily: "ui-monospace, monospace",
+            background: C.bg, padding: "9px 12px", borderRadius: R.sm, color: C.ink2,
+            overflowWrap: "anywhere", border: "1px solid " + C.line }}>{MCP_URL}</code>
+          <Btn size="sm" variant="soft" onClick={copyUrl} icon={copiedUrl ? "✓" : "⧉"}>
+            {copiedUrl ? "Copied" : "Copy"}
+          </Btn>
+        </div>
+        <div style={{ fontSize: 12, color: C.faint, marginTop: 7, lineHeight: 1.5 }}>
+          The same for everyone. What identifies a partner is their token.
+        </div>
+      </div>
+
+      {/* Partners */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: S.md, flexWrap: "wrap" }}>
+        <h2 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: C.ink }}>Partners</h2>
+        {active.length > 0 && <Pill tone="muted">{active.length} with access</Pill>}
+        <div style={{ flex: 1 }} />
+        <Btn size="sm" onClick={() => setAdding(true)}>Add a partner</Btn>
+      </div>
+
+      {loading ? (
+        <div style={{ display: "grid", gap: 10 }}>{Array.from({ length: 2 }).map((_, i) => <Skeleton key={i} h={74} r={12} />)}</div>
+      ) : tokens.length === 0 ? (
+        <EmptyState
+          icon="◇"
+          title="No partners yet"
+          body="Add one and you'll get a token to send them. They paste it into Claude, and can start writing straight away."
+        />
+      ) : (
+        <div style={{ display: "grid", gap: 10 }}>
+          {tokens.map(t => (
+            <div key={t.id} style={{ background: C.panel, borderRadius: R.lg, padding: S.lg,
+              border: "1px solid " + C.line,
+              borderLeft: "4px solid " + (t.active ? C.ok : C.faint),
+              opacity: t.active ? 1 : 0.62 }}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: S.md, flexWrap: "wrap" }}>
+                <div style={{ flex: 1, minWidth: 200 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 15.5, fontWeight: 800, color: C.ink }}>{t.partner}</span>
+                    {!t.active && <Pill tone="muted">Revoked</Pill>}
+                  </div>
+                  <div style={{ fontSize: 12.5, color: C.sub, marginTop: 4, lineHeight: 1.6 }}>
+                    {t.last_used_at
+                      ? <>Last used {relativeTime(t.last_used_at)} · {t.calls_made} call{t.calls_made === 1 ? "" : "s"}</>
+                      : <span style={{ color: C.faint }}>Hasn't connected yet</span>}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
+                    Added {relativeTime(t.created_at)}
+                  </div>
+                </div>
+                {t.active && (
+                  <button onClick={() => revoke(t)}
+                    style={{ fontSize: 12.5, fontWeight: 700, padding: "7px 13px", borderRadius: 8, cursor: "pointer",
+                      border: "1px solid " + C.line, background: "transparent", color: C.danger }}>
+                    Revoke
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* How it works for them */}
+      <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg,
+        padding: S.lg, marginTop: S.xl }} className="pm-readable">
+        <h2 style={{ margin: "0 0 10px", fontSize: 15, fontWeight: 800, color: C.ink }}>What your partner does</h2>
+        <ol style={{ margin: 0, paddingLeft: 20, fontSize: 13.5, color: C.ink2, lineHeight: 1.85 }}>
+          <li>In Claude, they go to <b>Settings → Connectors → Add custom connector</b>.</li>
+          <li>They paste the URL above, and their token as the authentication.</li>
+          <li>Then they just talk to it: <i>"Write me 15 questions for the Calmness pack about worries at bedtime."</i></li>
+        </ol>
+        <div style={{ fontSize: 13, color: C.sub, marginTop: 12, lineHeight: 1.65, paddingTop: 12, borderTop: "1px solid " + C.lineSoft }}>
+          Behind the scenes, Claude reads the pack so it doesn't repeat words you've already used,
+          checks its own drafts against the real game engine — including whether the two words are the
+          same length, which would give the child two correct answers — fixes anything it got wrong,
+          and only then sends them to you. <b>You'll see them in AI Review, tagged with who wrote them.</b>
+        </div>
+      </div>
+
+      <Modal open={adding} onClose={() => setAdding(false)} width={480}>
+        {adding && (
+          <AddPartner
+            onClose={() => setAdding(false)}
+            onIssued={async (result) => { setAdding(false); setIssued(result); await reload(); }}
+          />
+        )}
+      </Modal>
+
+      <Modal open={issued !== null} onClose={() => setIssued(null)} width={540}>
+        {issued && <TokenReveal result={issued} onClose={() => setIssued(null)} />}
+      </Modal>
+    </div>
+  );
+}
+
+function AddPartner({ onClose, onIssued }) {
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    const n = name.trim();
+    if (!n) { notify("Give them a name — you'll want to know whose work you're reviewing", "error"); return; }
+    setBusy(true);
+    try {
+      const res = await db_mcp.issue(n);
+      onIssued(res);
+    } catch (e) {
+      setBusy(false);
+      notify(friendlyError(0, String(e?.message || e)), "error");
+    }
+  };
+
+  return (
+    <>
+      <ModalHead title="Add a partner" subtitle="They'll get a token to paste into Claude" />
+      <div style={{ padding: S.xl, display: "grid", gap: S.md }}>
+        <Field label="Their name" hint="Shown against every question they send, so you know whose work you're reviewing">
+          <Input value={name} onChange={(e) => setName(e.target.value)} autoFocus
+            placeholder="e.g. Sarah" onKeyDown={(e) => e.key === "Enter" && submit()} />
+        </Field>
+        <div style={{ fontSize: 12.5, color: C.faint, lineHeight: 1.55 }}>
+          You'll see the token once, on the next screen. It isn't stored, so it can't be shown again —
+          if they lose it, just add them afresh.
+        </div>
+      </div>
+      <ModalFoot>
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn onClick={submit} disabled={busy || !name.trim()}>{busy ? "Creating…" : "Create token"}</Btn>
+      </ModalFoot>
+    </>
+  );
+}
+
+// The one-time reveal. This is the ONLY moment the raw token exists anywhere — we store a hash, so
+// it genuinely cannot be shown again. Say so plainly rather than letting them find out later.
+function TokenReveal({ result, onClose }) {
+  const [copied, setCopied] = useState(false);
+  const token = result?.token || "";
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(token);
+      setCopied(true); setTimeout(() => setCopied(false), 2000);
+      notify("Token copied");
+    } catch { notify("Couldn't copy — select the text and copy it manually", "error"); }
+  };
+
+  return (
+    <>
+      <ModalHead title={`${result.partner}'s token`} subtitle="Copy it now — you won't see it again" />
+      <div style={{ padding: S.xl, display: "grid", gap: S.md }}>
+        <div style={{ background: C.warn + "12", border: "1px solid " + C.warn + "44", borderRadius: R.md,
+          padding: "11px 14px", fontSize: 13, color: C.ink2, lineHeight: 1.6 }}>
+          <b style={{ color: C.warn }}>This is the only time you'll see this.</b> We store it as a
+          one-way hash, so it genuinely can't be recovered — not by you, not by anyone. Send it to{" "}
+          {result.partner} now. If it's lost, just add them again.
+        </div>
+
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: C.ink2, marginBottom: 6 }}>Token</div>
+          <div style={{ display: "flex", gap: 9, alignItems: "stretch", flexWrap: "wrap" }}>
+            <code style={{ flex: "1 1 260px", fontSize: 13, fontFamily: "ui-monospace, monospace",
+              background: C.bg, padding: "12px 14px", borderRadius: R.sm, color: C.ink,
+              border: "1px solid " + C.line, overflowWrap: "anywhere", userSelect: "all" }}>{token}</code>
+            <Btn onClick={copy} icon={copied ? "✓" : "⧉"}>{copied ? "Copied" : "Copy"}</Btn>
+          </div>
+        </div>
+
+        <div style={{ background: C.bg, borderRadius: R.md, padding: "12px 15px" }}>
+          <div style={{ fontSize: 10.5, fontWeight: 800, color: C.faint, letterSpacing: .3,
+            textTransform: "uppercase", marginBottom: 7 }}>Send them this</div>
+          <div style={{ fontSize: 13, color: C.ink2, lineHeight: 1.75 }}>
+            In Claude: <b>Settings → Connectors → Add custom connector</b><br />
+            URL: <code style={{ fontSize: 12, fontFamily: "ui-monospace, monospace" }}>{MCP_URL}</code><br />
+            Token: the one above
+          </div>
+        </div>
+      </div>
+      <ModalFoot>
+        <Btn onClick={onClose}>Done — I've copied it</Btn>
       </ModalFoot>
     </>
   );
@@ -8363,6 +8715,7 @@ const NAV = [
   { id: "levels", label: "Levels", icon: "▲" },
   { id: "aireview", label: "AI Review", icon: "◎" },
   { id: "aisettings", label: "AI Settings", icon: "✧" },
+  { id: "connector", label: "Claude Connector", icon: "◇" },
   { id: "health", label: "Health", icon: "◉" },
   { id: "publish", label: "Publishing", icon: "⇧" },
   { id: "activity", label: "Activity", icon: "≡" },
@@ -8402,7 +8755,7 @@ function App() {
 
   const [authed, setAuthed] = useState(() => !!session.load());
   // URL-hash routing so a refresh keeps you where you were (e.g. #/questions, #/pack/<id>).
-  const VALID_NAV = ["dashboard", "library", "questions", "generator", "levels", "aireview", "aisettings", "health", "publish", "activity", "devnotes"];
+  const VALID_NAV = ["dashboard", "library", "questions", "generator", "levels", "aireview", "aisettings", "connector", "health", "publish", "activity", "devnotes"];
   const parseHash = () => {
     const raw = (window.location.hash || "").replace(/^#\/?/, "").trim(); // "questions" | "pack/<id>" | ""
     if (!raw) return { nav: "dashboard", packId: null };
@@ -8715,6 +9068,8 @@ function App() {
             <AIReviewView packs={packs} levels={levels} />
           ) : nav === "aisettings" ? (
             <AISettingsView packs={packs} levels={levels} />
+          ) : nav === "connector" ? (
+            <ConnectorView />
           ) : nav === "publish" ? (
             <PublishHub packs={packs} onSynced={reloadPacks} />
           ) : nav === "devnotes" ? (
