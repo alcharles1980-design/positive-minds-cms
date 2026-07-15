@@ -65,7 +65,7 @@ function SystemArchitectureView() {
   const GH = "https://github.com/alcharles1980-design/positive-minds-cms";
   const CF_URL = "https://positive-minds-cms.alcharles1980.workers.dev";
   const CF_WORKER_ID = "95a06f3cafaa40908af725ab5347695e";
-  const CF_ACCOUNT_ID = "";                      // ← paste from Cloudflare dashboard → Workers & Pages → Account ID
+  const CF_ACCOUNT_ID = "bdb27846cbf6226edde4fa0f6d530ffa";  // Cloudflare dashboard → Workers & Pages → Account ID (also the CLOUDFLARE_ACCOUNT_ID GH Actions secret)
   const SB_URL = "https://" + SB_REF + ".supabase.co";
   const SB_DASH = "https://supabase.com/dashboard/project/" + SB_REF;
   const SB_DB_HOST = "db." + SB_REF + ".supabase.co";
