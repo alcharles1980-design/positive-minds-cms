@@ -2,18 +2,20 @@
   "name": "positive-minds-cms",
   "private": true,
   "version": "0.0.0",
-  "description": "Positive Minds CMS — build + test harness",
+  "description": "Positive Minds CMS \u2014 build + test harness",
   "scripts": {
-    "split":    "node tools/split.cjs",
+    "workspace": "node tools/workspace.cjs",
+    "split": "node tools/split.cjs",
     "assemble": "node tools/assemble.cjs",
-    "build":    "node tools/build.cjs",
-    "verify":   "node tools/verify.cjs",
-    "test:engine":  "node engine.js",
+    "build": "node tools/build.cjs",
+    "verify": "node tools/verify.cjs",
+    "test": "npm run test:engine && npm run test:runtime && npm run test:interact && npm run test:inspect && npm run test:visual && npm run test:read",
+    "test:engine": "node engine.js",
     "test:runtime": "node runtime.js",
-    "test:read":    "node read.js",
+    "test:read": "node read.js",
     "test:inspect": "node inspect.js",
-    "test:interact":"node interact.js",
-    "test:visual":  "node visual.js"
+    "test:interact": "node interact.js",
+    "test:visual": "node visual.js"
   },
   "dependencies": {
     "@babel/core": "7.24.7",
