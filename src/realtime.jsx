@@ -15,7 +15,7 @@ const realtime = (() => {
   const statusListeners = new Set(); // fns called on connection status change: (isConnected) => {}
   const TOPIC = "realtime:pm";
 
-  const TABLES = ["pm_packs", "pm_questions", "pm_levels", "pm_question_levels", "pm_export_profiles", "pm_sync_targets", "pm_activity"];
+  const TABLES = ["pm_packs", "pm_questions", "pm_levels", "pm_question_levels", "pm_export_profiles", "pm_sync_targets", "pm_activity", "pm_review_queue"];
 
   const nextRef = () => String(++ref);
 

@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.15-04", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.15-05", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -938,7 +938,7 @@ const realtime = (() => {
   const statusListeners = new Set(); // fns called on connection status change: (isConnected) => {}
   const TOPIC = "realtime:pm";
 
-  const TABLES = ["pm_packs", "pm_questions", "pm_levels", "pm_question_levels", "pm_export_profiles", "pm_sync_targets", "pm_activity"];
+  const TABLES = ["pm_packs", "pm_questions", "pm_levels", "pm_question_levels", "pm_export_profiles", "pm_sync_targets", "pm_activity", "pm_review_queue"];
 
   const nextRef = () => String(++ref);
 

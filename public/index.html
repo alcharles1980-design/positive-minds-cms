@@ -73,7 +73,7 @@ function _extends(){return _extends=Object.assign?Object.assign.bind():function(
 //   - App shell (auth gate, routing via history, command surface)
 // ============================================================
 // ---------- config ----------
-const CFG={build:"2026.07.15-04",// bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+const CFG={build:"2026.07.15-05",// bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
 url:"https://tytrmjjucqijzcrbwjfm.supabase.co",key:"sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",adminEmail:"admin@positiveminds.app",sessionStore:"pm_admin_session_v2",sessionMaxAgeMs:7*24*60*60*1000,// keep users logged in for 7 days
 pageSize:40};// ============================================================
 // Session + Auth
@@ -223,7 +223,7 @@ const EmptyState=({icon,title,body,action})=>/*#__PURE__*/React.createElement("d
 // ============================================================
 const realtime=(()=>{let ws=null;let ref=0;let heartbeat=null;let reconnectTimer=null;let connected=false;let intentionalClose=false;const listeners=new Set();// fns called on any relevant change: (payload) => {}
 const statusListeners=new Set();// fns called on connection status change: (isConnected) => {}
-const TOPIC="realtime:pm";const TABLES=["pm_packs","pm_questions","pm_levels","pm_question_levels","pm_export_profiles","pm_sync_targets","pm_activity"];const nextRef=()=>String(++ref);const send=(event,payload,joinRef)=>{if(!ws||ws.readyState!==WebSocket.OPEN)return;ws.send(JSON.stringify({topic:TOPIC,event,payload,ref:nextRef(),join_ref:joinRef}));};const emitStatus=val=>{connected=val;statusListeners.forEach(fn=>{try{fn(val);}catch{}});};const join=()=>{const joinRef=nextRef();// Subscribe to all our tables via postgres_changes config.
+const TOPIC="realtime:pm";const TABLES=["pm_packs","pm_questions","pm_levels","pm_question_levels","pm_export_profiles","pm_sync_targets","pm_activity","pm_review_queue"];const nextRef=()=>String(++ref);const send=(event,payload,joinRef)=>{if(!ws||ws.readyState!==WebSocket.OPEN)return;ws.send(JSON.stringify({topic:TOPIC,event,payload,ref:nextRef(),join_ref:joinRef}));};const emitStatus=val=>{connected=val;statusListeners.forEach(fn=>{try{fn(val);}catch{}});};const join=()=>{const joinRef=nextRef();// Subscribe to all our tables via postgres_changes config.
 const changes=TABLES.map(t=>({event:"*",schema:"public",table:t}));ws.send(JSON.stringify({topic:TOPIC,event:"phx_join",payload:{config:{postgres_changes:changes,broadcast:{self:false},presence:{key:""}},access_token:session.token||CFG.key},ref:nextRef(),join_ref:joinRef}));// Heartbeat every 25s keeps the socket alive.
 clearInterval(heartbeat);heartbeat=setInterval(()=>{if(ws&&ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({topic:"phoenix",event:"heartbeat",payload:{},ref:nextRef()}));},25000);};const connect=()=>{if(ws&&(ws.readyState===WebSocket.OPEN||ws.readyState===WebSocket.CONNECTING))return;// If a previous socket is still CLOSING, tear it down cleanly before opening a new one
 // so we never end up with two live sockets (and two heartbeats).
