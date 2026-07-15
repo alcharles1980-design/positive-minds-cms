@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Positive Minds — Pack Content Manager</title>
+<meta name="description" content="Content management for the Positive Minds CBMT word-game pack library." />
+<meta name="theme-color" content="#6C4CE0" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🧠%3C/text%3E%3C/svg%3E" />
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%236C4CE0'/%3E%3Ctext x='50' y='72' font-size='58' text-anchor='middle'%3E🧠%3C/text%3E%3C/svg%3E" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Positive Minds" />
+<style>
+  html,body{margin:0;padding:0;background:#F6F5FB}
+  #root{min-height:100vh}
+  .boot{min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#6E6B85}
+</style>
+<script>
+// PWA: inline manifest via blob + minimal offline-capable service worker
+(function(){
+  var manifest = {
+    name: "Positive Minds — Pack Manager", short_name: "Positive Minds",
+    description: "Content management for the Positive Minds word-game pack library.",
+    start_url: ".", display: "standalone", background_color: "#F6F5FB", theme_color: "#6C4CE0",
+    icons: [
+      { src: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%236C4CE0'/%3E%3Ctext x='50' y='72' font-size='58' text-anchor='middle'%3E🧠%3C/text%3E%3C/svg%3E", sizes: "any", type: "image/svg+xml", purpose: "any maskable" }
+    ]
+  };
+  var blob = new Blob([JSON.stringify(manifest)], { type: "application/json" });
+  var link = document.createElement("link");
+  link.rel = "manifest"; link.href = URL.createObjectURL(blob);
+  document.head.appendChild(link);
+
+  if ("serviceWorker" in navigator) {
+    var swCode = "self.addEventListener('install',function(e){self.skipWaiting();});" +
+      "self.addEventListener('activate',function(e){e.waitUntil(self.clients.claim());});" +
+      "self.addEventListener('fetch',function(e){" +
+      " if(e.request.method!=='GET')return;" +
+      " e.respondWith(fetch(e.request).then(function(r){" +
+      "  var c=r.clone();caches.open('pm-v1').then(function(cache){cache.put(e.request,c);});return r;" +
+      " }).catch(function(){return caches.match(e.request);}));" +
+      "});";
+    var swBlob = new Blob([swCode], { type: "text/javascript" });
+    navigator.serviceWorker.register(URL.createObjectURL(swBlob)).catch(function(){});
+  }
+})();
+</script>
+</head>
+<body>
+<div id="root"><div class="boot">Loading Positive Minds…</div></div>
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script>
+window.addEventListener('load',function(){setTimeout(function(){
+  if(typeof React==='undefined'||typeof ReactDOM==='undefined'){
+    document.getElementById('root').innerHTML='<div class="boot"><div style="text-align:center;max-width:340px"><div style="font-size:15px;font-weight:700;color:#191728">Couldn\'t load the app</div><div style="font-size:13px;margin-top:8px;color:#6E6B85">A required script was blocked. Try a hard refresh (Ctrl+Shift+R), disable any ad/script blocker for this site, or check your connection.</div></div></div>';
+  }
+},4000);});
+</script>
+<script>
