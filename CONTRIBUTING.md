@@ -153,6 +153,42 @@ Reachable from this environment: **GitHub** (clone, commit, push). So the CMS fr
 
 ---
 
+## 6b. If you have the Supabase + Cloudflare MCP connectors (the normal claude.ai chat)
+
+A chat session with those connectors is the OPPOSITE of the shell in what it can reach — and the two
+are complementary. With the **Supabase MCP** you CAN, directly and without a human:
+
+- Inspect the live DB: `list_tables`, `list_migrations`, `execute_sql` (read), `get_advisors`.
+- Change the DB: `apply_migration` (DDL), `execute_sql` (writes) — this is how you ship RLS/RPC changes.
+- **Deploy edge functions**: `deploy_edge_function`. So the "a human must run `supabase functions
+  deploy`" caveat in §6 does NOT apply to you — you can deploy `content-api`, `generate-questions`,
+  `mcp`, `game-feed`, `pack-describe` yourself. Keep `generate-questions`, `mcp` and `pack-describe`
+  JWT-verified; `content-api` and `game-feed` are public (`--no-verify-jwt` / `verify_jwt: false`).
+- Read logs: `get_logs` (service: edge-function / postgres / auth …).
+
+**The live backend has FIVE edge functions; the repo carries all five as source** (`content-api`,
+`generate-questions`, `mcp`, `game-feed`, `pack-describe`). Two of them — `game-feed` and
+`pack-describe` — were once deployed without being committed and had to be recovered from the live
+deployment. **Before editing any edge function, confirm the repo source matches what's deployed**
+(`get_edge_function` → diff against `edge-functions/<name>.ts`); if they differ, the deployed version
+is the source of truth until reconciled.
+
+What the MCP chat likely CANNOT do: the **front-end build**. Compiling `src/*.jsx` → `index.html` needs
+the bash/git toolchain (§1–2). If your chat also has code execution (the "bash method"), you have
+everything — build the front-end AND drive the backend. If it only has the connectors, you can do all
+backend/DB/edge-function work, but hand front-end `src/` changes to a bash-enabled session (or do them
+in the same session if it has both).
+
+**Cloudflare**: the CMS front-end deploys via **push to `main` → GitHub Actions → Cloudflare Pages**
+(it also appears as a Worker named `positive-minds-cms`). The Cloudflare MCP is scoped to
+Workers/D1/KV/R2 and is not the deploy path for the CMS — a git push is. So front-end deploy still
+routes through GitHub, not the Cloudflare connector.
+
+The golden division: **backend (DB, RPC, RLS, edge functions) → do it live via the Supabase MCP.
+Front-end (`src/` → `index.html`) → build with bash and push to deploy.**
+
+---
+
 ## 7. Golden rules (short version)
 
 1. Edit `src/`, never `index.html` or `pm_cms.jsx`.

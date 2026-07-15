@@ -70,9 +70,11 @@ pm_cms.jsx              GENERATED combined source (assemble output; do not edit 
 index.html              GENERATED build artifact — the only file Cloudflare deploys
 public/index.html       identical copy, kept in sync by build.cjs
 edge-functions/
-  content-api.ts          sync API for the game client (public)
+  content-api.ts          sync API for the game client (public) — preferred
   generate-questions.ts   AI generation (auth-gated)
   mcp.ts                  Claude Connector — partners propose content via MCP (auth-gated)
+  game-feed.ts            LEGACY public feed (export-profile based); carries its own engine copy
+  pack-describe.ts        AI pack-description generator (auth-gated)
 .github/workflows/
   deploy.yml              push to main → Cloudflare Pages
 ```
