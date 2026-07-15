@@ -85,6 +85,7 @@ const NAV = [
   { id: "health", label: "Health", icon: "◉" },
   { id: "publish", label: "Publishing", icon: "⇧" },
   { id: "activity", label: "Activity", icon: "≡" },
+  { id: "sysarch", label: "System Architecture", icon: "❖" },
   { id: "devnotes", label: "Developer", icon: "⌘" },
 ];
 // Phone shows a subset in the bottom bar; the rest live in the ⋯ menu.
@@ -121,7 +122,7 @@ function App() {
 
   const [authed, setAuthed] = useState(() => !!session.load());
   // URL-hash routing so a refresh keeps you where you were (e.g. #/questions, #/pack/<id>).
-  const VALID_NAV = ["dashboard", "library", "questions", "generator", "levels", "aireview", "aisettings", "connector", "health", "publish", "activity", "devnotes"];
+  const VALID_NAV = ["dashboard", "library", "questions", "generator", "levels", "aireview", "aisettings", "connector", "health", "publish", "activity", "sysarch", "devnotes"];
   const parseHash = () => {
     const raw = (window.location.hash || "").replace(/^#\/?/, "").trim(); // "questions" | "pack/<id>" | ""
     if (!raw) return { nav: "dashboard", packId: null };
@@ -438,6 +439,8 @@ function App() {
             <ConnectorView />
           ) : nav === "publish" ? (
             <PublishHub packs={packs} onSynced={reloadPacks} />
+          ) : nav === "sysarch" ? (
+            <SystemArchitectureView />
           ) : nav === "devnotes" ? (
             <DeveloperNotes />
           ) : (
