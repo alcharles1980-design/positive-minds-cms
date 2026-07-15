@@ -56,20 +56,33 @@ https://tytrmjjucqijzcrbwjfm.supabase.co/functions/v1/content-api
 ## 3. Repo layout
 
 ```
-index.html              the entire CMS — self-contained, deployed as-is
-pm_cms.jsx              readable combined source (for reference / diffing)
-public/index.html       copy served by Cloudflare Pages
+src/                    THE SOURCE — 20 module .jsx files (edit these)
+  core.jsx                config, auth, data layer, masking engine, validator
+  ... 18 more ...
+  devdocs.jsx             the three living docs (Architecture / CLAUDE.md / Build Prompt)
+tools/                  the build + test pipeline
+  split.cjs               pm_cms.jsx  -> src/*.jsx     (byte-reversible)
+  assemble.cjs            src/*.jsx   -> pm_cms.jsx
+  build.cjs               pm_cms.jsx  -> index.html (+ public/), with safety guards
+  verify.cjs              asserts the whole chain is lossless
+  workspace.cjs           recreates the symlinks the test scripts expect
+pm_cms.jsx              GENERATED combined source (assemble output; do not edit by hand)
+index.html              GENERATED build artifact — the only file Cloudflare deploys
+public/index.html       identical copy, kept in sync by build.cjs
 edge-functions/
   content-api.ts          sync API for the game client (public)
   generate-questions.ts   AI generation (auth-gated)
+  mcp.ts                  Claude Connector — partners propose content via MCP (auth-gated)
 .github/workflows/
   deploy.yml              push to main → Cloudflare Pages
 ```
 
-> **`index.html` is the OUTPUT, not the source.** The app is authored as modular `.jsx` files which are
-> concatenated by `assemble.cjs`, compiled with Babel (`@babel/preset-react`, **classic** runtime), and
-> wrapped by `build_html.cjs`. To change the app, see the **Build Prompt** on the Developer page — it
-> specifies the entire app precisely enough to reconstruct it.
+> **`index.html` and `pm_cms.jsx` are OUTPUT, not source. Edit `src/*.jsx`.** The modules are assembled
+> and compiled with Babel (`@babel/preset-react`, **classic** runtime) into `index.html`.
+> **See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full build/test/deploy loop** — anyone who can clone
+> this repo (including a Claude instance in a shell) can build and ship it with `npm install && npm run
+> build && npm test`. The **Build Prompt** on the Developer page specifies the app precisely enough to
+> reconstruct it from scratch.
 
 ---
 
@@ -103,9 +116,12 @@ every deploy** so this stays detectable.
 
 1. **PostgREST silently caps at 1,000 rows.** Not an error — it just returns 1,000 and you never
    notice the rest are missing. Every query needs an explicit `limit`, or use the paginating helper.
-2. **The masking engine exists in four places** (the app, `content-api`, `game-feed`,
-   `generate-questions`) and they **must stay byte-identical**. If a blank renders differently in the
-   CMS than in the game, the game is wrong. The same applies to the question **validator**.
+2. **The masking engine is duplicated across copies that must stay byte-identical.** `maskWord` lives in
+   the app (`src/core.jsx`) plus `content-api.ts`, `generate-questions.ts`, and `mcp.ts` (4 copies);
+   `validateQuestion` lives in `src/core.jsx`, `generate-questions.ts`, and `mcp.ts` (3 copies). Change
+   one, change all, same commit. If a blank renders differently in the CMS than in the game, the game is
+   wrong. (`engine.js` checks the `maskWord` copies but does **not** yet cover `mcp.ts` — see
+   CONTRIBUTING.md §4. Older docs mention a `game-feed` copy; there is no `game-feed.ts` in this repo.)
 3. **The service-worker cache.** Most "my change didn't deploy" reports are this.
 
 ---
