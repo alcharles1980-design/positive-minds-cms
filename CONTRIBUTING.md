@@ -11,6 +11,77 @@ is only about *how to work on the repo*; those docs are about *what the app is a
 
 ---
 
+## How this project is deployed, and how to get access to work on it
+
+**Three services. They are decoupled — this is the thing to understand before anything else.**
+
+```
+   Front-end (the CMS website)          Backend (data + logic)
+   ────────────────────────────         ──────────────────────
+   edit src/ ─build─► index.html         Supabase project tytrmjjucqijzcrbwjfm
+        │                                  · Postgres (18 tables, RLS on all)
+     git push                              · Auth (admin login)
+        │                                  · 5 edge functions
+        ▼                                        ▲
+   GitHub Actions                               │  deployed MANUALLY
+        │                                        │  (MCP or Supabase CLI)
+        ▼                                        │
+   Cloudflare ──serves──► your browser ──talks──►┘   (never via GitHub)
+```
+
+- **GitHub** stores the front-end source and triggers its deploy. It also holds a *copy* of the
+  edge-function source (`edge-functions/*.ts`) — but that copy is not wired to anything.
+- **Cloudflare** serves the compiled `index.html`. A `git push` to `main` → GitHub Actions → Cloudflare,
+  automatically. (The deployment also shows up as a Cloudflare Worker named `positive-minds-cms`.)
+- **Supabase** is the whole backend. **GitHub never deploys to it.** Committing an edge function does
+  NOT deploy it; database/RLS/RPC changes do NOT happen from a push. They are applied directly to
+  Supabase, by hand.
+
+### What access is needed for each layer
+
+| To change… | You need… | It goes live by… |
+|---|---|---|
+| The CMS **website** (`src/`) | **GitHub** write access | `git push` → Actions → Cloudflare (automatic) |
+| An **edge function** | Access to the **Supabase project** | a manual deploy (MCP or CLI) — *not* a push |
+| **Database / RLS / RPC** | Access to the **Supabase project** | migration / SQL, applied live |
+
+**GitHub access alone lets a person change only the website.** The backend is a separate system with
+separate authorization.
+
+### Onboarding a new contributor to the BACKEND (the part people get stuck on)
+
+Connecting the Supabase MCP on a Claude account grants nothing by itself — it is only a pipe, and it
+inherits whatever the **Supabase account it logs into** can already see. So the project must be made
+visible to that Supabase account first. Two ways:
+
+**Path 1 — Supabase org membership (preferred; scoped and revocable).**
+1. Owner: Supabase dashboard → **Organization → Team → Invite member** (invite as **Developer** so they
+   can build but can't delete the project or touch billing).
+2. Contributor accepts → this project now appears under their own Supabase account.
+3. Contributor connects the **Supabase MCP** on their own Claude account, signing in with their own
+   Supabase credentials.
+4. Claude can now `deploy_edge_function`, `apply_migration`, `execute_sql`, `get_logs` — scoped to the
+   granted role. Remove them from the org to revoke.
+
+**Path 2 — a personal access token (only if you can't use Path 1).**
+Dashboard → **Account → Access Tokens → Generate**. This carries the owner's account access (not neatly
+per-project) and is a bearer secret — whoever holds it acts *as the owner* until it is revoked. Usable
+via the Supabase CLI or an MCP configured with it. Treat like any credential: never paste it into a
+chat or commit it; rotate if exposed.
+
+### The three kinds of working session
+
+- **Shell / bash** (git + Node): builds and ships the **front-end** (push → Actions → Cloudflare); can
+  edit edge-function *source* but **cannot deploy to Supabase or reach the DB**.
+- **Chat with the Supabase MCP** (connected to this project): drives the whole **backend** live —
+  deploy edge functions, run SQL/migrations, read logs; **cannot build the front-end** (that needs the
+  shell toolchain).
+- **A session with both**: does everything end to end.
+
+Deeper detail is in the app's Developer page → **Architecture §0.4** and **CLAUDE.md rule 4d**.
+
+---
+
 ## 0. The one thing that will trip you up
 
 **`index.html` is a build artifact. Do not edit it by hand. Do not edit `pm_cms.jsx` by hand.**

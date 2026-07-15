@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.05-20", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.15-01", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -3109,9 +3109,12 @@ day one.
    moving lately.
 
 If you only remember three things:
-- **The masking engine and the validator are duplicated in four places and MUST stay byte-identical.**
-  (App, content-api, game-feed, generate-questions.) If a blank renders differently in the CMS than in
-  the game, the game is wrong.
+- **The masking engine \`maskWord\` is duplicated in FIVE places and MUST stay byte-identical** (app/
+  core.jsx, content-api, generate-questions, mcp, game-feed); the validator \`validateQuestion\` in three
+  (core.jsx, generate-questions, mcp). If a blank renders differently in the CMS than in the game, the
+  game is wrong. Change one copy → change all, same commit. NOTE: \`game-feed.buildLevelVariants\` emits a
+  different OUTPUT shape on purpose (legacy \`opts\` string vs \`options\` array) — the masking is identical,
+  only the serialization differs.
 - **PostgREST silently caps at 1,000 rows.** No error. Always set an explicit limit or paginate.
 - **The app is a PWA with an aggressive service worker.** Most "my change didn't deploy" reports are a
   cached build. The sidebar shows a build stamp — if it didn't change, you are seeing a cached build.
@@ -3127,14 +3130,16 @@ If you only remember three things:
 | Admin login | \`admin@positiveminds.app\` |
 | **Content API (the game client calls this)** | \`https://tytrmjjucqijzcrbwjfm.supabase.co/functions/v1/content-api\` |
 
-**Edge functions (4):**
+**Edge functions (5) — all five have committed source in \`edge-functions/*.ts\`:**
 - \`content-api\` — the sync API for the game client. **Public** (verify_jwt=false). Manifest,
   full pull, incremental \`?since=\`, deletions, ETag/304. **This is the one the game uses.**
 - \`generate-questions\` — AI content generation. **Auth-gated (verify_jwt=TRUE)** so only a logged-in
   admin can spend API credits. Writes ONLY to the review queue, never to live content.
-- \`game-feed\` — the older, profile-driven feed. Kept for back-compat. New clients should use
-  content-api.
-- \`pack-describe\` — small helper that asks an LLM to write a pack description.
+- \`mcp\` — the Claude Connector (OAuth 2.1 + PKCE). Partners propose content via Claude; writes ONLY to
+  the review queue. Public entry (verify_jwt=false), but every tool call requires an OAuth access token.
+- \`game-feed\` — the older, profile-driven feed. **Public** (verify_jwt=false). Kept for back-compat;
+  new clients should use content-api. **Carries its own engine copy** (see parity note below).
+- \`pack-describe\` — small helper that asks an LLM to write a pack description. Auth-gated.
 
 **GitHub secrets needed for deploys:** \`CLOUDFLARE_API_TOKEN\` (Account → Cloudflare Pages → Edit) and
 \`CLOUDFLARE_ACCOUNT_ID\`.
@@ -3175,6 +3180,53 @@ separately (\`supabase functions deploy <name> --project-ref tytrmjjucqijzcrbwjf
 | Export/transform engine + publishing | \`engine.jsx\`, \`publish1/2.jsx\` |
 | These three documents | \`devdocs.jsx\` |
 | Routing, nav, app shell | \`shell.jsx\` |
+
+### 0.4 Continuing this project — what runs where, and how a new person gets access
+
+**Three services, and they are decoupled. This is the single most misunderstood thing about the setup.**
+
+| Service | Role | How it changes | How it goes live |
+|---|---|---|---|
+| **GitHub** (\`alcharles1980-design/positive-minds-cms\`) | Source of truth for the FRONT-END + a copy of the edge-function source | edit \`src/\`, build, \`git push\` | — |
+| **Cloudflare** | Serves the CMS website (the static \`index.html\`) | (nothing edited here directly) | \`git push\` → GitHub Actions → Cloudflare, automatic |
+| **Supabase** (\`tytrmjjucqijzcrbwjfm\`) | The entire BACKEND: Postgres, auth, RLS, and the 5 edge functions | deploy edge fns / run SQL | **manual deploy — GitHub never touches Supabase** |
+
+**The trap:** the edge functions in \`edge-functions/*.ts\` are a SAVED COPY, not a live link. Committing
+and pushing them updates Cloudflare and leaves Supabase untouched. A function only changes on Supabase
+when someone explicitly deploys it there. (This exact decoupling is why \`game-feed\` and \`pack-describe\`
+once ran live for weeks with no source in the repo.) **Commit the source AND deploy it, every time, or
+the repo and the live backend drift apart.**
+
+**Front-end path (fully covered by GitHub):** edit \`src/\` → build → push to \`main\` → GitHub Actions →
+Cloudflare updates the live site. A contributor with only GitHub access can change the website and
+nothing else.
+
+**Backend path (NOT reachable through GitHub):** to change the database, RLS, RPCs, or deploy an edge
+function, a person needs access to the **Supabase project itself**. Two ways:
+
+- **Path 1 — Supabase org membership (preferred).** In the Supabase dashboard: *Organization → Team →
+  Invite member* (invite as Developer so they can build but can't delete the project or change billing).
+  Once they accept, this project appears under their own Supabase account. They then connect the
+  **Supabase MCP** on their own Claude account, logging in with their own Supabase credentials, and
+  Claude can now deploy edge functions (\`deploy_edge_function\`) and run SQL/migrations
+  (\`apply_migration\`, \`execute_sql\`) — scoped to the role granted. Revoke by removing them from the org.
+- **Path 2 — a personal access token.** Dashboard → *Account → Access Tokens → Generate*. Carries your
+  account access (not neatly per-project), usable via the Supabase CLI or an MCP configured with it.
+  It is a bearer secret: whoever holds it acts AS you until it is revoked. Prefer Path 1 for anyone you
+  want to limit.
+
+**Key distinction:** connecting the Supabase MCP on a Claude account is only the *pipe*. It grants no
+access by itself — it inherits whatever the authenticated **Supabase** account can already see.
+Authorization happens on Supabase (org membership or token), never on the Claude side.
+
+**Two kinds of working session:**
+- A **chat with the Supabase MCP** connected to this project → can drive the whole BACKEND live (deploy
+  edge fns, run SQL). Front-end build still needs a shell.
+- A **shell/bash session** (git + Node) → can build and ship the FRONT-END (push → Actions → Cloudflare)
+  and can edit edge-function source, but CANNOT deploy to Supabase or reach the DB.
+- A session with **both** does everything end to end.
+
+See \`CONTRIBUTING.md\` in the repo for the step-by-step onboarding checklist.
 
 ## 1. What this is
 A content management system for the **Positive Minds** children's word game
@@ -4768,10 +4820,14 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
 
 ## Stack & identifiers
 - React 18.3.1, single self-contained index.html, **NO runtime build** (JSX pre-compiled).
+- **Three decoupled services:** GitHub (front-end source + edge-fn source copy) → Cloudflare (serves
+  the static site; push to main → GitHub Actions → deploy) ; Supabase (the backend — DB, auth, RLS,
+  edge functions — **deployed MANUALLY, GitHub never touches it**). See Architecture §0.4.
 - Supabase project ref: tytrmjjucqijzcrbwjfm
 - GitHub: alcharles1980-design/positive-minds-cms
-- Live: positive-minds-cms.<subdomain>.workers.dev
-- Feed edge function: /functions/v1/game-feed
+- Live: positive-minds-cms (Cloudflare; also appears as a Worker of that name)
+- **Edge functions (5):** content-api (public), generate-questions (JWT), mcp (public entry, OAuth per
+  call), game-feed (public, legacy), pack-describe (JWT). All five have source in edge-functions/*.ts.
 
 ## Golden rules (do not break these)
 1. **Babel classic runtime only.** Compile with @babel/preset-react { runtime: "classic",
@@ -4784,11 +4840,17 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
 3. **Assembly order + hoisting.** The app is concatenated from /v2/*.jsx in a fixed order
    (see assemble.cjs). Cross-file COMPONENTS must be \`function\` declarations (hoisted).
    Cross-file \`const\` helpers must be defined in a file that loads BEFORE their consumers.
-4. **Client/server engine parity.** TWO engines must stay byte-identical: the one in the
-   client (core.jsx + engine.jsx) and the one in the game-feed edge function. This covers the
-   RENDERING engine — \`maskWord\`, \`resolveSlots\`, \`resolveFrameMap\`, \`buildLevelVariants\` — AND
-   the TRANSFORM engine — \`buildOutput\`/\`projectRow\`/\`applyTransform\`/\`mapValue\`/\`toXml\`. Any
-   change to one MUST be mirrored in the other or the feed diverges from what the CMS shows.
+4. **Client/server engine parity.** The RENDERING engine is duplicated across FIVE copies that must
+   stay byte-identical: core.jsx (the client) and FOUR edge functions — content-api, generate-questions,
+   mcp, and game-feed. \`maskWord\` is identical in all five (verified); \`validateQuestion\` lives in
+   core.jsx, generate-questions and mcp. This covers \`maskWord\`, \`resolveSlots\`, \`resolveFrameMap\`,
+   \`buildLevelVariants\` AND the TRANSFORM engine (\`buildOutput\`/\`projectRow\`/\`applyTransform\`/\`mapValue\`/
+   \`toXml\`). Any change to one MUST be mirrored in ALL copies, same commit, or a feed diverges from what
+   the CMS shows. ONE deliberate exception: \`game-feed.buildLevelVariants\` emits the legacy \`opts\`
+   string ("A / B") instead of content-api's \`options\` array — the masking is identical, only that
+   output field differs; keep it that way unless retiring game-feed. (\`engine.js\` currently parity-tests
+   only 3 of the 5 maskWord copies — it predates mcp and game-feed being in the repo; verify those two
+   by hand or extend the test.)
    Watch the PRECEDENCE CHAIN specifically: buildLevelVariants resolves position/grouping as
    \`override(pm_question_levels) ?? question.own ?? level.default ?? hard-default\` — this exact
    order must match in both files. (A past bug: the client gained the \`question.own\` step but
@@ -4816,6 +4878,21 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    The single path into pm_questions is the pm_review_approve RPC, which requires an explicit human
    decision. Never add a "publish straight through" path, an auto-approve, or a direct insert from a
    generator - a child must never see a question no person approved.
+4d. **GitHub does NOT deploy Supabase. The two are decoupled.** Pushing to the repo updates ONLY the
+   Cloudflare-hosted front-end. The edge functions in edge-functions/*.ts are a SAVED COPY — committing
+   them does NOT deploy them. A function changes on Supabase only when someone explicitly deploys it
+   (MCP \`deploy_edge_function\`, or CLI \`supabase functions deploy <name> --project-ref
+   tytrmjjucqijzcrbwjfm\`; add --no-verify-jwt for content-api and game-feed). SAME for DB/RLS/RPC —
+   apply via migration/SQL, never via a push. When you edit an edge function: commit the source AND
+   deploy it in the same unit of work, and say so in the commit — otherwise the repo and the live
+   backend silently drift (this is exactly how game-feed and pack-describe ran live for weeks with no
+   source in the repo). Before editing any edge function, diff the repo copy against the deployed one
+   (\`get_edge_function\`); if they differ, the DEPLOYED version is source of truth until reconciled.
+   ACCESS: a contributor with only GitHub access can change the website and nothing else. To touch the
+   backend they need access to the Supabase PROJECT — invited to the Supabase org (preferred) or a
+   personal access token — then the Supabase MCP on their own Claude account inherits that access. The
+   MCP connector is only the pipe; authorization lives on Supabase, not on the Claude side. Full
+   onboarding steps: Architecture §0.4 and CONTRIBUTING.md.
 4c. **API keys must never be readable by the browser.** pm_ai_config deliberately has NO RLS select
    policy for anon OR authenticated. The CMS is a browser app with a shared admin login, so anything
    the client can SELECT is effectively public to anyone with that login (or any XSS). Keys are
