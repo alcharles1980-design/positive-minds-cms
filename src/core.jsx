@@ -14,7 +14,7 @@
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.15-06", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.15-07", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -453,55 +453,22 @@ const validateQuestion = (q, levels, opts = {}) => {
   if (alt && /[^A-Z\s'-]/.test(alt)) flags.push({ code: "bad_chars_alt", detail: `"${alt}" contains characters other than letters.` });
 
   const norm = (s) => (s || "").toLowerCase().replace(/\{blank\}/g, "___").replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim();
-  // Duplicate detection has THREE distinct cases, because they mean different things:
-  //   duplicate      — same sentence AND same answer. Definitely reject.
-  //   same_sentence  — same sentence, different answer. Repetitive phrasing.
-  //   answer_reused  — this answer word is already taught elsewhere. In a 10–20 question pack,
-  //                    teaching BRAVE twice is a real quality problem, and it is INVISIBLE if you
-  //                    only compare whole questions.
-  // `existing` should include live questions AND anything already sitting in (or rejected from)
-  // the review queue — otherwise two generate runs before a review can duplicate each other, and a
-  // rejected question gets cheerfully regenerated.
+  // DUPLICATE — the ONE dedup condition. A question is a duplicate ONLY when an existing question
+  // (in this pack) has the SAME sentence AND the SAME right/wrong combination, order-sensitive:
+  //   same template  AND  same answer  AND  same alt_answer.
+  // Deliberately strict (decided 2026-07): a reversed pair (answer/alt swapped), the same sentence
+  // with a different word pair, or a reused answer word are all DIFFERENT questions and pass cleanly.
+  // `existing` must include live questions AND anything pending or rejected in the review queue —
+  // otherwise two generate runs before a review can duplicate each other, and a rejected question
+  // gets cheerfully regenerated. Scope is the pack (generation is always pack-level).
   if (ans) {
     const tplN = norm(tpl);
-    let exact = false, sameSentence = false, reusedIn = null;
-    for (const e of opts.existing || []) {
-      const eAns = (e.answer || "").toUpperCase();
-      const eTpl = norm(e.template);
-      if (eTpl === tplN && eAns === ans) { exact = true; break; }
-      if (eTpl === tplN) sameSentence = true;
-      if (eAns === ans && !reusedIn) reusedIn = e;
-    }
-    if (exact) {
-      flags.push({ code: "duplicate", detail: "This exact question already exists." });
-    } else {
-      if (sameSentence) flags.push({ code: "same_sentence", detail: "This sentence is already used with a different answer." });
-      if (reusedIn) {
-        const where = reusedIn.source === "pending" ? "is already waiting in the review queue"
-          : reusedIn.source === "rejected" ? "was already rejected"
-          : reusedIn.source === "batch" ? "is used by another question in this same batch"
-          : "is already used in this pack";
-        flags.push({ code: "answer_reused", detail: `The answer "${ans}" ${where}${reusedIn.template ? ` — "${String(reusedIn.template).replace(/\{blank\}/g, "____")}"` : ""}.` });
-      }
-    }
-    // REVERSED PAIR: the same two words offered as the choice, just swapped over. Different
-    // sentence, so not a "duplicate" — but the child faces the identical two-word decision twice.
-    // (The Health lint catches this; without it here, the AI could generate one and the review queue
-    // would show it as clean. The two must agree.)
-    if (alt) {
-      const pairKey = [ans, alt].sort().join("|");
-      const twin = (opts.existing || []).find(e => {
-        const ea = (e.answer || "").toUpperCase(), eb = (e.alt_answer || "").toUpperCase();
-        if (!ea || !eb) return false;
-        return [ea, eb].sort().join("|") === pairKey && !(ea === ans && eb === alt);
-      });
-      if (twin) {
-        flags.push({
-          code: "reversed_pair",
-          detail: `The same two words (${[ans, alt].sort().join(" / ")}) are already the choice in another question — just swapped over. The child would see the identical pair twice.`,
-        });
-      }
-    }
+    const isDup = (opts.existing || []).some(e =>
+      norm(e.template) === tplN &&
+      (e.answer || "").toUpperCase() === ans &&
+      (e.alt_answer || "").toUpperCase() === alt
+    );
+    if (isDup) flags.push({ code: "duplicate", detail: "This exact question already exists (same sentence and same right/wrong pair)." });
   }
 
   return { ok: flags.length === 0, flags };

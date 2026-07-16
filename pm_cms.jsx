@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.15-06", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.15-07", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -456,55 +456,22 @@ const validateQuestion = (q, levels, opts = {}) => {
   if (alt && /[^A-Z\s'-]/.test(alt)) flags.push({ code: "bad_chars_alt", detail: `"${alt}" contains characters other than letters.` });
 
   const norm = (s) => (s || "").toLowerCase().replace(/\{blank\}/g, "___").replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim();
-  // Duplicate detection has THREE distinct cases, because they mean different things:
-  //   duplicate      — same sentence AND same answer. Definitely reject.
-  //   same_sentence  — same sentence, different answer. Repetitive phrasing.
-  //   answer_reused  — this answer word is already taught elsewhere. In a 10–20 question pack,
-  //                    teaching BRAVE twice is a real quality problem, and it is INVISIBLE if you
-  //                    only compare whole questions.
-  // `existing` should include live questions AND anything already sitting in (or rejected from)
-  // the review queue — otherwise two generate runs before a review can duplicate each other, and a
-  // rejected question gets cheerfully regenerated.
+  // DUPLICATE — the ONE dedup condition. A question is a duplicate ONLY when an existing question
+  // (in this pack) has the SAME sentence AND the SAME right/wrong combination, order-sensitive:
+  //   same template  AND  same answer  AND  same alt_answer.
+  // Deliberately strict (decided 2026-07): a reversed pair (answer/alt swapped), the same sentence
+  // with a different word pair, or a reused answer word are all DIFFERENT questions and pass cleanly.
+  // `existing` must include live questions AND anything pending or rejected in the review queue —
+  // otherwise two generate runs before a review can duplicate each other, and a rejected question
+  // gets cheerfully regenerated. Scope is the pack (generation is always pack-level).
   if (ans) {
     const tplN = norm(tpl);
-    let exact = false, sameSentence = false, reusedIn = null;
-    for (const e of opts.existing || []) {
-      const eAns = (e.answer || "").toUpperCase();
-      const eTpl = norm(e.template);
-      if (eTpl === tplN && eAns === ans) { exact = true; break; }
-      if (eTpl === tplN) sameSentence = true;
-      if (eAns === ans && !reusedIn) reusedIn = e;
-    }
-    if (exact) {
-      flags.push({ code: "duplicate", detail: "This exact question already exists." });
-    } else {
-      if (sameSentence) flags.push({ code: "same_sentence", detail: "This sentence is already used with a different answer." });
-      if (reusedIn) {
-        const where = reusedIn.source === "pending" ? "is already waiting in the review queue"
-          : reusedIn.source === "rejected" ? "was already rejected"
-          : reusedIn.source === "batch" ? "is used by another question in this same batch"
-          : "is already used in this pack";
-        flags.push({ code: "answer_reused", detail: `The answer "${ans}" ${where}${reusedIn.template ? ` — "${String(reusedIn.template).replace(/\{blank\}/g, "____")}"` : ""}.` });
-      }
-    }
-    // REVERSED PAIR: the same two words offered as the choice, just swapped over. Different
-    // sentence, so not a "duplicate" — but the child faces the identical two-word decision twice.
-    // (The Health lint catches this; without it here, the AI could generate one and the review queue
-    // would show it as clean. The two must agree.)
-    if (alt) {
-      const pairKey = [ans, alt].sort().join("|");
-      const twin = (opts.existing || []).find(e => {
-        const ea = (e.answer || "").toUpperCase(), eb = (e.alt_answer || "").toUpperCase();
-        if (!ea || !eb) return false;
-        return [ea, eb].sort().join("|") === pairKey && !(ea === ans && eb === alt);
-      });
-      if (twin) {
-        flags.push({
-          code: "reversed_pair",
-          detail: `The same two words (${[ans, alt].sort().join(" / ")}) are already the choice in another question — just swapped over. The child would see the identical pair twice.`,
-        });
-      }
-    }
+    const isDup = (opts.existing || []).some(e =>
+      norm(e.template) === tplN &&
+      (e.answer || "").toUpperCase() === ans &&
+      (e.alt_answer || "").toUpperCase() === alt
+    );
+    if (isDup) flags.push({ code: "duplicate", detail: "This exact question already exists (same sentence and same right/wrong pair)." });
   }
 
   return { ok: flags.length === 0, flags };
@@ -1919,8 +1886,6 @@ function BulkImport({ packId, onDone, onClose, levels, packLevel }) {
                       : fl.code === "same_word" ? "Same word"
                       : fl.code === "no_blank" ? "No blank"
                       : fl.code === "multi_blank" ? "Too many blanks"
-                      : fl.code === "answer_reused" ? "Word reused"
-                      : fl.code === "same_sentence" ? "Sentence reused"
                       : fl.code === "duplicate" ? "Duplicate"
                       : fl.code;
                     return (
@@ -6279,13 +6244,12 @@ const FLAG_LABEL = {
   bad_chars: "Bad characters",
   bad_chars_alt: "Bad characters",
   duplicate: "Duplicate",
-  same_sentence: "Sentence reused",
-  answer_reused: "Word reused",
 };
 
-// Duplicate-ish flags are advisory (you may still want the question); the rest are mechanical
-// defects. Colour them differently so the genuinely broken ones stand out.
-const SOFT_FLAGS = new Set(["answer_reused", "same_sentence"]);
+// Every remaining flag is a HARD defect (a strict duplicate, or a mechanical problem). There are no
+// soft/advisory flags any more — the old repetition nudges (same_sentence/answer_reused/reversed_pair)
+// were removed when "duplicate" was tightened to an exact sentence + right/wrong-pair match.
+const SOFT_FLAGS = new Set([]);
 
 function FlagPill({ flag }) {
   const label = FLAG_LABEL[flag.code] || flag.code;

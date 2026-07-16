@@ -116,50 +116,21 @@ function validateQuestion(q: any, levels: any[], opts: any = {}) {
   const norm = (s: string) => (s || '').toLowerCase().replace(/\{blank\}/g, '___').replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
 
   // ---- Duplicate / repetition checks ----
-  // These mirror the client's validateQuestion EXACTLY (parity invariant) and the Health lint.
+  // DUPLICATE — the ONE dedup condition (mirror of the client validateQuestion EXACTLY). A question
+  // is a duplicate ONLY when an existing question (in this pack) has the SAME sentence AND the SAME
+  // right/wrong combination, order-sensitive: same template AND same answer AND same alt_answer.
+  // Strict by design (2026-07): reversed pairs, same sentence with a different pair, and reused
+  // answer words are all DIFFERENT questions and pass cleanly. `existing` must include live + pending
+  // + rejected. Scope is the pack (generation is always pack-level).
   if (ans) {
     const tplN = norm(tpl);
-    let exact = false, sameSentence = false, reusedIn: any = null;
-    for (const e of opts.existing || []) {
-      const eAns = (e.answer || '').toUpperCase();
-      const eTpl = norm(e.template);
-      if (eTpl === tplN && eAns === ans) { exact = true; break; }
-      if (eTpl === tplN) sameSentence = true;
-      if (eAns === ans && !reusedIn) reusedIn = e;
-    }
-    if (exact) {
-      flags.push({ code: 'duplicate', detail: 'This exact question already exists.' });
-    } else {
-      if (sameSentence) flags.push({ code: 'same_sentence', detail: 'This sentence is already used with a different answer.' });
-      if (reusedIn) {
-        const where = reusedIn.source === 'pending' ? 'is already waiting in the review queue'
-          : reusedIn.source === 'rejected' ? 'was already rejected'
-          : reusedIn.source === 'batch' ? 'is used by another question in this same batch'
-          : 'is already used in this pack';
-        flags.push({ code: 'answer_reused', detail: `The answer "${ans}" ${where}${reusedIn.template ? ` — "${String(reusedIn.template).replace(/\{blank\}/g, '____')}"` : ''}.` });
-      }
-    }
+    const isDup = (opts.existing || []).some((e: any) =>
+      norm(e.template) === tplN &&
+      (e.answer || '').toUpperCase() === ans &&
+      (e.alt_answer || '').toUpperCase() === alt
+    );
+    if (isDup) flags.push({ code: 'duplicate', detail: 'This exact question already exists (same sentence and same right/wrong pair).' });
   }
-
-  // REVERSED PAIR: the same two words offered as the choice, just swapped over. A different
-  // sentence, so not a "duplicate" — but the child faces the identical two-word decision twice.
-  // The Health lint catches this; the validator must too, or the AI can generate one and the review
-  // queue will show it as clean.
-  if (ans && alt) {
-    const pairKey = [ans, alt].sort().join('|');
-    const twin = (opts.existing || []).find((e: any) => {
-      const ea = (e.answer || '').toUpperCase(), eb = (e.alt_answer || '').toUpperCase();
-      if (!ea || !eb) return false;
-      return [ea, eb].sort().join('|') === pairKey && !(ea === ans && eb === alt);
-    });
-    if (twin) {
-      flags.push({
-        code: 'reversed_pair',
-        detail: `The same two words (${[ans, alt].sort().join(' / ')}) are already the choice in another question — just swapped over. The child would see the identical pair twice.`,
-      });
-    }
-  }
-
   return { ok: flags.length === 0, flags };
 }
 
@@ -338,25 +309,29 @@ function buildPrompt(opts: any) {
 
   if (existing?.length) {
     // Every answer word already spoken for — whether live in the pack, waiting in the review queue,
-    // or previously rejected. No cap: if the model doesn't see a word, it will happily reuse it.
+    // A question is a DUPLICATE only if it repeats an existing one EXACTLY: same sentence AND the
+    // same two words (right + wrong). Reusing a word or a sentence with a different pair is allowed —
+    // but variety still makes a better pack, so we show what exists and ASK for variety without
+    // forbidding reuse. The hard rule is: never reproduce an existing (sentence + right + wrong) triple.
     const used = [...new Set(existing.map((e: any) => String(e.answer || '').toUpperCase()).filter(Boolean))];
     const rejected = [...new Set(existing.filter((e: any) => e.source === 'rejected')
       .map((e: any) => String(e.answer || '').toUpperCase()).filter(Boolean))];
+    // The exact combinations that already exist — these are the ONLY hard "do not reproduce" items.
+    const combos = [...new Set(existing.map((e: any) =>
+      `"${String(e.template || '').replace(/\{blank\}/g, '___')}" [${String(e.answer || '').toUpperCase()} / ${String(e.alt_answer || '').toUpperCase()}]`
+    ).filter(Boolean))].slice(0, 80);
 
+    if (combos.length) {
+      lines.push(`ALREADY EXISTS — do NOT reproduce any of these exact combinations (same sentence AND same right/wrong pair). This is the only hard rule; a new pair in an existing sentence, or an existing word in a new sentence, is fine:`);
+      for (const c of combos) lines.push(`- ${c}`);
+      lines.push('');
+    }
     if (used.length) {
-      lines.push(`ANSWER WORDS ALREADY TAKEN — do NOT use any of these as the primary answer (each word should be taught once):`);
-      lines.push(used.join(', '));
+      lines.push(`Words already used as answers (reuse is allowed, but PREFER fresh words for variety): ${used.join(', ')}`);
       lines.push('');
     }
     if (rejected.length) {
       lines.push(`Note: ${rejected.join(', ')} were previously REJECTED by a human reviewer — avoid them and anything close to them.`);
-      lines.push('');
-    }
-    // Also show the sentences, so the model varies phrasing rather than just swapping words.
-    const sentences = [...new Set(existing.map((e: any) => String(e.template || '').replace(/\{blank\}/g, '___')).filter(Boolean))].slice(0, 60);
-    if (sentences.length) {
-      lines.push(`SENTENCES ALREADY USED — write genuinely different ones, don't just swap the word:`);
-      for (const t of sentences) lines.push(`- ${t}`);
       lines.push('');
     }
   }

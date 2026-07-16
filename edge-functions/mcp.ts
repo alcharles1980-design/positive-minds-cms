@@ -126,45 +126,21 @@ function validateQuestion(q: any, levels: any[], opts: any = {}) {
 
   const norm = (s: string) => (s || '').toLowerCase().replace(/\{blank\}/g, '___').replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
 
+  // DUPLICATE — the ONE dedup condition (mirror of the client validateQuestion EXACTLY). A question
+  // is a duplicate ONLY when an existing question (in this pack) has the SAME sentence AND the SAME
+  // right/wrong combination, order-sensitive: same template AND same answer AND same alt_answer.
+  // Strict by design (2026-07): reversed pairs, same sentence with a different pair, and reused
+  // answer words are all DIFFERENT questions and pass cleanly. `existing` must include live + pending
+  // + rejected. Scope is the pack (generation is always pack-level).
   if (ans) {
     const tplN = norm(tpl);
-    let exact = false, sameSentence = false, reusedIn: any = null;
-    for (const e of opts.existing || []) {
-      const eAns = (e.answer || '').toUpperCase();
-      const eTpl = norm(e.template);
-      if (eTpl === tplN && eAns === ans) { exact = true; break; }
-      if (eTpl === tplN) sameSentence = true;
-      if (eAns === ans && !reusedIn) reusedIn = e;
-    }
-    if (exact) {
-      flags.push({ code: 'duplicate', detail: 'This exact question already exists.' });
-    } else {
-      if (sameSentence) flags.push({ code: 'same_sentence', detail: 'This sentence is already used with a different answer.' });
-      if (reusedIn) {
-        const where = reusedIn.source === 'pending' ? 'is already waiting in the review queue'
-          : reusedIn.source === 'rejected' ? 'was already rejected'
-          : reusedIn.source === 'batch' ? 'is used by another question in this same batch'
-          : 'is already used in this pack';
-        flags.push({ code: 'answer_reused', detail: `The answer "${ans}" ${where}${reusedIn.template ? ` — "${String(reusedIn.template).replace(/\{blank\}/g, '____')}"` : ''}.` });
-      }
-    }
+    const isDup = (opts.existing || []).some((e: any) =>
+      norm(e.template) === tplN &&
+      (e.answer || '').toUpperCase() === ans &&
+      (e.alt_answer || '').toUpperCase() === alt
+    );
+    if (isDup) flags.push({ code: 'duplicate', detail: 'This exact question already exists (same sentence and same right/wrong pair).' });
   }
-
-  if (ans && alt) {
-    const pairKey = [ans, alt].sort().join('|');
-    const twin = (opts.existing || []).find((e: any) => {
-      const ea = (e.answer || '').toUpperCase(), eb = (e.alt_answer || '').toUpperCase();
-      if (!ea || !eb) return false;
-      return [ea, eb].sort().join('|') === pairKey && !(ea === ans && eb === alt);
-    });
-    if (twin) {
-      flags.push({
-        code: 'reversed_pair',
-        detail: `The same two words (${[ans, alt].sort().join(' / ')}) are already the choice in another question — just swapped over. The child would see the identical pair twice.`,
-      });
-    }
-  }
-
   return { ok: flags.length === 0, flags };
 }
 

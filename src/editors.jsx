@@ -579,8 +579,6 @@ function BulkImport({ packId, onDone, onClose, levels, packLevel }) {
                       : fl.code === "same_word" ? "Same word"
                       : fl.code === "no_blank" ? "No blank"
                       : fl.code === "multi_blank" ? "Too many blanks"
-                      : fl.code === "answer_reused" ? "Word reused"
-                      : fl.code === "same_sentence" ? "Sentence reused"
                       : fl.code === "duplicate" ? "Duplicate"
                       : fl.code;
                     return (

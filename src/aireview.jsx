@@ -42,13 +42,12 @@ const FLAG_LABEL = {
   bad_chars: "Bad characters",
   bad_chars_alt: "Bad characters",
   duplicate: "Duplicate",
-  same_sentence: "Sentence reused",
-  answer_reused: "Word reused",
 };
 
-// Duplicate-ish flags are advisory (you may still want the question); the rest are mechanical
-// defects. Colour them differently so the genuinely broken ones stand out.
-const SOFT_FLAGS = new Set(["answer_reused", "same_sentence"]);
+// Every remaining flag is a HARD defect (a strict duplicate, or a mechanical problem). There are no
+// soft/advisory flags any more — the old repetition nudges (same_sentence/answer_reused/reversed_pair)
+// were removed when "duplicate" was tightened to an exact sentence + right/wrong-pair match.
+const SOFT_FLAGS = new Set([]);
 
 function FlagPill({ flag }) {
   const label = FLAG_LABEL[flag.code] || flag.code;
