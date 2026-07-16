@@ -11,7 +11,7 @@
 // memory of this project). It never contains a token or any secret — only instructions. Everything
 // concrete (pack names, counts, existing questions) is fetched from the connector at run time, so
 // this text never goes stale. Kept as a template literal so it copies out verbatim.
-const CONTRIB_PROMPT = `You're helping me write content for **Positive Minds**, a therapeutic spelling game for children (roughly ages 5–12). You're connected to it through a tool connector I've already set up in this chat — you'll see tools called list_packs, get_pack_content, check_questions and propose_questions.
+const CONTRIB_PROMPT = `You're helping me write content for **Positive Minds**, a therapeutic spelling game for children (roughly ages 5–12). I've connected you to it through a tool connector in this chat — you'll see tools called list_packs, get_pack_content, check_questions and propose_questions.
 
 HOW THE GAME WORKS (this is a SPELLING puzzle, not a meaning one):
 A short, warm, first-person sentence appears with one word partly hidden, e.g. "I feel PR_UD when I try." The child is shown TWO words and picks the one whose spelling fits the blank.
@@ -116,6 +116,22 @@ function AccessNote({ children }) {
   );
 }
 
+// A single numbered step in the partner quick-start. Big number, title, body, optional inline extra
+// (a copyable row, a prompt block, a callout).
+function Step({ n, title, children, extra }) {
+  return (
+    <div style={{ display: "flex", gap: S.md, alignItems: "flex-start" }}>
+      <div style={{ flex: "0 0 auto", width: 30, height: 30, borderRadius: 999, background: C.brand, color: "#fff",
+        fontSize: 15, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", marginTop: 1 }}>{n}</div>
+      <div style={{ flex: 1, minWidth: 0, paddingBottom: S.md }}>
+        <div style={{ fontSize: 14.5, fontWeight: 800, color: C.ink, marginBottom: 3 }}>{title}</div>
+        <div className="pm-prose" style={{ fontSize: 13, color: C.ink2, lineHeight: 1.65 }}>{children}</div>
+        {extra && <div style={{ marginTop: S.sm }}>{extra}</div>}
+      </div>
+    </div>
+  );
+}
+
 function SystemArchitectureView() {
   const SB_REF = "tytrmjjucqijzcrbwjfm";
   const GH = "https://github.com/alcharles1980-design/positive-minds-cms";
@@ -132,44 +148,109 @@ function SystemArchitectureView() {
       <div style={{ marginBottom: S.lg }}>
         <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: C.ink, letterSpacing: -0.3 }}>System architecture</h1>
         <p className="pm-prose" style={{ margin: "4px 0 0", color: C.sub, fontSize: 14.5 }}>
-          The three services this project runs on, with their live links and IDs. GitHub holds the source and deploys the
-          front-end; Cloudflare serves the site; Supabase is the backend. GitHub and Supabase are decoupled — a push never
-          touches the backend.
+          Everything you need to connect Claude and start writing questions — step by step below. Technical service
+          details (GitHub, Cloudflare, Supabase) follow underneath, for developers.
+        </p>
+      </div>
+
+      {/* ============ PARTNER QUICK-START — the main event ============ */}
+      <div style={{ background: C.panel, border: "2px solid " + C.brand, borderRadius: R.lg, overflow: "hidden", marginBottom: S.xl }}>
+        <div style={{ padding: S.lg, borderBottom: "1px solid " + C.line, background: C.brandSoft }}>
+          <div style={{ fontSize: 18, fontWeight: 800, color: C.brandInk, letterSpacing: -0.2 }}>✍️ Write questions with Claude — start here</div>
+          <div style={{ fontSize: 13, color: C.sub, marginTop: 3 }}>
+            Six steps, about five minutes. You'll make your own access token, connect it to your own Claude, and start
+            proposing questions. Everything you propose goes to a review queue first — nothing goes live on its own.
+          </div>
+        </div>
+        <div style={{ padding: S.lg + "px " + S.lg + "px " + S.sm + "px" }}>
+
+          <Step n={1} title="Sign in to this CMS">
+            You're already here, so you're in. If you ever need to sign in again, use the <strong>username and password
+            Albert sent you</strong> (they're shared privately — never shown on this page). That login is what lets you
+            make your own token in the next step.
+          </Step>
+
+          <Step n={2} title="Make your access token"
+            extra={
+              <div style={{ background: C.warnSoft, border: "1px solid " + C.warn, borderRadius: R.sm, padding: S.sm + "px " + S.md + "px", fontSize: 12, color: C.warnInk, lineHeight: 1.55 }}>
+                <strong>Copy the token the moment it appears</strong> — it's shown only once and can't be recovered. If you
+                lose it, just make another. Keep it private; it's a key, like a password.
+              </div>
+            }>
+            Open the <strong>Claude Connector</strong> page (◇ in the left menu). Type <strong>your own name</strong> in the
+            box (e.g. "Sarah") and click <strong>Create token</strong>. You'll get a <code>pmk_…</code> token — your name
+            on it is how Albert can tell your proposals apart in review.
+          </Step>
+
+          <Step n={3} title="Add the connector to your Claude"
+            extra={<ArchRow label="Connector URL" value={SB_FUNCS + "/mcp"} href={SB_FUNCS + "/mcp"} hint="Copy this — it's the address your Claude connects to." />}>
+            In your <em>own</em> Claude (a separate browser tab or the app), go to <strong>Settings → Connectors →
+            Add custom connector</strong>, give it a name like "Positive Minds", and paste the <strong>Connector URL</strong>
+            below. Save it.
+          </Step>
+
+          <Step n={4} title="Sign in with your token">
+            Start a new chat and turn the Positive Minds connector on. Claude will open a small <strong>Connect to Positive
+            Minds</strong> sign-in screen — paste your <code>pmk_…</code> token there and continue. (Claude handles the rest
+            of the security handshake automatically; there are no codes to copy.) You only do this once per Claude.
+          </Step>
+
+          <Step n={5} title="Paste the starter prompt"
+            extra={<PromptBlock text={CONTRIB_PROMPT} />}>
+            Your chat has no idea what this project is yet, so paste the block below into it. It tells Claude everything —
+            the game, the rules, and the exact steps to follow. Copy it with the button, paste, and send.
+          </Step>
+
+          <Step n={6} title="Pick a pack and write">
+            Claude will show you the packs as a numbered list with their current stats (how many questions each has), and
+            ask which one you want to add to. Choose one, then just talk: <em>"let's write 8 for level 2 about bedtime
+            worries."</em> Claude checks every draft against what's already there so you never make a duplicate, then sends
+            them to the review queue. <strong>Albert approves, edits, or rejects each one</strong> on the AI Review page —
+            that's the only way anything reaches a child.
+          </Step>
+
+        </div>
+      </div>
+
+      {/* what happens to proposals + revoke */}
+      <div style={{ display: "grid", gap: S.md, marginBottom: S.xl }}>
+        <div style={{ background: C.goodSoft, border: "1px solid " + C.line, borderRadius: R.md, padding: S.md + "px " + S.lg + "px", fontSize: 12.8, color: C.ink2, lineHeight: 1.65 }}>
+          <strong style={{ color: C.goodInk }}>Nothing you propose goes live by itself.</strong> Every question is validated
+          by the same engine the CMS uses and written <strong>only</strong> to the review queue. It reaches the game only
+          when a human approves it on the <strong>AI Review</strong> page. The connector can read packs and propose — it
+          can publish, edit, and delete nothing.
+        </div>
+        <div style={{ background: C.warnSoft, border: "1px solid " + C.warn, borderRadius: R.md, padding: S.md + "px " + S.lg + "px", fontSize: 12.5, color: C.warnInk, lineHeight: 1.6 }}>
+          <strong>Lost or leaked a token?</strong> Go to the <strong>Claude Connector</strong> page and revoke it — that
+          disables it instantly — then make a new one. Never paste your token anywhere public or commit it to code.
+        </div>
+      </div>
+
+      {/* ============ TECHNICAL REFERENCE (for developers) ============ */}
+      <div style={{ borderTop: "2px solid " + C.line, margin: S.xl + "px 0 " + S.lg + "px", paddingTop: S.lg }}>
+        <div style={{ fontSize: 18, fontWeight: 800, color: C.ink, letterSpacing: -0.2 }}>Technical reference</div>
+        <p className="pm-prose" style={{ margin: "3px 0 0", color: C.sub, fontSize: 13.5 }}>
+          The services this project runs on, with their live links and IDs — for a developer working on the code or backend.
+          A content contributor (above) needs none of this. GitHub holds the source and deploys the front-end; Cloudflare
+          serves the site; Supabase is the backend. GitHub and Supabase are decoupled — a push never touches the backend.
         </p>
       </div>
 
       {/* how they fit together */}
-      <div style={{ background: C.brandSoft, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg, marginBottom: S.xl }}>
+      <div style={{ background: C.brandSoft, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg, marginBottom: S.lg }}>
         <div style={{ fontSize: 13.5, color: C.ink2, lineHeight: 1.7 }}>
           <strong style={{ color: C.brandInk }}>Front-end:</strong> edit <code>src/</code> → build → <code>git push</code> → GitHub Actions → Cloudflare updates the live site.<br />
           <strong style={{ color: C.brandInk }}>Backend:</strong> the database, auth, and edge functions live in Supabase and are deployed manually (MCP or CLI) — <em>GitHub never deploys them</em>.
         </div>
       </div>
 
-      {/* getting set up */}
+      {/* development partner access */}
       <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg, marginBottom: S.xl }}>
-        <div style={{ fontSize: 15, fontWeight: 800, color: C.ink, marginBottom: 4 }}>Two kinds of contributor</div>
-        <div className="pm-prose" style={{ fontSize: 12.8, color: C.sub, marginBottom: S.md, lineHeight: 1.6 }}>
-          Pick the one that matches the person — they need very different access.
-        </div>
-        <div style={{ display: "grid", gap: S.md }}>
-          <div style={{ background: C.bgDeep, border: "1px solid " + C.lineSoft, borderRadius: R.md, padding: S.md + "px " + S.lg + "px" }}>
-            <div style={{ fontSize: 13, fontWeight: 800, color: C.ink, marginBottom: 3 }}>🛠 Development partner — builds the app</div>
-            <div className="pm-prose" style={{ fontSize: 12.6, color: C.ink2, lineHeight: 1.6 }}>
-              Works on the code and backend. Needs real access: <strong>GitHub</strong> (collaborator, Write) and a
-              <strong> Supabase org invitation</strong>. Cloudflare usually not needed. Full mechanics in each service
-              card below, and in <code>CONTRIBUTING.md</code>.
-            </div>
-          </div>
-          <div style={{ background: C.brandSoft, border: "1px solid " + C.line, borderRadius: R.md, padding: S.md + "px " + S.lg + "px" }}>
-            <div style={{ fontSize: 13, fontWeight: 800, color: C.brandInk, marginBottom: 3 }}>✍️ Content contributor — proposes questions</div>
-            <div className="pm-prose" style={{ fontSize: 12.6, color: C.ink2, lineHeight: 1.6 }}>
-              Contributes question content only — <strong>no GitHub, no Supabase, no CMS login</strong>. They connect
-              their <em>own</em> Claude to this project's MCP connector and simply ask it to propose questions, which
-              land in the review queue for you to approve. Full steps in the <strong>Content contributor setup</strong>
-              guide below.
-            </div>
-          </div>
+        <div style={{ fontSize: 15, fontWeight: 800, color: C.ink, marginBottom: 4 }}>🛠 Development partner — builds the app</div>
+        <div className="pm-prose" style={{ fontSize: 12.8, color: C.ink2, marginBottom: 0, lineHeight: 1.6 }}>
+          Different from a content contributor: works on the code and backend, so needs <em>real</em> access —
+          <strong> GitHub</strong> (collaborator, Write) and a <strong>Supabase org invitation</strong>. Cloudflare usually
+          not needed. Full mechanics are in each service card below and in <code>CONTRIBUTING.md</code>.
         </div>
       </div>
 
@@ -227,64 +308,10 @@ function SystemArchitectureView() {
       </ArchCard>
 
       {/* content contributor setup guide */}
-      <div style={{ background: C.panel, border: "2px solid " + C.brand, borderRadius: R.lg, overflow: "hidden", marginBottom: S.lg }}>
-        <div style={{ padding: S.lg, borderBottom: "1px solid " + C.line, background: C.brandSoft }}>
-          <div style={{ fontSize: 16.5, fontWeight: 800, color: C.brandInk, letterSpacing: -0.2 }}>✍️ Content contributor setup</div>
-          <div style={{ fontSize: 12.5, color: C.sub, marginTop: 2 }}>
-            For someone who proposes questions via their own Claude — no GitHub, Supabase, or CMS login required.
-          </div>
-        </div>
-        <div style={{ padding: S.lg }}>
-          <div style={{ marginBottom: S.lg }}>
-            <ArchRow label="Connector URL" value={SB_FUNCS + "/mcp"} href={SB_FUNCS + "/mcp"} hint="What the contributor adds to their Claude as an MCP / custom connector." />
-          </div>
-
-          <div style={{ fontSize: 12.5, fontWeight: 800, color: C.ink, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>You (owner) do first</div>
-          <ol style={{ margin: "0 0 " + S.lg + "px", paddingLeft: 20, fontSize: 12.8, color: C.ink2, lineHeight: 1.7 }}>
-            <li>Open the <strong>Claude Connector</strong> page in this CMS.</li>
-            <li><strong>Issue a partner token</strong> for them — you get a one-time <code>pmk_…</code> token. Copy it now; only its hash is stored, so it can't be shown again.</li>
-            <li>Send them the token <em>and</em> the Connector URL above, over a secure channel.</li>
-          </ol>
-
-          <div style={{ fontSize: 12.5, fontWeight: 800, color: C.ink, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>The contributor does</div>
-          <ol style={{ margin: "0 0 " + S.lg + "px", paddingLeft: 20, fontSize: 12.8, color: C.ink2, lineHeight: 1.7 }}>
-            <li>In their own Claude, add the <strong>Connector URL</strong> as a custom connector.</li>
-            <li>Claude starts a sign-in; on the Positive Minds screen they paste their <code>pmk_…</code> token. (Claude handles the OAuth/PKCE automatically — no codes to copy.)</li>
-            <li>They then just talk to Claude, e.g. <em>"propose 5 affirmation questions about resilience for age 8."</em> Claude calls the connector's tools: <code>list_packs</code>, <code>get_pack_content</code>, <code>check_questions</code>, and <code>propose_questions</code>.</li>
-          </ol>
-
-          <div style={{ fontSize: 12.5, fontWeight: 800, color: C.ink, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>What happens to their proposals</div>
-          <div className="pm-prose" style={{ fontSize: 12.8, color: C.ink2, lineHeight: 1.7, marginBottom: S.md }}>
-            Every proposal is validated by the same engine the CMS uses and written <strong>only</strong> to the review
-            queue — the connector can read packs but can write nowhere else. Nothing reaches the game until <strong>you
-            approve it</strong> on the <strong>AI Review</strong> page (proposals now appear there live). Reject and it's
-            gone. The contributor never has access to live content, the database, or the code.
-          </div>
-
-          <div style={{ background: C.warnSoft, border: "1px solid " + C.warn, borderRadius: R.sm, padding: S.sm + "px " + S.md + "px", fontSize: 11.8, color: C.warnInk, lineHeight: 1.55 }}>
-            <strong>Revoke anytime</strong> on the Claude Connector page — it disables that <code>pmk_</code> token immediately.
-            The token is a credential: share it securely and never commit it. <em>This connector is newly built and
-            lightly exercised — test the full connect-and-propose loop yourself once before relying on it.</em>
-          </div>
-        </div>
-      </div>
-
-      {/* onboarding prompt — copy/paste into a fresh Claude chat */}
-      <div style={{ marginTop: S.lg }}>
-        <ArchCard icon="📋" title="Onboarding prompt" accent={C.brand}
-          tagline="Send this with the token. Their Claude chat has no memory of this project — this prompt is what tells it what to do.">
-          <div className="pm-prose" style={{ fontSize: 12.8, color: C.ink2, lineHeight: 1.7, marginBottom: S.md }}>
-            After the contributor has added the connector and pasted their token, they paste the block below into that
-            same chat. It is fully self-contained: it explains the game, tells Claude to pull the live pack list and
-            statistics, present the packs as a numbered choice, and check every draft against existing content before
-            proposing. Copy it and send it to them.
-          </div>
-          <PromptBlock text={CONTRIB_PROMPT} />
-          <div style={{ fontSize: 11.8, color: C.faint, marginTop: S.md, lineHeight: 1.6 }}>
-            Nothing here is secret — it contains no token and no keys, only instructions. The pack names, counts and
-            existing questions all come from the connector at run time, so this prompt never goes stale.
-          </div>
-        </ArchCard>
+      <div style={{ background: C.bgDeep, border: "1px solid " + C.lineSoft, borderRadius: R.md, padding: S.md + "px " + S.lg + "px", marginBottom: S.lg, fontSize: 12.5, color: C.ink2, lineHeight: 1.65 }}>
+        <strong style={{ color: C.brandInk }}>Content contributor?</strong> You don't need any of the service access above —
+        the full, step-by-step connect flow is at the top of this page (<em>“Write questions with Claude — start here”</em>).
+        The connector reads packs and proposes to the review queue; it touches nothing else.
       </div>
 
       <div style={{ marginTop: S.lg, background: C.warnSoft, border: "1px solid " + C.warn, borderRadius: R.md, padding: S.md + "px " + S.lg + "px", fontSize: 12.5, color: C.warnInk, lineHeight: 1.65 }}>
