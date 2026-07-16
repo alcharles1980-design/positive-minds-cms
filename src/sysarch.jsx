@@ -102,18 +102,28 @@ function SystemArchitectureView() {
 
       {/* getting set up */}
       <div style={{ background: C.panel, border: "1px solid " + C.line, borderRadius: R.lg, padding: S.lg, marginBottom: S.xl }}>
-        <div style={{ fontSize: 15, fontWeight: 800, color: C.ink, marginBottom: 4 }}>Getting set up as a contributor</div>
+        <div style={{ fontSize: 15, fontWeight: 800, color: C.ink, marginBottom: 4 }}>Two kinds of contributor</div>
         <div className="pm-prose" style={{ fontSize: 12.8, color: C.sub, marginBottom: S.md, lineHeight: 1.6 }}>
-          Three grants, one per service. Each service card below has the full <strong>Access &amp; connect</strong> steps.
+          Pick the one that matches the person — they need very different access.
         </div>
-        <ol style={{ margin: 0, paddingLeft: 20, fontSize: 13, color: C.ink2, lineHeight: 1.75 }}>
-          <li><strong>GitHub</strong> — be added as a <strong>collaborator with Write</strong> access. Lets you do all front-end work (edit, push, auto-deploy).</li>
-          <li><strong>Supabase</strong> — accept an <strong>invitation to the organization</strong>. Then connect the Supabase MCP with your own login to work on the backend (DB + edge functions).</li>
-          <li><strong>Cloudflare</strong> — <strong>usually nothing</strong>. The front-end deploys automatically via GitHub; you only need Cloudflare access to manage hosting directly.</li>
-        </ol>
-        <div className="pm-prose" style={{ fontSize: 12.5, color: C.faint, marginTop: S.md, lineHeight: 1.6 }}>
-          Then read <code>CONTRIBUTING.md</code> in the repo (the build/test/deploy loop) and the app's Developer page
-          (Architecture §0.4 + CLAUDE.md rule 4d) for the full workflow. No shared tokens — everyone uses their own accounts.
+        <div style={{ display: "grid", gap: S.md }}>
+          <div style={{ background: C.bgDeep, border: "1px solid " + C.lineSoft, borderRadius: R.md, padding: S.md + "px " + S.lg + "px" }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: C.ink, marginBottom: 3 }}>🛠 Development partner — builds the app</div>
+            <div className="pm-prose" style={{ fontSize: 12.6, color: C.ink2, lineHeight: 1.6 }}>
+              Works on the code and backend. Needs real access: <strong>GitHub</strong> (collaborator, Write) and a
+              <strong> Supabase org invitation</strong>. Cloudflare usually not needed. Full mechanics in each service
+              card below, and in <code>CONTRIBUTING.md</code>.
+            </div>
+          </div>
+          <div style={{ background: C.brandSoft, border: "1px solid " + C.line, borderRadius: R.md, padding: S.md + "px " + S.lg + "px" }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: C.brandInk, marginBottom: 3 }}>✍️ Content contributor — proposes questions</div>
+            <div className="pm-prose" style={{ fontSize: 12.6, color: C.ink2, lineHeight: 1.6 }}>
+              Contributes question content only — <strong>no GitHub, no Supabase, no CMS login</strong>. They connect
+              their <em>own</em> Claude to this project's MCP connector and simply ask it to propose questions, which
+              land in the review queue for you to approve. Full steps in the <strong>Content contributor setup</strong>
+              guide below.
+            </div>
+          </div>
         </div>
       </div>
 
@@ -169,6 +179,49 @@ function SystemArchitectureView() {
           this one. Deploying edge functions / running SQL is manual (MCP or CLI) — a GitHub push never touches Supabase.
         </AccessNote>
       </ArchCard>
+
+      {/* content contributor setup guide */}
+      <div style={{ background: C.panel, border: "2px solid " + C.brand, borderRadius: R.lg, overflow: "hidden", marginBottom: S.lg }}>
+        <div style={{ padding: S.lg, borderBottom: "1px solid " + C.line, background: C.brandSoft }}>
+          <div style={{ fontSize: 16.5, fontWeight: 800, color: C.brandInk, letterSpacing: -0.2 }}>✍️ Content contributor setup</div>
+          <div style={{ fontSize: 12.5, color: C.sub, marginTop: 2 }}>
+            For someone who proposes questions via their own Claude — no GitHub, Supabase, or CMS login required.
+          </div>
+        </div>
+        <div style={{ padding: S.lg }}>
+          <div style={{ marginBottom: S.lg }}>
+            <ArchRow label="Connector URL" value={SB_FUNCS + "/mcp"} href={SB_FUNCS + "/mcp"} hint="What the contributor adds to their Claude as an MCP / custom connector." />
+          </div>
+
+          <div style={{ fontSize: 12.5, fontWeight: 800, color: C.ink, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>You (owner) do first</div>
+          <ol style={{ margin: "0 0 " + S.lg + "px", paddingLeft: 20, fontSize: 12.8, color: C.ink2, lineHeight: 1.7 }}>
+            <li>Open the <strong>Claude Connector</strong> page in this CMS.</li>
+            <li><strong>Issue a partner token</strong> for them — you get a one-time <code>pmk_…</code> token. Copy it now; only its hash is stored, so it can't be shown again.</li>
+            <li>Send them the token <em>and</em> the Connector URL above, over a secure channel.</li>
+          </ol>
+
+          <div style={{ fontSize: 12.5, fontWeight: 800, color: C.ink, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>The contributor does</div>
+          <ol style={{ margin: "0 0 " + S.lg + "px", paddingLeft: 20, fontSize: 12.8, color: C.ink2, lineHeight: 1.7 }}>
+            <li>In their own Claude, add the <strong>Connector URL</strong> as a custom connector.</li>
+            <li>Claude starts a sign-in; on the Positive Minds screen they paste their <code>pmk_…</code> token. (Claude handles the OAuth/PKCE automatically — no codes to copy.)</li>
+            <li>They then just talk to Claude, e.g. <em>"propose 5 affirmation questions about resilience for age 8."</em> Claude calls the connector's tools: <code>list_packs</code>, <code>get_pack_content</code>, <code>check_questions</code>, and <code>propose_questions</code>.</li>
+          </ol>
+
+          <div style={{ fontSize: 12.5, fontWeight: 800, color: C.ink, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.4 }}>What happens to their proposals</div>
+          <div className="pm-prose" style={{ fontSize: 12.8, color: C.ink2, lineHeight: 1.7, marginBottom: S.md }}>
+            Every proposal is validated by the same engine the CMS uses and written <strong>only</strong> to the review
+            queue — the connector can read packs but can write nowhere else. Nothing reaches the game until <strong>you
+            approve it</strong> on the <strong>AI Review</strong> page (proposals now appear there live). Reject and it's
+            gone. The contributor never has access to live content, the database, or the code.
+          </div>
+
+          <div style={{ background: C.warnSoft, border: "1px solid " + C.warn, borderRadius: R.sm, padding: S.sm + "px " + S.md + "px", fontSize: 11.8, color: C.warnInk, lineHeight: 1.55 }}>
+            <strong>Revoke anytime</strong> on the Claude Connector page — it disables that <code>pmk_</code> token immediately.
+            The token is a credential: share it securely and never commit it. <em>This connector is newly built and
+            lightly exercised — test the full connect-and-propose loop yourself once before relying on it.</em>
+          </div>
+        </div>
+      </div>
 
       <div style={{ background: C.warnSoft, border: "1px solid " + C.warn, borderRadius: R.md, padding: S.md + "px " + S.lg + "px", fontSize: 12.5, color: C.warnInk, lineHeight: 1.65 }}>
         <strong>No secrets on this page.</strong> These are identifiers and dashboard links only — they still require each
