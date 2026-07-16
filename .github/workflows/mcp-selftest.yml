@@ -8,6 +8,10 @@ on:
       pmk_token:
         description: "A pmk_ partner token to authenticate with"
         required: true
+      base_url:
+        description: "MCP base URL to test (default: the Supabase function). Set to the shim's /mcp to test the discovery shim."
+        required: false
+        default: "https://tytrmjjucqijzcrbwjfm.supabase.co/functions/v1/mcp"
 
 jobs:
   selftest:
@@ -15,7 +19,7 @@ jobs:
     steps:
       - name: Full OAuth + propose_questions round-trip
         env:
-          BASE: https://tytrmjjucqijzcrbwjfm.supabase.co/functions/v1/mcp
+          BASE: ${{ github.event.inputs.base_url }}
           PMK: ${{ github.event.inputs.pmk_token }}
         run: |
           set -e
