@@ -23,6 +23,24 @@
 
 const SUPABASE = "https://tytrmjjucqijzcrbwjfm.supabase.co";
 
+// Fire-and-forget diagnostic logging so the Worker's own traffic (esp. discovery-doc fetches, which
+// never reach Supabase) is visible. Temporary; remove once the connector flow is confirmed.
+const SHIM_LOG_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5dHJtamp1Y3FpanpjcmJ3amZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMwOTMyNDgsImV4cCI6MjA5ODY2OTI0OH0.KlFsPm7M015tflKE-jDjIstD_ZoCaz0jROUAoksJxOs";
+function shimLog(ctx, entry) {
+  try {
+    ctx.waitUntil(fetch(SUPABASE + "/rest/v1/pm_shim_log", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: SHIM_LOG_KEY,
+        Authorization: "Bearer " + SHIM_LOG_KEY,
+        Prefer: "return=minimal",
+      },
+      body: JSON.stringify(entry),
+    }).catch(() => {}));
+  } catch (_) { /* never break the request */ }
+}
+
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, content-type, mcp-session-id, mcp-protocol-version",
@@ -30,11 +48,13 @@ const CORS = {
 };
 
 export default {
-  async fetch(request) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
     const ORIGIN = url.origin;            // https://positive-minds-mcp.<sub>.workers.dev
     const PUBLIC_MCP = ORIGIN + "/mcp";   // the URL a user enters into Claude as the connector
+    const ua = request.headers.get("user-agent") || "";
+    shimLog(ctx, { method: request.method, path, ua, status: 0 });
 
     if (request.method === "OPTIONS") {
       return new Response("ok", { headers: CORS });
