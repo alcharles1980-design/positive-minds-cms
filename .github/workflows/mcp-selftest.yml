@@ -1,0 +1,67 @@
+name: MCP connector self-test
+# Manual, on-demand end-to-end test of the live mcp edge function's full OAuth + tools flow.
+# Runs entirely on a GitHub runner (which can reach Supabase), using a pmk_ token passed as input.
+# Does NOT write live content — it proposes into the review queue and prints the result.
+on:
+  workflow_dispatch:
+    inputs:
+      pmk_token:
+        description: "A pmk_ partner token to authenticate with"
+        required: true
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Full OAuth + propose_questions round-trip
+        env:
+          BASE: https://tytrmjjucqijzcrbwjfm.supabase.co/functions/v1/mcp
+          PMK: ${{ github.event.inputs.pmk_token }}
+        run: |
+          set -e
+          echo "::group::1. Discovery"
+          curl -s "$BASE/.well-known/oauth-authorization-server" | tee disco.json | head -c 400; echo
+          echo "::endgroup::"
+
+          echo "::group::2. Register client"
+          REG=$(curl -s -X POST "$BASE/register" -H 'Content-Type: application/json' \
+            -d '{"redirect_uris":["http://localhost:9999/cb"],"client_name":"gha-selftest"}')
+          echo "$REG"
+          CLIENT_ID=$(echo "$REG" | python3 -c 'import sys,json;print(json.load(sys.stdin)["client_id"])')
+          echo "client_id=$CLIENT_ID"
+          echo "::endgroup::"
+
+          echo "::group::3. PKCE + authorize (form POST) -> capture code"
+          VERIFIER=$(python3 -c 'import secrets,base64;print(base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode())')
+          CHALLENGE=$(python3 -c "import hashlib,base64;print(base64.urlsafe_b64encode(hashlib.sha256('$VERIFIER'.encode()).digest()).rstrip(b'=').decode())")
+          # -i to see headers; do NOT follow redirect, we want the Location with ?code=
+          AUTH=$(curl -s -i -X POST "$BASE/authorize" \
+            -H 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode "token=$PMK" \
+            --data-urlencode "client_id=$CLIENT_ID" \
+            --data-urlencode "redirect_uri=http://localhost:9999/cb" \
+            --data-urlencode "state=st_test" \
+            --data-urlencode "code_challenge=$CHALLENGE")
+          echo "$AUTH" | head -c 600; echo
+          CODE=$(echo "$AUTH" | grep -i '^location:' | grep -o 'code=[^&[:space:]]*' | cut -d= -f2)
+          echo "auth code = ${CODE:-<none>}"
+          echo "::endgroup::"
+
+          echo "::group::4. Token exchange (PKCE verifier)"
+          TOK=$(curl -s -X POST "$BASE/token" -H 'Content-Type: application/json' \
+            -d "{\"grant_type\":\"authorization_code\",\"code\":\"$CODE\",\"redirect_uri\":\"http://localhost:9999/cb\",\"client_id\":\"$CLIENT_ID\",\"code_verifier\":\"$VERIFIER\"}")
+          echo "$TOK"
+          ACCESS=$(echo "$TOK" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))')
+          echo "access_token present: $([ -n "$ACCESS" ] && echo yes || echo NO)"
+          echo "::endgroup::"
+
+          echo "::group::5. tools/list (authenticated MCP call)"
+          curl -s -X POST "$BASE" -H "Authorization: Bearer $ACCESS" -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | head -c 800; echo
+          echo "::endgroup::"
+
+          echo "::group::6. propose_questions -> review queue"
+          curl -s -X POST "$BASE" -H "Authorization: Bearer $ACCESS" -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"propose_questions","arguments":{"pack_slug":"confidence","questions":[{"template":"I am {blank} today","answer":"BRAVE","alt_answer":"CALM","target_level":3}]}}}' | head -c 1000; echo
+          echo "::endgroup::"
+          echo "DONE"
