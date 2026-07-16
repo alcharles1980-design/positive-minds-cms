@@ -1,0 +1,119 @@
+// Positive Minds — MCP OAuth discovery shim (Cloudflare Worker)
+//
+// WHY THIS EXISTS
+// The MCP server itself lives in a Supabase edge function at
+//   https://tytrmjjucqijzcrbwjfm.supabase.co/functions/v1/mcp
+// Supabase serves functions only under the /functions/v1/<name> path prefix, so it CANNOT serve
+// the OAuth discovery documents at the domain ROOT (/.well-known/...). Claude's custom-connector
+// OAuth flow discovers the authorization server by probing the ORIGIN ROOT
+// (/.well-known/oauth-protected-resource[/mcp] and /.well-known/oauth-authorization-server[/mcp])
+// and by constructing the RFC 8414 host-inserted metadata URL. Against a bare Supabase function
+// every one of those 404s, so Claude never starts the sign-in flow and reports "no tools available."
+//
+// This Worker sits in front on its own origin (…workers.dev), where it CAN serve /.well-known/* at
+// the root. It:
+//   1. serves the two discovery documents itself, advertising THIS worker's URLs; and
+//   2. transparently proxies /mcp, /mcp/authorize, /mcp/token, /mcp/register (and the login form's
+//      POST) through to the unchanged Supabase function.
+// It also rewrites the 401 WWW-Authenticate header to point at its own discovery doc, and rewrites
+// the login page's form action so the browser posts back through this origin. The Supabase function
+// — including all the OAuth 2.1 + PKCE logic — is left exactly as it is.
+//
+// Connector URL for Claude:  https://<this-worker>.workers.dev/mcp
+
+const SUPABASE = "https://tytrmjjucqijzcrbwjfm.supabase.co";
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, content-type, mcp-session-id, mcp-protocol-version",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+};
+
+export default {
+  async fetch(request) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const ORIGIN = url.origin;            // https://positive-minds-mcp.<sub>.workers.dev
+    const PUBLIC_MCP = ORIGIN + "/mcp";   // the URL a user enters into Claude as the connector
+
+    if (request.method === "OPTIONS") {
+      return new Response("ok", { headers: CORS });
+    }
+
+    const jsonRes = (obj) =>
+      new Response(JSON.stringify(obj), { headers: { ...CORS, "Content-Type": "application/json" } });
+
+    // ---- 1. OAuth discovery documents, served at the ORIGIN ROOT (the whole reason this exists) ----
+    // Cover the root form, the RFC-8414 host-inserted form (…/mcp), and the OIDC path-appended form.
+    if (
+      path === "/.well-known/oauth-protected-resource" ||
+      path === "/.well-known/oauth-protected-resource/mcp" ||
+      path === "/mcp/.well-known/oauth-protected-resource"
+    ) {
+      return jsonRes({
+        resource: PUBLIC_MCP,
+        authorization_servers: [PUBLIC_MCP],
+        scopes_supported: ["mcp:tools"],
+        bearer_methods_supported: ["header"],
+      });
+    }
+    if (
+      path === "/.well-known/oauth-authorization-server" ||
+      path === "/.well-known/oauth-authorization-server/mcp" ||
+      path === "/mcp/.well-known/oauth-authorization-server" ||
+      path === "/.well-known/openid-configuration" ||
+      path === "/.well-known/openid-configuration/mcp"
+    ) {
+      return jsonRes({
+        issuer: PUBLIC_MCP,
+        authorization_endpoint: PUBLIC_MCP + "/authorize",
+        token_endpoint: PUBLIC_MCP + "/token",
+        registration_endpoint: PUBLIC_MCP + "/register",
+        response_types_supported: ["code"],
+        grant_types_supported: ["authorization_code"],
+        code_challenge_methods_supported: ["S256"], // OAuth 2.1 / MCP requires PKCE S256
+        token_endpoint_auth_methods_supported: ["none"],
+        scopes_supported: ["mcp:tools"],
+      });
+    }
+
+    // ---- 2. Proxy everything else to the Supabase edge function ----
+    let targetPath;
+    if (path === "/mcp" || path.startsWith("/mcp/")) {
+      targetPath = "/functions/v1" + path;      // /mcp -> /functions/v1/mcp, /mcp/token -> …/mcp/token
+    } else if (path.startsWith("/functions/v1/mcp")) {
+      targetPath = path;                        // passthrough (belt-and-suspenders for the form action)
+    } else {
+      targetPath = "/functions/v1/mcp";         // root or anything else behaves like the MCP endpoint
+    }
+    const targetUrl = SUPABASE + targetPath + url.search;
+
+    const fwdHeaders = new Headers(request.headers);
+    fwdHeaders.delete("host"); // let fetch set the correct Host for Supabase
+    const method = request.method;
+    const body = method === "GET" || method === "HEAD" ? undefined : await request.arrayBuffer();
+
+    const upstream = await fetch(targetUrl, { method, headers: fwdHeaders, body, redirect: "manual" });
+
+    const outHeaders = new Headers(upstream.headers);
+    // Point the OAuth challenge at OUR root discovery doc, not Supabase's path-prefixed one.
+    if (outHeaders.has("www-authenticate")) {
+      outHeaders.set(
+        "WWW-Authenticate",
+        `Bearer resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource"`,
+      );
+    }
+    for (const [k, v] of Object.entries(CORS)) outHeaders.set(k, v);
+
+    // The Supabase login page posts to /functions/v1/mcp/authorize; rewrite it to our /mcp/authorize
+    // so the browser stays on this origin.
+    const ct = outHeaders.get("content-type") || "";
+    if (ct.includes("text/html")) {
+      let html = await upstream.text();
+      html = html.split("/functions/v1/mcp/authorize").join("/mcp/authorize");
+      return new Response(html, { status: upstream.status, headers: outHeaders });
+    }
+
+    return new Response(upstream.body, { status: upstream.status, headers: outHeaders });
+  },
+};

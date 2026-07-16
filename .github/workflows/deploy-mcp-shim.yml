@@ -1,0 +1,29 @@
+name: Deploy MCP shim (Cloudflare Worker)
+
+# Deploys the OAuth discovery shim Worker (mcp-shim/) that fronts the Supabase MCP function so
+# Claude's custom-connector OAuth discovery can find the authorization server at the origin root.
+# Uses the SAME Cloudflare secrets already configured for this repo. This is a Worker deploy
+# (`wrangler deploy`), independent of the site's Pages deploy.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "mcp-shim/**"
+      - ".github/workflows/deploy-mcp-shim.yml"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: mcp-shim
+          command: deploy
