@@ -15,7 +15,12 @@
 // admin can read them back from the browser (verified: the table has RLS on and zero policies).
 // ============================================================
 
-const MCP_URL = `${CFG.url}/functions/v1/mcp`;
+// The connector URL a partner pastes into Claude. This is the Cloudflare Worker "discovery shim"
+// (positive-minds-mcp.…workers.dev/mcp), NOT the Supabase function directly: Claude's custom-connector
+// OAuth discovery probes the origin ROOT for /.well-known/* metadata, which a Supabase edge function
+// (served under /functions/v1/…) cannot provide, so a bare Supabase URL connects but shows no tools.
+// The shim serves that metadata at its root and proxies everything else to the unchanged MCP function.
+const MCP_URL = "https://positive-minds-mcp.alcharles1980.workers.dev/mcp";
 
 const db_mcp = {
   list: () => rpc("pm_mcp_list_tokens"),
@@ -144,7 +149,8 @@ function ConnectorView() {
         padding: S.lg, marginTop: S.xl }} className="pm-readable">
         <h2 style={{ margin: "0 0 10px", fontSize: 15, fontWeight: 800, color: C.ink }}>What your partner does</h2>
         <ol style={{ margin: 0, paddingLeft: 20, fontSize: 13.5, color: C.ink2, lineHeight: 1.85 }}>
-          <li>In Claude: <b>Settings → Connectors → Add custom connector</b>.</li>
+          <li>On a computer — <b>claude.ai (web) or the desktop app</b>, not the phone app — go to
+            <b> Settings → Connectors → Add custom connector</b>. (Once added there it appears on their phone too.)</li>
           <li>They paste <b>just the URL</b> above and click Add. (Nothing goes in the OAuth boxes.)</li>
           <li>They click <b>Connect</b>. A Positive Minds sign-in page opens — they paste their token there.</li>
           <li>Then they simply talk to it: <i>"Write me 15 questions for the Calmness pack about worries at bedtime."</i></li>
@@ -250,11 +256,11 @@ function TokenReveal({ result, onClose }) {
           <div style={{ fontSize: 10.5, fontWeight: 800, color: C.faint, letterSpacing: .3,
             textTransform: "uppercase", marginBottom: 7 }}>Send them this</div>
           <div style={{ fontSize: 13, color: C.ink2, lineHeight: 1.75 }}>
-            1. In Claude: <b>Settings → Connectors → Add custom connector</b><br />
+            1. On a computer (<b>claude.ai web or desktop app — not the phone</b>): <b>Settings → Connectors → Add custom connector</b><br />
             2. Paste this URL and click Add:<br />
             <code style={{ fontSize: 11.5, fontFamily: "ui-monospace, monospace", wordBreak: "break-all" }}>{MCP_URL}</code><br />
             3. Click <b>Connect</b> — a sign-in page opens.<br />
-            4. Paste the token above into it.
+            4. Paste the token above into it. (The connector then works on their phone too.)
           </div>
         </div>
       </div>
