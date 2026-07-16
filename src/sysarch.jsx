@@ -7,6 +7,52 @@
 // credentials (service-role key, Cloudflare API token, DB password, provider API keys) must NEVER
 // be placed on this page. They live only in GitHub Actions secrets and each service's own console.
 
+// The self-contained prompt a content contributor pastes into a FRESH Claude chat (which has no
+// memory of this project). It never contains a token or any secret — only instructions. Everything
+// concrete (pack names, counts, existing questions) is fetched from the connector at run time, so
+// this text never goes stale. Kept as a template literal so it copies out verbatim.
+const CONTRIB_PROMPT = `You're helping me write content for **Positive Minds**, a therapeutic spelling game for children (roughly ages 5–12). You're connected to it through a tool connector I've already set up in this chat — you'll see tools called list_packs, get_pack_content, check_questions and propose_questions.
+
+HOW THE GAME WORKS (this is a SPELLING puzzle, not a meaning one):
+A short, warm, first-person sentence appears with one word partly hidden, e.g. "I feel PR_UD when I try." The child is shown TWO words and picks the one whose spelling fits the blank.
+
+TWO RULES THAT NEVER BEND:
+1. BOTH words are always POSITIVE. Never put a negative word about a child in front of them. (This is therapy content — "KIND / MEAN" is forbidden; MEAN must never appear.)
+2. The two words MUST be DIFFERENT LENGTHS. At higher levels the whole word is hidden, so length is the only clue — two same-length words would both fit and the puzzle breaks. E.g. PROUD (5) / CALM (4) is good; BRIGHT (6) / GENTLE (6) is broken.
+
+WHAT I'D LIKE YOU TO DO:
+1. Start by calling **list_packs**. It returns a full brief plus every pack and how full each one is (how many questions it has, how many distinct words, how many are already awaiting review).
+2. Show me the packs as a **numbered list with those stats**, and ask me which ONE I'd like to add to. Wait for my answer — don't pick for me.
+3. Once I choose, call **get_pack_content** for that pack. Show me its current statistics and a sense of what's already in it. Then we'll write new questions together for that pack.
+4. Before proposing anything, ALWAYS call **check_questions** on our drafts. It checks them against the real game engine AND the pack's existing content, so we never send a duplicate or a broken puzzle. Fix anything it flags, then check again.
+5. When they're clean, call **propose_questions**. That sends them to a human review queue — nothing goes live on its own; a person approves, edits or rejects every one.
+
+Keep sentences warm, simple and first-person ("I am…", "I feel…"). Prefer fresh words and sentences for variety, but the only hard repetition rule is: don't reproduce an existing question exactly (same sentence AND the same two words).
+
+Start now by calling list_packs and showing me the packs to choose from.`;
+
+// A copyable multi-line prompt block (mirrors ArchRow's copy affordance, sized for a paragraph).
+function PromptBlock({ text }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    navigator.clipboard?.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1600);
+  };
+  return (
+    <div style={{ border: "1px solid " + C.line, borderRadius: R.md, overflow: "hidden", background: C.bgDeep }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 12px", borderBottom: "1px solid " + C.lineSoft, background: C.bg }}>
+        <span style={{ fontSize: 11.5, fontWeight: 800, color: C.sub, textTransform: "uppercase", letterSpacing: 0.4 }}>Paste into a fresh Claude chat</span>
+        <button onClick={copy} title="Copy prompt"
+          style={{ background: copied ? C.goodSoft : C.brand, border: "none", borderRadius: R.sm, color: copied ? C.goodInk : "#fff", fontSize: 12, fontWeight: 800, padding: "6px 14px", cursor: "pointer", fontFamily: "inherit" }}>
+          {copied ? "✓ Copied" : "Copy prompt"}
+        </button>
+      </div>
+      <pre style={{ margin: 0, padding: "14px 16px", fontFamily: "ui-monospace,Menlo,monospace", fontSize: 12, lineHeight: 1.65, color: C.ink2, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 340, overflowY: "auto" }}>{text}</pre>
+    </div>
+  );
+}
+
 // A single copyable coordinate row.
 function ArchRow({ label, value, href, mono = true, hint }) {
   const [copied, setCopied] = useState(false);
@@ -223,7 +269,25 @@ function SystemArchitectureView() {
         </div>
       </div>
 
-      <div style={{ background: C.warnSoft, border: "1px solid " + C.warn, borderRadius: R.md, padding: S.md + "px " + S.lg + "px", fontSize: 12.5, color: C.warnInk, lineHeight: 1.65 }}>
+      {/* onboarding prompt — copy/paste into a fresh Claude chat */}
+      <div style={{ marginTop: S.lg }}>
+        <ArchCard icon="📋" title="Onboarding prompt" accent={C.brand}
+          tagline="Send this with the token. Their Claude chat has no memory of this project — this prompt is what tells it what to do.">
+          <div className="pm-prose" style={{ fontSize: 12.8, color: C.ink2, lineHeight: 1.7, marginBottom: S.md }}>
+            After the contributor has added the connector and pasted their token, they paste the block below into that
+            same chat. It is fully self-contained: it explains the game, tells Claude to pull the live pack list and
+            statistics, present the packs as a numbered choice, and check every draft against existing content before
+            proposing. Copy it and send it to them.
+          </div>
+          <PromptBlock text={CONTRIB_PROMPT} />
+          <div style={{ fontSize: 11.8, color: C.faint, marginTop: S.md, lineHeight: 1.6 }}>
+            Nothing here is secret — it contains no token and no keys, only instructions. The pack names, counts and
+            existing questions all come from the connector at run time, so this prompt never goes stale.
+          </div>
+        </ArchCard>
+      </div>
+
+      <div style={{ marginTop: S.lg, background: C.warnSoft, border: "1px solid " + C.warn, borderRadius: R.md, padding: S.md + "px " + S.lg + "px", fontSize: 12.5, color: C.warnInk, lineHeight: 1.65 }}>
         <strong>No secrets on this page.</strong> These are identifiers and dashboard links only — they still require each
         service's own login to use. Credentials (Supabase service-role key, Cloudflare API token, database password, AI
         provider keys) are deliberately excluded and live only in GitHub Actions secrets and each service's console.

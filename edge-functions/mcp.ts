@@ -256,9 +256,10 @@ const TOOLS = [
   {
     name: 'get_pack_content',
     description:
-      'Show the questions already in a pack, and every answer word already used. Call this BEFORE ' +
-      'writing new questions so you do not repeat a word, a sentence, or a word-pair. Each word ' +
-      'should be taught once.',
+      'Show a pack\'s current statistics and the questions already in it. Call this AFTER the person ' +
+      'picks a pack and BEFORE writing, so you can see how full it is and what already exists. Prefer ' +
+      'fresh words and sentences for variety; the only hard rule is not to reproduce an exact ' +
+      'existing question (same sentence AND same right/wrong pair).',
     inputSchema: {
       type: 'object',
       properties: { pack_slug: { type: 'string', description: 'e.g. "confidence"' } },
@@ -268,9 +269,10 @@ const TOOLS = [
   {
     name: 'check_questions',
     description:
-      'Check draft questions against the real game engine WITHOUT saving anything. Use this to catch ' +
-      'and fix problems yourself before proposing. It checks the rules a human eye misses — above ' +
-      'all whether both words are the same LENGTH, which would give the child two correct answers.',
+      'Check draft questions against the real game engine AND the pack\'s existing content, WITHOUT ' +
+      'saving anything. ALWAYS run this before proposing. It catches the problems a human eye misses — ' +
+      'above all whether both words are the same LENGTH (which gives the child two correct answers), ' +
+      'and whether a draft exactly duplicates a question already in the pack or the review queue.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -342,24 +344,51 @@ TWO RULES THAT ARE NOT NEGOTIABLE:
 
    This is the single most important rule. It has broken real content before.
 
-ALSO: warm, simple, first-person sentences ("I am...", "I feel..."). Each answer word taught once
-per pack. Don't reuse a word-pair, even swapped over. Don't reuse the same wrong option repeatedly —
-a predictable distractor teaches the child "it's never that one" instead of reading the blank.`;
+ALSO: warm, simple, first-person sentences ("I am...", "I feel..."). Fresh words and sentences make a
+better, more varied pack, so PREFER variety. But the ONE hard rule about repetition is: never
+reproduce an existing question EXACTLY — same sentence AND the same two words (right + wrong). Reusing
+a word, or an existing sentence with a different pair, is fine. Try not to lean on the same wrong
+option over and over, though — a predictable distractor teaches the child "it's never that one"
+instead of reading the blank.`;
 
 // ============================================================
 async function callTool(db: any, partner: string, name: string, args: any) {
   // ---- list_packs ----
   if (name === 'list_packs') {
     const { data: packs } = await db.from('pm_packs')
-      .select('slug,name,emoji,description,level,status')
+      .select('id,slug,name,emoji,description,level,status')
       .eq('status', 'published').order('name').limit(200);
     const { data: levels } = await db.from('pm_levels').select('*').order('level').limit(200);
 
+    // Per-pack statistics, so the contributor can SEE how full each pack is and where the gaps are
+    // (rather than guessing). Counted from live questions + what is already waiting in review.
+    const packIds = (packs || []).map((p: any) => p.id);
+    const { data: allQs } = packIds.length
+      ? await db.from('pm_questions').select('pack_id,answer').eq('status', 'active').in('pack_id', packIds).limit(5000)
+      : { data: [] };
+    const { data: pendingQs } = packIds.length
+      ? await db.from('pm_review_queue').select('pack_id').eq('status', 'pending').in('pack_id', packIds).limit(5000)
+      : { data: [] };
+    const liveCount: Record<string, number> = {};
+    const wordSets: Record<string, Set<string>> = {};
+    const pendCount: Record<string, number> = {};
+    for (const q of allQs || []) {
+      liveCount[q.pack_id] = (liveCount[q.pack_id] || 0) + 1;
+      (wordSets[q.pack_id] = wordSets[q.pack_id] || new Set()).add((q.answer || '').toUpperCase());
+    }
+    for (const r of pendingQs || []) pendCount[r.pack_id] = (pendCount[r.pack_id] || 0) + 1;
+
     return {
       brief: BRIEF,
+      how_to_start: 'Show these packs to the person as a numbered list with their stats, and ask which ONE they want to add to. Then call get_pack_content for that pack before writing anything.',
       packs: (packs || []).map((p: any) => ({
         slug: p.slug, name: p.name, emoji: p.emoji,
         description: p.description, default_level: p.level,
+        stats: {
+          live_questions: liveCount[p.id] || 0,
+          distinct_answer_words: wordSets[p.id] ? wordSets[p.id].size : 0,
+          awaiting_review: pendCount[p.id] || 0,
+        },
       })),
       levels: (levels || []).map((l: any) => ({
         level: l.level, name: l.name,
@@ -396,15 +425,23 @@ async function callTool(db: any, partner: string, name: string, args: any) {
       .filter((q: any) => q.status === 'rejected')
       .map((q: any) => (q.answer || '').toUpperCase()).filter(Boolean))];
 
+    const pendingCount = (queued || []).filter((q: any) => q.status === 'pending').length;
+
     return {
       pack: { slug: pack.slug, name: pack.name, description: pack.description, default_level: pack.level, purpose: pack.purpose, focus_areas: pack.focus_areas },
+      statistics: {
+        live_questions: (qs || []).length,
+        distinct_answer_words: usedWords.length,
+        awaiting_review: pendingCount,
+        previously_rejected: rejectedWords.length,
+      },
       existing_questions: (qs || []).map((q: any) => ({
         sentence: (q.template || '').replace(/\{blank\}/g, '____'),
         answer: q.answer, alternate: q.alt_answer,
       })),
       answer_words_already_taken: usedWords,
       previously_rejected: rejectedWords,
-      note: 'Do not reuse any word in answer_words_already_taken. Each word should be taught once.',
+      note: 'Fresh words and sentences make a better, more varied pack — so PREFER them. But the only HARD rule is: do not reproduce an existing question exactly (same sentence AND the same right/wrong pair). Reusing a word, or an existing sentence with a different pair, is allowed. Run check_questions to be sure before you propose.',
     };
   }
 
