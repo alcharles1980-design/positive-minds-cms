@@ -1,8 +1,11 @@
-name: Deploy to Cloudflare Pages
+name: Deploy to Cloudflare Workers
 
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "mcp-shim/**"
+      - ".github/workflows/deploy-mcp-shim.yml"
   workflow_dispatch:
 
 jobs:
@@ -10,27 +13,16 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      deployments: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24
-
-      # Stage only the files that should be served (keeps README /
-      # workflow files out of the deployed site). index.html is a
-      # self-contained React 18 + Babel-standalone app — no build step.
-      - name: Stage site
-        run: |
-          mkdir -p dist
-          cp index.html dist/
-
-      - name: Publish to Cloudflare Pages
+      # The site is a Cloudflare WORKER (positive-minds-cms.…workers.dev) served via Static Assets
+      # from ./public (see wrangler.toml). index.html is a self-contained React 18 + Babel-standalone
+      # app — no build step here; public/index.html is committed already in sync.
+      - name: Publish to Cloudflare Workers
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy dist --project-name=positive-minds-cms
+          command: deploy

@@ -142,6 +142,12 @@ function SystemArchitectureView() {
   const SB_DASH = "https://supabase.com/dashboard/project/" + SB_REF;
   const SB_DB_HOST = "db." + SB_REF + ".supabase.co";
   const SB_FUNCS = SB_URL + "/functions/v1";
+  // The MCP connector URL partners paste into Claude. This is the Cloudflare Worker "discovery shim"
+  // (positive-minds-mcp.…workers.dev), NOT the Supabase function directly — Claude's custom-connector
+  // OAuth discovery probes the origin root for /.well-known/* metadata, which a Supabase edge function
+  // (served under /functions/v1/…) cannot provide. The shim serves that metadata at its root and
+  // proxies everything else to the unchanged Supabase MCP function.
+  const MCP_CONNECTOR = "https://positive-minds-mcp.alcharles1980.workers.dev/mcp";
 
   return (
     <div>
@@ -183,16 +189,18 @@ function SystemArchitectureView() {
           </Step>
 
           <Step n={3} title="Add the connector to your Claude"
-            extra={<ArchRow label="Connector URL" value={SB_FUNCS + "/mcp"} href={SB_FUNCS + "/mcp"} hint="Copy this — it's the address your Claude connects to." />}>
-            In your <em>own</em> Claude (a separate browser tab or the app), go to <strong>Settings → Connectors →
-            Add custom connector</strong>, give it a name like "Positive Minds", and paste the <strong>Connector URL</strong>
-            below. Save it.
+            extra={<ArchRow label="Connector URL" value={MCP_CONNECTOR} href={MCP_CONNECTOR} hint="Copy this — it's the address your Claude connects to." />}>
+            <strong>Do this on a computer (claude.ai web or the desktop app) — you can't add a custom connector
+            from the phone app.</strong> Once added there, it shows up on your phone automatically. Go to
+            <strong> Settings → Connectors → Add custom connector</strong>, name it "Positive Minds", and paste the
+            <strong> Connector URL</strong> below. Save it.
           </Step>
 
           <Step n={4} title="Sign in with your token">
-            Start a new chat and turn the Positive Minds connector on. Claude will open a small <strong>Connect to Positive
-            Minds</strong> sign-in screen — paste your <code>pmk_…</code> token there and continue. (Claude handles the rest
-            of the security handshake automatically; there are no codes to copy.) You only do this once per Claude.
+            Start a new chat and turn the Positive Minds connector on. Click <strong>Connect</strong> — Claude opens a
+            small <strong>Connect to Positive Minds</strong> sign-in screen. Paste your <code>pmk_…</code> token there and
+            continue. (Claude handles the rest of the security handshake automatically; there are no codes to copy.) You
+            only do this once per Claude.
           </Step>
 
           <Step n={5} title="Paste the starter prompt"
