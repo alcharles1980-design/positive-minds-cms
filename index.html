@@ -73,7 +73,7 @@ function _extends(){return _extends=Object.assign?Object.assign.bind():function(
 //   - App shell (auth gate, routing via history, command surface)
 // ============================================================
 // ---------- config ----------
-const CFG={build:"2026.07.15-19",// bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+const CFG={build:"2026.07.15-20",// bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
 url:"https://tytrmjjucqijzcrbwjfm.supabase.co",key:"sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",adminEmail:"admin@positiveminds.app",sessionStore:"pm_admin_session_v2",sessionMaxAgeMs:7*24*60*60*1000,// keep users logged in for 7 days
 pageSize:40};// ============================================================
 // Session + Auth
@@ -1214,6 +1214,77 @@ approval time" and is what review_status reports as approved_but_edited_first.
 the pipeline. An edited item stays pending. Nothing here can put a word in front of a child —
 pm_review_approve is still the only route, and there is deliberately no tool for it.
 
+### How the preview is rendered — and the MCP Apps widget, now DISABLED
+
+The goal was a PLAYABLE card in chat: sentence, level tabs, two tappable words going green/red.
+
+**What ships, and works: an ARTIFACT.** preview_questions returns structured data, and the tool
+description asks the assistant to build the interactive card as an artifact. That is what the person
+actually sees and uses. No platform dependency.
+
+**What does NOT ship: the MCP Apps (SEP-1865) widget.** It is fully implemented in mcp-shim/ —
+resources/list, resources/read serving a ui:// resource as text/html;profile=mcp-app, capability
+declaration, echoed protocolVersion — and all of it verified over the wire. It is DISABLED by one
+omission: the shim no longer injects _meta.ui.resourceUri into tools/list or tools/call, and that
+link is the only thing that makes a host render an MCP App. Re-enabling is a one-line change.
+
+WHY IT IS DISABLED, and this is the important part: it rendered as an EMPTY card three times running,
+and worse, it DISPLACED the artifact path that already worked. The host drew a blank widget instead
+of letting the assistant build the card, and the assistant reported "all 12 are up" because from its
+side the widget had rendered. A working feature was regressed by an attempt to improve it, and the
+failure was invisible from the inside. If you add a UI layer over something that already works, make
+sure failure is visible — here it was not.
+
+WHAT REMAINS UNKNOWN: the widget stayed blank even with an always-present status bar, a forced 160px
+min-height and a solid background — so not even STATIC markup appeared. That points at the iframe
+never running the HTML rather than at the renderer, but it was never confirmed. If this is revisited,
+confirm that first and do not iterate blind: the status bar being present or absent settles it in one
+look, and a beacon fetch (with the worker origin declared in _meta.ui.csp.resourceDomains, since the
+sandbox blocks undeclared domains) would settle it without a person having to describe anything.
+
+An earlier conclusion in this file said Claude Web never fetches the UI resource for a CUSTOM
+connector. That no longer holds — the host did render the widget frame. Treat the platform's
+behaviour here as moving, and re-check rather than trusting either conclusion.
+
+### The preview payload is QUESTION-FIRST, on purpose
+
+preview_questions once returned each question with every level nested inside it. Twelve questions x
+ten levels = 120 level objects, and the natural way to summarise that is level-by-level — so asking
+"preview the pending questions" produced a table of level rules instead of the questions. The data
+shape, not the prompt, decided the rendering.
+
+Each preview is now ONE QUESTION: "sentence" (already masked, ready to display), "options" (the two
+words), "correct", "level_shown", plus a compact "at_other_levels" of {level, sentence} for tabs, and
+"n" for ordering. Only ONE level renders by default; pass "levels" for more. Keep it this way — if
+levels ever outnumber questions in the payload again, the rendering will drift back.
+
+### Routing: the instructions branch by intent
+
+The connection instructions used to open with "ALWAYS call list_packs first". That is the WRITING
+workflow, but stated unconditionally it hijacked every request, so a preview request called
+list_packs and showed its level rules. The instructions now branch: PREVIEW/PLAY/REVIEW-PENDING goes
+straight to preview_questions and is told explicitly not to call list_packs first; WRITING keeps the
+list_packs to get_pack_content to check_questions to propose_questions chain; progress, packs and
+queue-fixing each get their own line. The same warning is repeated inside preview_questions' own
+description so it survives if the instructions are truncated or ignored.
+
+**\`reject_questions\`** rejects pending items with a required reason, via the existing
+pm_review_reject RPC (which enforces status='pending' itself). GOTCHA: that RPC stamps \`decided_by\`
+from a JWT email claim, which the service-role connector does not have — it would record 'admin'.
+The real actor is patched in afterwards as \`partner:<name>\`. Verified live.
+
+**\`edit_queued_question\`** fixes a PENDING item in place (the CMS edits at APPROVAL time instead,
+via pm_review_approve's optional params — this is a different, additive path). The merged result is
+RE-VALIDATED with the full engine and refused if it breaks a rule, so an edit can never make things
+worse; verified live by trying STEADY/GENTLE (same length) and having it correctly refused with the
+original left untouched. The row being edited is excluded from the dedup set or it would flag
+itself. It deliberately does NOT set the \`edited\` flag — that means "the APPROVER changed it at
+approval time" and is what review_status reports as approved_but_edited_first.
+
+**WHY THIS IS ALL SAFE:** every one of these is PRE-approval. Rejecting only removes something from
+the pipeline. An edited item stays pending. Nothing here can put a word in front of a child —
+pm_review_approve is still the only route, and there is deliberately no tool for it.
+
 ### How the preview is actually rendered — and the MCP Apps dead end (Aug 2026)
 
 The goal was a PLAYABLE card in chat: the sentence, level tabs, and the two words as tappable buttons
@@ -1403,6 +1474,42 @@ that network-first caches GETs).
   run \`npm install\` (no args) so nothing gets pruned. This package.json lives in the build
   workspace only — it is NOT part of the deployed repo.
 
+## 11z. WHERE THINGS STAND (read this first when picking the project back up)
+
+LIVE AND WORKING
+- Connector is in real use. Two partners hold active tokens: "Steve" and "albert". Questions have
+  been proposed, approved and rejected through it.
+- Ten tools: list_packs, get_pack_content, check_questions, propose_questions, create_pack,
+  update_pack, review_status, preview_questions, reject_questions, edit_queued_question.
+- Connector URL is the Cloudflare shim: positive-minds-mcp.alcharles1980.workers.dev/mcp
+  (NOT the Supabase function — see the discovery-shim section).
+- Preview returns question-first data; the assistant renders it as a playable artifact.
+- Site deploys automatically on push (wrangler deploy, Worker + static assets from ./public).
+  The shim deploys automatically on push to mcp-shim/.
+
+NOT AUTOMATED, AND THE MAIN SOURCE OF RISK
+- EDGE FUNCTIONS ARE DEPLOYED BY HAND, by pasting ~70KB of mcp.ts into a tool call. This has already
+  put a 1-line placeholder over the live function once, and has silently drifted repo vs deployed
+  more than once. .github/workflows/deploy-edge-functions.yml is written and ready; it needs ONE
+  repository secret, SUPABASE_ACCESS_TOKEN. Albert has so far chosen not to add it. Adding it is the
+  single highest-value piece of maintenance available.
+
+TEMPORARY THINGS STILL IN PLACE (remove when convenient)
+- Table pm_tool_log and the toolLog() calls in mcp-shim/index.js — diagnostic logging that records
+  which tool a client actually calls. It is what made the routing bug findable; harmless but noise.
+- The MCP Apps widget code in mcp-shim/ is dormant (see the widget section). Not dead code.
+
+KNOWN OUTSTANDING (not bugs in the code)
+- Admin password is weak, and Supabase leaked-password protection is off. One shared admin account is
+  used by all partners; that account can approve, edit and delete children's content.
+- A GitHub PAT was used throughout development and should be rotated.
+- The Calmness pack's description was overwritten during a smoke test and the original is
+  unrecoverable (no history table). See rule 4t.
+- Five stale OAuth client registrations and two debug tokens ("albert", "albert-reconnect") can be
+  cleared; keep Steve's.
+- Twelve published packs currently have no approved questions. Harmless given the separate CMS-to-game
+  sync gate, but worth knowing.
+
 ## 12. Recent hardening & changes (most recent first)
 - **Aug 2026 — CONNECTOR MADE ACTUALLY USABLE + pack creation.** Four related changes:
   1. **The Cloudflare discovery shim** (\`mcp-shim/\`). The connector had NEVER worked from a real
@@ -1428,6 +1535,13 @@ that network-first caches GETs).
      length as the total, which would have under-reported once any pack passed 40 — now total/showing/
      truncated are all returned. Renamed the live branch's \`id\` to \`question_id\` so it cannot be
      mistaken for a review-queue id. Corrected a stale "THE TOOLS. Four of them" comment (ten).
+  8. **Preview made usable, then the widget rolled back.** preview_questions gained source
+     pending|live; instructions now route by intent rather than opening with "ALWAYS call list_packs
+     first" (which was hijacking preview requests into showing level rules); the payload was
+     restructured QUESTION-FIRST after the level-shaped version kept being summarised as levels; the
+     render instruction carries the CMS design tokens. The MCP Apps widget was enabled, rendered
+     blank three times, was found to be DISPLACING the working artifact path, and was disabled by
+     removing the _meta.ui link. Also fixed while latent: capped reads now report the true total.
   6. **Playable preview.** Tried MCP Apps (SEP-1865) for a real interactive widget — implemented
      correctly and verified over the wire, but Claude Web never fetches the resource for a CUSTOM
      connector (platform gap, matches an open anthropics/claude-ai-mcp issue). Shipped instead by
@@ -2431,6 +2545,18 @@ half-deploying. Albert has chosen not to add it for now, so deploys remain by ha
 4y. **"It returned 200" is not "it works".** All three base-URL bugs in the OAuth server (http instead
    of https, wrong path, Supabase's INTERNAL hostname) returned a perfectly healthy 200 while telling
    Claude to go somewhere that did not exist. Read what the response SAYS, not just its status code.
+4s. **The SHAPE of a tool's output decides how it gets rendered — more than any instruction does.**
+   preview_questions returned each question with all ten levels nested inside it. Twelve questions x
+   ten levels meant the payload was overwhelmingly level-shaped, so it was summarised level-by-level,
+   and no amount of "show the questions, not the levels" wording fixed that — the wording was fighting
+   the data. Restructuring it question-first fixed it immediately. When output is being presented
+   wrongly, look at what dominates the payload before writing another instruction.
+4r. **Do not let a nicer version regress a working one, and make failure visible if you try.**
+   The preview already worked: the assistant built a playable card from the data. Adding an MCP Apps
+   widget made the host render the widget INSTEAD — blank — and the assistant still reported success,
+   because from its side the widget had rendered. A working feature was replaced by a broken one and
+   the failure was invisible from the inside. If you layer a new renderer over a working path, keep
+   the old path reachable and make the new one fail loudly.
 4t. **NEVER smoke-test with a WRITE tool against live data.** Verifying the connector after a deploy,
    I called update_pack on the real Calmness pack to prove the handler worked. It did — and it
    overwrote that pack's description, which no table records the previous value of, so it was simply
@@ -2958,6 +3084,16 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    but ALWAYS count the true total separately and return total/showing/truncated — returning only the
    capped length is silent truncation and it will mislead. Name ids for what they are: a live question
    id must not be called \`id\` when another tool takes review-queue ids.
+   SHAPE THE PREVIEW PAYLOAD QUESTION-FIRST: one entry per question carrying its ready-to-display
+   masked sentence, its two options, which is correct, and only a compact list of other levels. Do
+   NOT nest every level inside every question — the payload becomes level-dominated and gets rendered
+   as a table of level rules no matter what the instructions say. Default to ONE level.
+   ROUTE INSTRUCTIONS BY INTENT, not as one chain. An unconditional "always call X first" will hijack
+   every unrelated request; say what to do for previewing, for writing, for progress, separately.
+   MCP APPS: an interactive widget is possible (tools declare _meta.ui.resourceUri, the server serves
+   a ui:// HTML resource). It is implemented here and DISABLED, because it rendered blank and
+   displaced the artifact path that worked. Ship the artifact version first; only add a widget if you
+   can make its failure visible.
    RENDERING THE PREVIEW: the useful form is a PLAYABLE card — sentence, level tabs, two tappable
    words, green/red on tap, and never reveal which is correct before it is tapped. Do not assume the
    host will render a custom UI widget for you: MCP Apps (SEP-1865) is implemented here and is inert
