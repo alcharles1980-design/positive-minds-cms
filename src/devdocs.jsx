@@ -486,7 +486,13 @@ identical words; word-length band + multi-word rule for the target level; bad ch
 and above all **ambiguous** — the alternate ALSO fits the blank at some level, so the puzzle has TWO
 correct answers and a child is marked wrong for a right answer.
 
-**REPETITION CHECKS — five distinct cases, because they mean different things:**
+**REPETITION CHECKS — five distinct cases, because they mean different things.**
+WHERE THEY RUN (Aug 2026): these are ADVISORY and live in pm_lint/pm_lint_details ONLY. None of
+them is in validateQuestion, so the review queue will not flag them on new content — that is
+deliberate, not drift. See rule 4.15 for the hard/advisory split.
+NOT COVERED BY ANY OF THE FIVE: cross-role reuse, where a word is the ANSWER in one question and
+the DISTRACTOR in another. \`reversed_pair\` needs the same PAIR; \`overused_alt\` only counts
+distractors. It is live in the Calmness pack today — see section 11z.
 - \`duplicate\` — same sentence AND same answer. A true repeat.
 - \`same_sentence\` — same sentence, different answer. Repetitive phrasing.
 - \`answer_reused\` — the ANSWER WORD is already taught elsewhere.
@@ -1091,8 +1097,12 @@ that network-first caches GETs).
 ## 11z. WHERE THINGS STAND (read this first when picking the project back up)
 
 LIVE AND WORKING
-- Connector is in real use. Two partners hold active tokens: "Steve" and "albert". Questions have
-  been proposed, approved and rejected through it.
+- Connector is in real use. Questions have been proposed, approved and rejected through it.
+  ACCURACY NOTE (9 Aug): three tokens are active, but the traffic is all Albert's. "albert" has
+  55 calls and "albert-reconnect" 16, and those two hold the only bound OAuth tokens. "Steve",
+  issued 16 Jul, shows calls_made 0, last_used_at null and no OAuth token — on the data, Steve
+  has never completed a connection. Confirm before treating him as an active contributor, and
+  before clearing anything of his in the token cleanup.
 - Ten tools: list_packs, get_pack_content, check_questions, propose_questions, create_pack,
   update_pack, review_status, preview_questions, reject_questions, edit_queued_question.
 - Connector URL is the Cloudflare shim: positive-minds-mcp.alcharles1980.workers.dev/mcp
@@ -1117,12 +1127,26 @@ KNOWN OUTSTANDING (not bugs in the code)
 - Admin password is weak, and Supabase leaked-password protection is off. One shared admin account is
   used by all partners; that account can approve, edit and delete children's content.
 - A GitHub PAT was used throughout development and should be rotated.
-- The Calmness pack's description was overwritten during a smoke test and the original is
-  unrecoverable (no history table). See rule 4t.
+- The Calmness pack's description was overwritten during a smoke test (pm_activity id 8, actor
+  partner:albert-reconnect, 9 Aug 09:36, detail "updated via Claude connector (description)").
+  The original text is still UNRECOVERABLE — there is no history table, pm_activity records only
+  WHICH field changed and never its previous value, and the repo holds no copy. The fixture in
+  inspect.js is NOT a witness: it is hand-written test data and disagrees with production on other
+  packs. On 9 Aug the smoke-test value "Find your calm." was replaced with a reconstruction,
+  "Find your calm and stay steady when things feel big.", written to match the two-clause house
+  pattern every other pack follows and the pack's own surviving purpose/focus_areas/style_approach.
+  It is a reconstruction, not the original. See rule 4.23.
 - Five stale OAuth client registrations and two debug tokens ("albert", "albert-reconnect") can be
   cleared; keep Steve's.
 - Twelve published packs currently have no approved questions. Harmless given the separate CMS-to-game
   sync gate, but worth knowing.
+- CROSS-ROLE WORD REUSE is LIVE and unchecked. In the Calmness pack SEVEN of twelve words are the
+  ANSWER in one question and the DISTRACTOR in another — QUIET and RELAXED are a straight swap across
+  two adjacent questions, so a child is marked wrong for QUIET and then right for it. The same shape
+  is in the pending Focus Pack batch (CALM and PLAN each play both roles). No check sees it: see rule
+  4.15 for why, and for the test that says it ought to. The mechanics are fine in both packs — every
+  pair differs in length, so nothing is \`ambiguous\` at any level. This is the same family of defect as
+  the original CALM/PROUD find in rule 4.16, one level up.
 
 ## 12. Recent hardening & changes (most recent first)
 - **Aug 2026 — CONNECTOR MADE ACTUALLY USABLE + pack creation.** Four related changes:
@@ -1164,7 +1188,7 @@ KNOWN OUTSTANDING (not bugs in the code)
      in chat. Preview renders a question as a CHILD sees it at every level, which is the one thing
      no automated check can do (it lets a person judge tone). Reject and edit act only on PENDING
      items; edits are re-validated and refused if they would break a rule. APPROVAL was deliberately
-     NOT added — see the note in DOC_CLAUDE_MD rule 4w.
+     NOT added — see the note in DOC_CLAUDE_MD rule 4.19.
   4. **Strict-dedup alignment.** The BRIEF and tool descriptions used to tell Claude to avoid word
      reuse and reversed pairs — things the validator no longer flags. Variety is now stated as a
      PREFERENCE; the only hard rule is the exact-triple duplicate.
@@ -1205,6 +1229,10 @@ KNOWN OUTSTANDING (not bugs in the code)
   rather than reading the blank.
   Both are now caught: \`reversed_pair\` and \`overused_alt\` in pm_lint/pm_lint_details, AND in BOTH
   copies of validateQuestion (so the AI cannot generate one and have the review queue call it clean).
+  [SUPERSEDED Aug 2026 — the strict-dedup alignment later REMOVED both from validateQuestion and
+  restated variety as a preference. They remain in pm_lint/pm_lint_details only. That is intended;
+  see rule 4.15, which was rewritten because this entry and the code had been contradicting each
+  other. The rest of this entry still stands.]
   FOUND WHILE FIXING:
   (3) **A bug in my own fix.** The reversed-pair message said "(PROUD / PROUD)" instead of
   "(CALM / PROUD)" — I had wrapped max() INSIDE least()/greatest(), so it took the max across the group
@@ -2060,6 +2088,11 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
   call), game-feed (public, legacy), pack-describe (JWT). All five have source in edge-functions/*.ts.
 
 ## Golden rules (do not break these)
+
+NUMBERING: rules are listed NEWEST FIRST but numbered OLDEST FIRST, so 4.1 is at the bottom of
+the list and the highest number is at the top. A new rule takes the next number and goes on top;
+no existing number ever shifts. (Letters were used until Aug 2026 and had collided six times —
+there were two 4t, two 4u, two 4r, two 4s, two 4v and two 4d, so "see rule 4t" was ambiguous.)
 1. **Babel classic runtime only.** Compile with @babel/preset-react { runtime: "classic",
    development: false }. The automatic/dev runtime emits \`import jsxDEV\` which breaks a
    plain <script> and causes a blank "Loading…" screen. Verify the compiled output has
@@ -2087,7 +2120,7 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    the edge function didn't, so a question with its own letter_position rendered differently
    in-game than in the CMS.) After any engine edit, diff the two by fetching the deployed edge
    function and comparing, or run a parity test with a question that has its own overrides.
-4a. **Questions are never pre-rendered — level rules propagate live.** A question row stores only
+4.32. **Questions are never pre-rendered — level rules propagate live.** A question row stores only
    its template + answer/alt + optional own overrides. Its level-variations (masked blanks, one per pm_levels row) are
    COMPUTED ON DEMAND by buildLevelVariants from the current pm_levels rows every time — in the CMS
    (previews recompute on each render from the levels prop, which the shell keeps fresh via the
@@ -2104,11 +2137,11 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    via the pm_level_delete_cleanup BEFORE DELETE trigger: reset pinned PACKS to the highest remaining
    level (a pack's level can't be null), un-pin QUESTIONS (→ null), drop OVERRIDE rows at that level.
    Never remove or narrow that trigger or you leave stale pointers.
-4b. **AI content NEVER bypasses human review.** generate-questions writes ONLY to pm_review_queue.
+4.31. **AI content NEVER bypasses human review.** generate-questions writes ONLY to pm_review_queue.
    The single path into pm_questions is the pm_review_approve RPC, which requires an explicit human
    decision. Never add a "publish straight through" path, an auto-approve, or a direct insert from a
    generator - a child must never see a question no person approved.
-4d. **GitHub does NOT deploy Supabase. The two are decoupled.** Pushing to the repo updates ONLY the
+4.30. **GitHub does NOT deploy Supabase. The two are decoupled.** Pushing to the repo updates ONLY the
    Cloudflare-hosted front-end. The edge functions in edge-functions/*.ts are a SAVED COPY — committing
    them does NOT deploy them. A function changes on Supabase only when someone explicitly deploys it
    (MCP \`deploy_edge_function\`, or CLI \`supabase functions deploy <name> --project-ref
@@ -2142,38 +2175,38 @@ half-deploying. Albert has chosen not to add it for now, so deploys remain by ha
    personal access token — then the Supabase MCP on their own Claude account inherits that access. The
    MCP connector is only the pipe; authorization lives on Supabase, not on the Claude side. Full
    onboarding steps: Architecture §0.4 and CONTRIBUTING.md.
-4c. **API keys must never be readable by the browser.** pm_ai_config deliberately has NO RLS select
+4.29. **API keys must never be readable by the browser.** pm_ai_config deliberately has NO RLS select
    policy for anon OR authenticated. The CMS is a browser app with a shared admin login, so anything
    the client can SELECT is effectively public to anyone with that login (or any XSS). Keys are
    written via pm_ai_set_key and read ONLY server-side by the edge function (service role). The UI
    reads pm_ai_status, which returns a masked hint and NEVER the key. Never add a select policy to
    pm_ai_config, never return api_key from an RPC, never send a key to the client "just to show it".
-4t. **Settings configure; content pages create.** Generation was buried inside AI Settings as a
+4.28. **Settings configure; content pages create.** Generation was buried inside AI Settings as a
    stripped-down panel — which put it in two places at once, and made the API path a poor relation of
    the manual one (no themes, no frame words). One page, one set of options, two ways to run it. How
    you run something must never change what you're allowed to ask for. And never show a control that
    does nothing in the current mode: hide it.
-4x. **Ask "how will someone ACTUALLY use this?" BEFORE building the auth model.** I built the MCP
+4.27. **Ask "how will someone ACTUALLY use this?" BEFORE building the auth model.** I built the MCP
    connector with a shared-secret bearer token, because that is how most APIs work. Claude's connector
    screen has no field for one — it does OAuth or nothing — so the whole auth model was unusable, and
    I only found out when Albert asked how partners connect. Check the actual UI the user will face
    before designing for it.
-4y. **"It returned 200" is not "it works".** All three base-URL bugs in the OAuth server (http instead
+4.26. **"It returned 200" is not "it works".** All three base-URL bugs in the OAuth server (http instead
    of https, wrong path, Supabase's INTERNAL hostname) returned a perfectly healthy 200 while telling
    Claude to go somewhere that did not exist. Read what the response SAYS, not just its status code.
-4s. **The SHAPE of a tool's output decides how it gets rendered — more than any instruction does.**
+4.25. **The SHAPE of a tool's output decides how it gets rendered — more than any instruction does.**
    preview_questions returned each question with all ten levels nested inside it. Twelve questions x
    ten levels meant the payload was overwhelmingly level-shaped, so it was summarised level-by-level,
    and no amount of "show the questions, not the levels" wording fixed that — the wording was fighting
    the data. Restructuring it question-first fixed it immediately. When output is being presented
    wrongly, look at what dominates the payload before writing another instruction.
-4r. **Do not let a nicer version regress a working one, and make failure visible if you try.**
+4.24. **Do not let a nicer version regress a working one, and make failure visible if you try.**
    The preview already worked: the assistant built a playable card from the data. Adding an MCP Apps
    widget made the host render the widget INSTEAD — blank — and the assistant still reported success,
    because from its side the widget had rendered. A working feature was replaced by a broken one and
    the failure was invisible from the inside. If you layer a new renderer over a working path, keep
    the old path reachable and make the new one fail loudly.
-4t. **NEVER smoke-test with a WRITE tool against live data.** Verifying the connector after a deploy,
+4.23. **NEVER smoke-test with a WRITE tool against live data.** Verifying the connector after a deploy,
    I called update_pack on the real Calmness pack to prove the handler worked. It did — and it
    overwrote that pack's description, which no table records the previous value of, so it was simply
    gone. The check itself caused the damage. Exercise READ tools (list_packs, get_pack_content,
@@ -2182,7 +2215,7 @@ half-deploying. Albert has chosen not to add it for now, so deploys remain by ha
    tested, create a throwaway row first and act on that, or read the current value and put it back.
    Note the asymmetry: this project has no history table, so an overwrite is unrecoverable while a
    bad read costs nothing.
-4u. **Any capped read must report the true total.** A tool that returns \`limit(40)\` rows and then
+4.22. **Any capped read must report the true total.** A tool that returns \`limit(40)\` rows and then
    reports \`count: rows.length\` is lying by omission the moment there are 41. Count separately with a
    head/exact query and return total + showing + truncated, and say so in the note. This project has
    now hit the silent-truncation class three times (PostgREST's 1,000-row cap, Alpaca's ~2,000-row
@@ -2190,14 +2223,14 @@ half-deploying. Albert has chosen not to add it for now, so deploys remain by ha
    simply wrong. Assume every cap will be reached eventually and fix it while it is still latent.
    Related: name identifiers for what they are. A live-question \`id\` sitting next to tools that take
    review-queue ids is a trap even when the wrong id fails safely.
-4v. **Check whether the PLATFORM supports a feature before building on it — and instrument the
+4.21. **Check whether the PLATFORM supports a feature before building on it — and instrument the
    negotiation, not just your own code.** MCP Apps was implemented to spec and verified end to end;
    Claude Web simply never asks a custom connector for the UI resource. What proved it was logging
    each rung (did the client advertise ui? did it call resources/list? resources/read?) — without
    that, "it doesn't render" is indistinguishable from a bug in our own HTML. When a capability is
    gated to reviewed/directory integrations, no amount of correct implementation will open it.
    Ship the fallback that works today and leave the correct implementation dormant.
-4z. **A self-test that hard-codes what the CLIENT discovers is not a test.** The MCP self-test drove
+4.20. **A self-test that hard-codes what the CLIENT discovers is not a test.** The MCP self-test drove
    the OAuth flow by calling /register, /authorize and /token at URLs it already knew — so it passed,
    green, repeatedly, while the connector was completely unusable from a real Claude client. The step
    it skipped (root /.well-known discovery) was the ONLY step that was broken. When a client does
@@ -2206,7 +2239,7 @@ half-deploying. Albert has chosen not to add it for now, so deploys remain by ha
    server and read what it actually receives: adding request logging to the shim is what finally
    located this, and each stage of an OAuth flow leaves a row (pm_oauth_clients → codes → tokens),
    so a count of those tables tells you exactly how far the real client got.
-4w. **The MCP connector must never gain a write path to LIVE QUESTIONS.** The invariant is not "few
+4.19. **The MCP connector must never gain a write path to LIVE QUESTIONS.** The invariant is not "few
    tools" — it is that pm_review_approve stays the ONLY route a question can take into a pack.
    propose_questions writes to the queue and nowhere else. Never add a tool that approves, publishes
    or edits a live question, and never let one write pm_questions directly.
@@ -2227,85 +2260,101 @@ half-deploying. Albert has chosen not to add it for now, so deploys remain by ha
    Deliberately still absent: DELETE for packs (destructive — it takes the questions with it), and
    anything touching a question's live status. If a partner needs those, they belong in the CMS.
    The validator in the MCP server is a FOURTH copy — it must stay byte-identical to the other three.
-4q. **EVERY content-entry path goes through the review queue.** Not just AI generation — imports
+4.18. **EVERY content-entry path goes through the review queue.** Not just AI generation — imports
    too. There were two ways in and only one was gated, and the ungated one (Bulk Import) is how
    BRIGHT/GENTLE reached children. Do NOT try to detect whether content "came from AI": you usually
    cannot tell, and a wrong guess means unchecked content reaches a child. The ONLY path into
    pm_questions is pm_review_approve. If you add a new way to create content, it goes through the gate
    or it does not ship. (The one deliberate exception is whole-pack file RESTORE, which lands as a
    DRAFT and is validated with a loud warning — but it must never be published unchecked.)
-4p. **The lint must check the defect that actually breaks the game.** pm_lint checked four cosmetic
+4.17. **The lint must check the defect that actually breaks the game.** pm_lint checked four cosmetic
    things and missed the ONE that harms a child: an alternate the same length as the answer. Two
    broken questions sat LIVE in a published pack while the health check said all was well. Any check
    the AI validator performs on new content, the lint must perform on existing content — above all
    \`ambiguous\`. A health page that cannot see the worst defect is worse than none: it is false comfort.
-4u. **Read the LIVE FEED, not just the code.** Two real content defects (a reversed pair, an
+4.16. **Read the LIVE FEED, not just the code.** Two real content defects (a reversed pair, an
    overused distractor) were invisible to every automated check AND to reading the pages — they only
    showed up when I looked at what the GAME actually receives. The checks were all grouped by ANSWER,
    so a repeated PAIR and a repeated ALTERNATE were structurally invisible. Periodically pull the real
    feed and look at it as a child would.
-4v. **If the lint catches it, the validator must too.** They were inconsistent: the Health lint flagged
-   reversed pairs, but validateQuestion did not — so the AI could generate one and the review queue
-   would show it as clean. Any check that exists for EXISTING content must exist for NEW content, in
-   both copies of the validator.
-4r. **READ the page, don't just inspect it.** A page can be structurally perfect and still say
+4.15. **If a check can make a question WRONG FOR A CHILD, the lint and the validator must both have
+   it. Advisory checks may live in the lint alone — but say which is which.**
+   ORIGINALLY this rule read "if the lint catches it, the validator must too", full stop, after the
+   Health lint flagged reversed pairs that validateQuestion passed as clean. The Aug 2026 strict-dedup
+   alignment then deliberately removed the repetition checks from the validator and restated variety
+   as a PREFERENCE — which left the rule and the code contradicting each other, and the contradiction
+   sat undetected because nothing tests one against the other.
+   REVISED Aug 2026, and this is the actual invariant:
+   • HARD checks — the ones where the child is shown two correct answers or is marked wrong for a good
+     word — must exist in the lint AND in every copy of validateQuestion. \`ambiguous\` above all.
+   • ADVISORY checks — variety, repetition, predictability — may live in pm_lint/pm_lint_details only.
+     They describe a pack getting stale, not a question that is broken.
+   CURRENT STATE, verified against the live function bodies: pm_lint and pm_lint_details carry
+   \`reversed_pair\` and \`overused_alt\`; validateQuestion carries neither, in any of its four copies.
+   That is now INTENDED, not drift. If you re-add them to the validator you are changing policy, not
+   fixing a bug — update this rule in the same pass.
+   KNOWN GAP, caught neither side: CROSS-ROLE WORD REUSE, where a word is the ANSWER in one question
+   and the DISTRACTOR in another. \`reversed_pair\` groups on the same PAIR so it cannot see it, and
+   \`overused_alt\` only counts repeated distractors. This is a HARD defect by the test above — the
+   child is marked wrong for a word and then right for it — so it belongs in both, and is in neither.
+4.14. **READ the page, don't just inspect it.** A page can be structurally perfect and still say
    nothing useful. The Health page showed "(untitled)" on every row for weeks — valid markup, correct
    layout, every automated check green — because the UI read \`d.label\`/\`d.issue\` while the RPC returned
    \`answer\`/\`code\`. No structural test can catch that. Render the page to text and READ it.
-4s. **An empty label is worse than no label.** A control wrapped in a text-less \`<label>\` counts as
+4.13. **An empty label is worse than no label.** A control wrapped in a text-less \`<label>\` counts as
    "associated" and will pass a naive check, while announcing an unnamed field to a screen reader.
    Always require the label to have TEXT.
-4n. **Inspect the RESULT, not the source.** Grepping code for suspicious patterns is not a UI audit.
+4.12. **Inspect the RESULT, not the source.** Grepping code for suspicious patterns is not a UI audit.
    Render into a real DOM with the real evaluated stylesheet and walk the computed styles. And VALIDATE
    YOUR ORACLE FIRST: extracting CSS by regex left \`\${...}\` placeholders that jsdom silently rejected,
    so every computed style was a lie; and a naive label check flagged every correctly-built field,
    because a control wrapped in a <label> IS associated (implicit association). A broken oracle is worse
    than none.
-4o. **Never regex-edit JSX.** A careless pattern inserted attributes inside arrow functions
+4.11. **Never regex-edit JSX.** A careless pattern inserted attributes inside arrow functions
    (\`onChange={(e) = aria-label="x"> setFoo(...)}\`) across 12 lines. Only the build caught it. Use
    targeted, structure-aware edits.
-4m. **Cap the CONTENT, not just the container.** A max-width on the page wrapper does nothing for a
+4.10. **Cap the CONTENT, not just the container.** A max-width on the page wrapper does nothing for a
    lone form field or a paragraph inside it — they will happily fill all 1080px, leaving a giant
    input marooned in white space and body copy ~150 characters wide. Every form gets a readable cap
    (\`.pm-form-2\` 860px), every panel \`.pm-readable\` (720px), every paragraph \`.pm-prose\` (680px).
    This is the difference between "responsive" and "actually looks designed".
-4l. **Device class is decided on the SHORT side, never on raw width.** A phone in landscape is
+4.9. **Device class is decided on the SHORT side, never on raw width.** A phone in landscape is
    667–932px wide — wider than many tablets. Keying layout off innerWidth alone made rotating a phone
    swap the entire navigation and drop every phone-specific rule (including the 16px inputs that stop
    iOS auto-zooming). Decide on min(w,h) for touch devices; only a resizable desktop window should key
    off live width. And there must be ONE breakpoint system: the JS stamps a class on <html> and the
    CSS keys off it. Never reintroduce parallel width media queries — they WILL drift.
-4j. **Config must never lie.** If a flag exists and is reported to the UI, something must ENFORCE
+4.8. **Config must never lie.** If a flag exists and is reported to the UI, something must ENFORCE
    it. \`pm_ai_config.enabled\` sat unchecked for a while: you could "disable" a provider and it would
    still be used. Either enforce a flag or delete it — dead config that lies is worse than none.
-4k. **"Null means don't change" needs an escape hatch for every field.** The setter treats null as
+4.7. **"Null means don't change" needs an escape hatch for every field.** The setter treats null as
    "leave it alone", which is right for a key you can't read back — but it means an empty value cannot
    be expressed. Temperature/top_p have explicit clear flags; the system prompt uses an empty string.
    Any new nullable setting needs one or the other, or users will be unable to UNSET it and the UI
    will silently lie.
-4h. **NEVER send temperature/top_p unconditionally.** Anthropic returns 400 for them on Opus 4.7+;
+4.6. **NEVER send temperature/top_p unconditionally.** Anthropic returns 400 for them on Opus 4.7+;
    OpenAI rejects them on GPT-5 reasoning models. They must be nullable and OMITTED from the request
    body when unset. A "sensible default" here breaks generation entirely on those models. Because null
    means "don't change" in the setter, keep the explicit clear flags so a value can actually be unset.
-4i. **A params-only save must never wipe the API key.** The key can never be read back, so the setter
+4.5. **A params-only save must never wipe the API key.** The key can never be read back, so the setter
    takes a null key to mean "keep the existing one". Never add an overload of pm_ai_set_key — two
    signatures make the call ambiguous and every save fails.
-4f. **Anything that spends money must be logged and rate-limited.** AI generation is the only
+4.4. **Anything that spends money must be logged and rate-limited.** AI generation is the only
    operation in this app with a real cost. Every provider call (generate/repair/test, success AND
    failure) goes to pm_ai_usage with token counts and the actor; the edge fn checks pm_ai_rate_check
    BEFORE calling a provider. Never add a new paid call without both. Logging must be best-effort so
    it can't break the request.
-4g. **Mobile nav must be DERIVED from NAV, never hardcoded.** The phone drawer once had a hardcoded
+4.3. **Mobile nav must be DERIVED from NAV, never hardcoded.** The phone drawer once had a hardcoded
    list, which left three whole pages (AI Review, AI Settings, Generator) unreachable on a phone. It
    now renders NAV.filter(n => !NAV_PHONE.includes(n.id)). Never hardcode that list again.
-4e. **De-dup context must include the review queue and the current batch.** Comparing only against
+4.2. **De-dup context must include the review queue and the current batch.** Comparing only against
    live questions is not enough: two generate runs before a review will duplicate each other, and a
    question you REJECTED will be regenerated. Always seed the validator's \`existing\` with live
    questions + pending + rejected queue rows, and validate a batch CUMULATIVELY (each item sees the
    ones before it) so a word repeated within one batch is caught. Also: an answer WORD reused in a
    different sentence is a real defect (a 10-20 question pack teaching BRAVE twice) - never collapse
    duplicate detection back to "same sentence AND same answer".
-4d. **validateQuestion is a PARITY INVARIANT** (like maskWord). The copy in core.jsx and the copy in
+4.1. **validateQuestion is a PARITY INVARIANT** (like maskWord). The copy in core.jsx and the copy in
    the generate-questions edge fn must stay byte-identical - the CMS and the generator must agree on
    what "valid" means. Its headline check, "ambiguous", runs the REAL engine at EVERY level: if the
    alternate ALSO fits the blank anywhere, the puzzle has TWO correct answers. At whole-word levels
@@ -2686,7 +2735,7 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    JSON-RPC 2.0 over Streamable HTTP. Handle \`initialize\` (return protocolVersion, capabilities.tools,
    serverInfo, and instructions telling Claude the order to call things), \`notifications/initialized\`
    (202, no body), \`tools/list\` and \`tools/call\`.
-   SEVEN TOOLS: list_packs (packs + level rules + THE BRIEF so the rules are always in context, each
+   TEN TOOLS: list_packs (packs + level rules + THE BRIEF so the rules are always in context, each
    pack carrying stats: live_questions / distinct_answer_words / awaiting_review, and INCLUDING draft
    packs with their status), get_pack_content (existing questions + words already taken + a statistics
    summary), check_questions (validate drafts, SAVE NOTHING — this is what lets Claude fix its own
