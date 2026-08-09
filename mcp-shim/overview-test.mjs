@@ -121,6 +121,31 @@ r = await callOverview();
 check("a genuine outage is still a PARTIAL 200, not a 401",
   r.res.status === 200 && /^Partial overview/.test(r.o.headline), "HTTP " + r.res.status);
 
+console.log("\nDiscovery fallback — capabilities must not depend on instructions being obeyed");
+globalThis.fetch = async () => Response.json({
+  jsonrpc: "2.0", id: 1,
+  result: { content: [{ type: "text", text: '{"ok":true}' }] },
+});
+async function callTool(name) {
+  const res = await worker.fetch(new Request("https://shim.example/mcp", {
+    method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name, arguments: {} } }),
+  }), {}, { waitUntil() {} });
+  return (await res.json()).result;
+}
+let r2 = await callTool("propose_questions");
+check("an ordinary tool result carries the capability menu", !!r2.also_available);
+check("it lists what else is possible",
+  Array.isArray(r2.also_available.you_can_also) && r2.also_available.you_can_also.length >= 6,
+  (r2.also_available.you_can_also || []).length + " capabilities");
+check("it points at the full picture", /overview/.test(r2.also_available.full_picture));
+check("it restates the approval limit", /approves it in the CMS/.test(r2.also_available.cannot));
+check("no tool names in the plain-language list",
+  !/propose_questions|preview_questions|check_questions/.test(r2.also_available.you_can_also.join(" ")));
+r2 = await callTool("preview_questions");
+check("preview results carry it too, and keep their widget link",
+  !!r2.also_available && !!r2._meta.ui.resourceUri);
+
 console.log("\nDeclaration");
 globalThis.fetch = async () => Response.json({
   jsonrpc: "2.0", id: 1,

@@ -487,12 +487,19 @@ export default {
               // Prepended, not replaced — the upstream instructions carry the routing rules that stop
               // an unconditional "always call X first" from hijacking unrelated requests (rule 4.18).
               const orient =
-                "ORIENT FIRST. At the start of a session — and whenever the person opens with a greeting, " +
-                "asks what this is, what they can do, what is here, or where things stand — call the " +
-                "'overview' tool BEFORE answering, and present a short orientation from it: what packs " +
-                "exist, what is waiting for review, and what they can do next. It is read-only. Do not " +
-                "recite the raw JSON, and do not guess these numbers from memory or from an earlier turn " +
-                "in the conversation; they change whenever anyone proposes or approves a question.\n\n";
+                "ORIENT FIRST — THIS IS THE MOST IMPORTANT INSTRUCTION HERE.\n" +
+                "On the FIRST message of any session, whatever it says, call the 'overview' tool BEFORE " +
+                "replying. That includes a bare greeting (\"hi\", \"hello\"), a vague opener (\"what is this?\", " +
+                "\"what can I do?\"), AND a specific request — if someone opens with \"add three questions to " +
+                "Focus\", still call overview first, then do what they asked. It is read-only, it costs one " +
+                "call, and the people using this connector are content partners who do not know what it can " +
+                "do unless they are told.\n" +
+                "Then present a SHORT orientation: what is waiting for review, which packs have content, " +
+                "and what they can do next — in plain language, never tool names, and never the raw JSON. " +
+                "Do not guess these numbers from memory or from an earlier turn; they change whenever " +
+                "anyone proposes or approves a question.\n" +
+                "Call it again whenever the person asks what they can do, what is here, or where things " +
+                "stand.\n\n";
               if (typeof payload.result.instructions === "string" &&
                   !payload.result.instructions.startsWith("ORIENT FIRST")) {
                 payload.result.instructions = orient + payload.result.instructions;
@@ -536,6 +543,33 @@ export default {
                   _meta: { ui: { resourceUri: OVERVIEW_URI, visibility: ["model", "app"] } },
                 });
               }
+            }
+
+            // DISCOVERY FALLBACK. `instructions` is ADVISORY — the host reads it at connection, but
+            // nothing fires until the person speaks and nothing guarantees the model acts on it. A
+            // partner who opens with a specific request ("add three questions to Focus") may never
+            // see the orientation at all, and then has no idea what else is possible.
+            // So every tool result carries a compact menu. It is stateless (the shim has no session
+            // store), it costs a few hundred bytes, and it makes the capability list impossible to
+            // miss whatever the partner happens to do first. The full picture still lives in
+            // `overview`; this is the pointer to it.
+            if (rpc.method === "tools/call" && payload.result && rpc.params &&
+                rpc.params.name !== OVERVIEW_TOOL) {
+              payload.result.also_available = {
+                note: "Mention these to the person when it is useful — especially if this is the " +
+                      "first thing they have done in the session. Use plain language, never tool names.",
+                you_can_also: [
+                  "See or play the questions waiting for review",
+                  "Play a pack's live questions as a child sees them",
+                  "Write new questions for a pack",
+                  "Test drafts against the real engine without saving",
+                  "Fix or remove a question already in the queue",
+                  "Check progress and see why things were rejected",
+                  "Start a new pack, or sharpen an existing one's definition",
+                ],
+                full_picture: "Call the 'overview' tool for live counts and the complete menu.",
+                cannot: "Nothing reaches a child until a human approves it in the CMS.",
+              };
             }
 
             if (rpc.method === "tools/call" && rpc.params && rpc.params.name === UI_TOOL) {
