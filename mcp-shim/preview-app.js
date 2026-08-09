@@ -68,7 +68,7 @@ export const PREVIEW_APP_HTML = `<!DOCTYPE html>
 (function(){
   var rpcId = 1, initId = null, initDone = false, DATA = null, ro = null;
   var lastW = -1, lastH = -1, pending = false;
-  function setStatus(t){ var el = document.getElementById('status'); if (el) el.textContent = 'PM widget v2 — ' + t; }
+  function setStatus(t){ var el = document.getElementById('status'); if (el) el.textContent = 'preview view (question-preview) — ' + t; }
   setStatus('script running');
   window.addEventListener('error', function(e){ setStatus('JS ERROR: ' + (e.message || 'unknown')); });
   function post(m){ try { window.parent.postMessage(m, '*'); } catch(e){} }
@@ -258,9 +258,18 @@ export const PREVIEW_APP_HTML = `<!DOCTYPE html>
 
   // If the host never handshakes, say so rather than spinning forever.
   setTimeout(function(){
-    if (!initDone) setStatus('NO HANDSHAKE after 5s — host never answered ui/initialize');
-    else if (!DATA) setStatus('connected but NO DATA after 5s — host never sent tool-result');
-  }, 5000);
+    if (!initDone) { setStatus('no handshake after 8s — host never answered ui/initialize'); return; }
+    if (DATA) return;
+    // No data usually means the host attached THIS view to a tool call it does not serve. That is a
+    // wiring problem, not something the partner did wrong, so do not shout it at them in red.
+    setStatus('idle — nothing to preview in this message');
+    var app = document.getElementById('app');
+    if (app) app.innerHTML = '<div class="empty">Nothing to preview here.<br>' +
+      'Ask to see the questions waiting for review, or to play a pack.</div>';
+    var bar = document.getElementById('status');
+    if (bar){ bar.style.background = '#EEE9FD'; bar.style.color = '#4A32B0'; }
+    reportSize();
+  }, 8000);
 })();
 </script>
 </body></html>`;

@@ -69,7 +69,7 @@ export const OVERVIEW_APP_HTML = `<!DOCTYPE html>
 (function(){
   var rpcId = 1, initId = null, initDone = false, DATA = null, ro = null;
   var lastW = -1, lastH = -1, pending = false;
-  function setStatus(t){ var el = document.getElementById('status'); if (el) el.textContent = 'PM overview — ' + t; }
+  function setStatus(t){ var el = document.getElementById('status'); if (el) el.textContent = 'overview view (overview) — ' + t; }
   setStatus('script running');
   window.addEventListener('error', function(e){ setStatus('JS ERROR: ' + (e.message || 'unknown')); });
   function post(m){ try { window.parent.postMessage(m, '*'); } catch(e){} }
