@@ -115,8 +115,18 @@ export default {
 
     const upstream = await fetch(targetUrl, { method, headers: fwdHeaders, body, redirect: "manual" });
 
+    // Is this the login page (HTML we must render + rewrite)? Detect by path — reliable regardless of
+    // what content-type the upstream/proxy reports — as well as by an html content-type.
+    const upstreamCT = upstream.headers.get("content-type") || "";
+    const isAuthorizePage = method === "GET" && path.endsWith("/authorize");
+    const isHtml = isAuthorizePage || upstreamCT.includes("text/html");
+
+    // Copy headers, but DROP the ones that become wrong once we read/transform the body
+    // (content-length, content-encoding, transfer-encoding). Re-add CORS.
     const outHeaders = new Headers(upstream.headers);
-    // Point the OAuth challenge at OUR root discovery doc, not Supabase's path-prefixed one.
+    outHeaders.delete("content-length");
+    outHeaders.delete("content-encoding");
+    outHeaders.delete("transfer-encoding");
     if (outHeaders.has("www-authenticate")) {
       outHeaders.set(
         "WWW-Authenticate",
@@ -125,12 +135,12 @@ export default {
     }
     for (const [k, v] of Object.entries(CORS)) outHeaders.set(k, v);
 
-    // The Supabase login page posts to /functions/v1/mcp/authorize; rewrite it to our /mcp/authorize
-    // so the browser stays on this origin.
-    const ct = outHeaders.get("content-type") || "";
-    if (ct.includes("text/html")) {
+    if (isHtml) {
       let html = await upstream.text();
+      // The Supabase login page posts to /functions/v1/mcp/authorize; rewrite to our /mcp/authorize
+      // so the browser stays on this origin.
       html = html.split("/functions/v1/mcp/authorize").join("/mcp/authorize");
+      outHeaders.set("Content-Type", "text/html; charset=utf-8"); // force correct rendering
       return new Response(html, { status: upstream.status, headers: outHeaders });
     }
 
