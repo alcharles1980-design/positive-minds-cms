@@ -82,32 +82,47 @@ export const PREVIEW_APP_HTML = `<!DOCTYPE html>
     var app = document.getElementById('app');
     if (!previews || !previews.length){ app.innerHTML = '<div class="empty">No questions to preview.</div>'; return; }
     app.innerHTML = '';
-    previews.slice(0,12).forEach(function(p, i){
-      var levels = p.at_each_level || [];
-      if (!levels.length) return;
+    previews.slice(0,40).forEach(function(p, i){
+      // Data shape (question-first, since v14): sentence / options / correct / level_shown, with an
+      // optional at_other_levels of {level, sentence} for the tabs. Older shape used at_each_level;
+      // tolerated here so a stale server cannot blank the card again.
+      var tabs = p.at_other_levels || p.at_each_level || [];
+      var baseSentence = p.sentence || (tabs[0] && (tabs[0].sentence || tabs[0].the_child_sees)) || '';
+      var opts = p.options || (tabs[0] && tabs[0].picks_between) || [];
+      var correct = p.correct || opts[0];
+      if (!baseSentence || opts.length < 2) return;
+
       var card = document.createElement('div'); card.className = 'card';
       var sel = 0;
+      if (tabs.length && p.level_shown != null){
+        for (var k = 0; k < tabs.length; k++){ if (tabs[k].level === p.level_shown){ sel = k; break; } }
+      }
+
       function paint(){
-        var lv = levels[sel] || levels[0];
-        var opts = (lv.picks_between || []).slice();
-        // Show the two words in a stable but non-obvious order.
-        if ((i + sel) % 2 === 1) opts.reverse();
-        var correct = (lv.picks_between || [])[0];
+        var t = tabs[sel];
+        var sentence = t ? (t.sentence || t.the_child_sees || baseSentence) : baseSentence;
+        var lvlNum = t ? t.level : p.level_shown;
+        // Stable but non-obvious ordering so the correct word isn't always first.
+        var shown = opts.slice();
+        if ((i + sel) % 2 === 1) shown.reverse();
+
         card.innerHTML =
           '<div class="meta">' +
+            '<span class="chip">' + esc(p.n != null ? ('Q' + p.n) : ('Q' + (i + 1))) + '</span>' +
             (p.pack ? '<span class="chip">' + esc(p.pack) + '</span>' : '') +
             (p.by ? '<span>by ' + esc(p.by) + '</span>' : '') +
-            '<span>Level ' + esc(lv.level) + (lv.level_name ? ' · ' + esc(lv.level_name) : '') + '</span>' +
+            (lvlNum != null ? '<span>Level ' + esc(lvlNum) + '</span>' : '') +
           '</div>' +
-          '<div class="levels">' + levels.map(function(l,j){
-            return '<button class="lv' + (j===sel?' on':'') + '" data-j="' + j + '">L' + esc(l.level) + '</button>';
-          }).join('') + '</div>' +
-          '<p class="sentence">' + esc(lv.the_child_sees).replace(/(_{2,})/g,'<span class="blank">$1</span>') + '</p>' +
-          '<div class="opts">' + opts.map(function(w){
+          (tabs.length > 1
+            ? '<div class="levels">' + tabs.map(function(l, j){
+                return '<button class="lv' + (j===sel?' on':'') + '" data-j="' + j + '">L' + esc(l.level) + '</button>';
+              }).join('') + '</div>'
+            : '') +
+          '<p class="sentence">' + esc(sentence).replace(/(_{2,})/g,'<span class="blank">$1</span>') + '</p>' +
+          '<div class="opts">' + shown.map(function(w){
             return '<button class="opt" data-w="' + esc(w) + '">' + esc(w) + '</button>';
           }).join('') + '</div>' +
-          '<div class="verdict"></div>' +
-          (lv.whole_word_hidden ? '<div class="hint">Whole word hidden — length is the only clue.</div>' : '');
+          '<div class="verdict"></div>';
 
         card.querySelectorAll('.lv').forEach(function(b){
           b.onclick = function(){ sel = parseInt(b.getAttribute('data-j'),10); paint(); };
@@ -120,10 +135,10 @@ export const PREVIEW_APP_HTML = `<!DOCTYPE html>
             b.classList.add(ok ? 'right' : 'wrong');
             verdict.className = 'verdict ' + (ok ? 'ok' : 'no');
             verdict.textContent = ok
-              ? 'Correct — that is what the child should pick.'
+              ? 'Correct \u2014 that is what the child should pick.'
               : 'Marked wrong. If this word ALSO fits the blank, the question is broken.';
             notify('ui/notifications/context-update', {
-              text: 'Reviewer tried "' + w + '" at level ' + lv.level + ' — ' + (ok ? 'correct' : 'marked wrong') + '.'
+              text: 'Reviewer tried \"' + w + '\" on Q' + (p.n || (i+1)) + ' \u2014 ' + (ok ? 'correct' : 'marked wrong') + '.'
             });
           };
         });
