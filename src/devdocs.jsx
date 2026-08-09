@@ -1933,6 +1933,18 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    backend silently drift (this is exactly how game-feed and pack-describe ran live for weeks with no
    source in the repo). Before editing any edge function, diff the repo copy against the deployed one
    (\`get_edge_function\`); if they differ, the DEPLOYED version is source of truth until reconciled.
+   **DEPLOYING BY TRANSCRIPTION IS THE RISKIEST THING IN THIS REPO.** deploy_edge_function takes the
+   file CONTENT inline, so deploying mcp.ts means re-emitting ~1,300 lines by hand. That has already
+   caused a real incident: a 1-line PLACEHOLDER was deployed over the live mcp function, breaking it
+   until it was recovered. It also causes benign-looking drift — comments get condensed in transit, so
+   the deployed copy and the repo copy stop matching even when behaviour is identical. Rules: after
+   ANY inline deploy, fetch the deployed copy back and compare; and never treat "it deployed" as "it
+   works" — exercise the changed tool over the wire before moving on.
+   **THE REAL FIX IS CI.** The repo has CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID, which is why the
+   site and the mcp-shim Worker deploy automatically and exactly. There is NO SUPABASE_ACCESS_TOKEN,
+   which is the only reason edge functions cannot. Adding that one secret would let a workflow run
+   supabase functions deploy straight from edge-functions/*.ts, making deployed == repo true by
+   construction and removing this whole class of error. Strongly recommended.
    ACCESS: a contributor with only GitHub access can change the website and nothing else. To touch the
    backend they need access to the Supabase PROJECT — invited to the Supabase org (preferred) or a
    personal access token — then the Supabase MCP on their own Claude account inherits that access. The
@@ -2501,6 +2513,12 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    actually receives.
    The validator in the MCP server is a FOURTH copy — it must stay byte-identical to core.jsx,
    content-api and generate-questions.
+   DEPLOYMENT: wire edge-function deploys into CI from day one. Keep the function source in the repo
+   AND give the CI a provider access token so a workflow can deploy it. If you instead deploy by
+   pasting file contents into a tool call, you WILL eventually paste something truncated over a
+   working function — it has happened here — and the repo will silently drift from what is live.
+   Whatever the method: after deploying, fetch the deployed copy back and compare, then exercise the
+   changed tool over the wire. A successful deploy call is not evidence the tool works.
 7. **Activity log:** every mutation recorded (who/what/when) via pm_log.
 8. **Developer Notes page:** hardcoded architecture doc + CLAUDE.md + this build prompt,
    each viewable with copy + download, plus an editable scratchpad saved to pm_dev_notes.

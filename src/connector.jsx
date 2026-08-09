@@ -9,7 +9,9 @@
 //   A partner CANNOT reach a child. pm_review_approve is the only path into live content and it
 //   requires a human to press Approve. The worst a partner can do — even a compromised one — is
 //   fill the review queue with things you reject. That is the entire blast radius.
-//   There is deliberately no tool to publish, delete, or edit a pack.
+//   Partners CAN (since Aug 2026) create/rename packs and preview, edit or reject items still
+//   WAITING in the queue — all pre-approval, so none of it can reach a child. There is deliberately
+//   no tool to APPROVE anything, and none to delete a pack or touch a live question.
 //
 // TOKENS: shown ONCE at creation, then only ever stored as a sha256 hash. Not even an authenticated
 // admin can read them back from the browser (verified: the table has RLS on and zero policies).
@@ -68,12 +70,15 @@ function ConnectorView() {
         </p>
       </div>
 
-      {/* What a partner can and cannot do. Say it plainly — this is the whole security story. */}
+      {/* What a partner can and cannot do. Say it plainly — this is the whole security story.
+          KEEP THIS HONEST: it must match the tools the mcp function actually exposes. */}
       <div className="pm-readable" style={{ background: C.brandSoft, borderRadius: R.lg, padding: "14px 17px",
         marginBottom: S.lg, fontSize: 13.5, color: C.brandInk, lineHeight: 1.65 }}>
-        <b>A partner can only propose questions.</b> They can read your packs (so they don't repeat
-        words you've already used), and send new questions to <b>AI Review</b>. That's all. They cannot
-        publish, delete, or edit anything. The worst they can do is fill your review queue with things
+        <b>A partner can never put a question in front of a child.</b> They can read your packs, propose
+        questions to <b>AI Review</b>, create and rename packs, and preview, edit or reject items that are
+        still <i>waiting</i> in the queue. They <b>cannot approve anything</b> — approving is only possible
+        here in the CMS, and it stays the only route into live content. They also cannot delete a pack or
+        touch a question that's already live. The worst they can do is fill your review queue with things
         you then reject.
       </div>
 
@@ -154,6 +159,7 @@ function ConnectorView() {
           <li>They paste <b>just the URL</b> above and click Add. (Nothing goes in the OAuth boxes.)</li>
           <li>They click <b>Connect</b>. A Positive Minds sign-in page opens — they paste their token there.</li>
           <li>Then they simply talk to it: <i>"Write me 15 questions for the Calmness pack about worries at bedtime."</i></li>
+          <li>They can also ask it to <b>show how a question looks to a child</b> at each level, start a <b>new pack</b>, or go through what's <b>waiting in review</b> and fix or reject items. Approving stays with you, here.</li>
         </ol>
         <div style={{ fontSize: 13, color: C.sub, marginTop: 12, lineHeight: 1.65, paddingTop: 12, borderTop: "1px solid " + C.lineSoft }}>
           Behind the scenes, Claude reads the pack so it doesn't repeat words you've already used,

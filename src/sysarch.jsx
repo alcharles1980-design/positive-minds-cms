@@ -226,8 +226,9 @@ function SystemArchitectureView() {
         <div style={{ background: C.goodSoft, border: "1px solid " + C.line, borderRadius: R.md, padding: S.md + "px " + S.lg + "px", fontSize: 12.8, color: C.ink2, lineHeight: 1.65 }}>
           <strong style={{ color: C.goodInk }}>Nothing you propose goes live by itself.</strong> Every question is validated
           by the same engine the CMS uses and written <strong>only</strong> to the review queue. It reaches the game only
-          when a human approves it on the <strong>AI Review</strong> page. The connector can read packs and propose — it
-          can publish, edit, and delete nothing.
+          when a human approves it on the <strong>AI Review</strong> page. Through the connector you can propose, preview,
+          edit and reject things that are still <em>waiting</em> — but <strong>approving is not possible there</strong>, and
+          nothing can touch a question that's already live.
         </div>
         <div style={{ background: C.warnSoft, border: "1px solid " + C.warn, borderRadius: R.md, padding: S.md + "px " + S.lg + "px", fontSize: 12.5, color: C.warnInk, lineHeight: 1.6 }}>
           <strong>Lost or leaked a token?</strong> Go to the <strong>Claude Connector</strong> page and revoke it — that

@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.15-15", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.15-16", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -4984,6 +4984,18 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    backend silently drift (this is exactly how game-feed and pack-describe ran live for weeks with no
    source in the repo). Before editing any edge function, diff the repo copy against the deployed one
    (\`get_edge_function\`); if they differ, the DEPLOYED version is source of truth until reconciled.
+   **DEPLOYING BY TRANSCRIPTION IS THE RISKIEST THING IN THIS REPO.** deploy_edge_function takes the
+   file CONTENT inline, so deploying mcp.ts means re-emitting ~1,300 lines by hand. That has already
+   caused a real incident: a 1-line PLACEHOLDER was deployed over the live mcp function, breaking it
+   until it was recovered. It also causes benign-looking drift — comments get condensed in transit, so
+   the deployed copy and the repo copy stop matching even when behaviour is identical. Rules: after
+   ANY inline deploy, fetch the deployed copy back and compare; and never treat "it deployed" as "it
+   works" — exercise the changed tool over the wire before moving on.
+   **THE REAL FIX IS CI.** The repo has CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID, which is why the
+   site and the mcp-shim Worker deploy automatically and exactly. There is NO SUPABASE_ACCESS_TOKEN,
+   which is the only reason edge functions cannot. Adding that one secret would let a workflow run
+   supabase functions deploy straight from edge-functions/*.ts, making deployed == repo true by
+   construction and removing this whole class of error. Strongly recommended.
    ACCESS: a contributor with only GitHub access can change the website and nothing else. To touch the
    backend they need access to the Supabase PROJECT — invited to the Supabase org (preferred) or a
    personal access token — then the Supabase MCP on their own Claude account inherits that access. The
@@ -5552,6 +5564,12 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    actually receives.
    The validator in the MCP server is a FOURTH copy — it must stay byte-identical to core.jsx,
    content-api and generate-questions.
+   DEPLOYMENT: wire edge-function deploys into CI from day one. Keep the function source in the repo
+   AND give the CI a provider access token so a workflow can deploy it. If you instead deploy by
+   pasting file contents into a tool call, you WILL eventually paste something truncated over a
+   working function — it has happened here — and the repo will silently drift from what is live.
+   Whatever the method: after deploying, fetch the deployed copy back and compare, then exercise the
+   changed tool over the wire. A successful deploy call is not evidence the tool works.
 7. **Activity log:** every mutation recorded (who/what/when) via pm_log.
 8. **Developer Notes page:** hardcoded architecture doc + CLAUDE.md + this build prompt,
    each viewable with copy + download, plus an editable scratchpad saved to pm_dev_notes.
@@ -7473,7 +7491,9 @@ function KeyEditor({ provider, existing, onClose, onSaved }) {
 //   A partner CANNOT reach a child. pm_review_approve is the only path into live content and it
 //   requires a human to press Approve. The worst a partner can do — even a compromised one — is
 //   fill the review queue with things you reject. That is the entire blast radius.
-//   There is deliberately no tool to publish, delete, or edit a pack.
+//   Partners CAN (since Aug 2026) create/rename packs and preview, edit or reject items still
+//   WAITING in the queue — all pre-approval, so none of it can reach a child. There is deliberately
+//   no tool to APPROVE anything, and none to delete a pack or touch a live question.
 //
 // TOKENS: shown ONCE at creation, then only ever stored as a sha256 hash. Not even an authenticated
 // admin can read them back from the browser (verified: the table has RLS on and zero policies).
@@ -7532,12 +7552,15 @@ function ConnectorView() {
         </p>
       </div>
 
-      {/* What a partner can and cannot do. Say it plainly — this is the whole security story. */}
+      {/* What a partner can and cannot do. Say it plainly — this is the whole security story.
+          KEEP THIS HONEST: it must match the tools the mcp function actually exposes. */}
       <div className="pm-readable" style={{ background: C.brandSoft, borderRadius: R.lg, padding: "14px 17px",
         marginBottom: S.lg, fontSize: 13.5, color: C.brandInk, lineHeight: 1.65 }}>
-        <b>A partner can only propose questions.</b> They can read your packs (so they don't repeat
-        words you've already used), and send new questions to <b>AI Review</b>. That's all. They cannot
-        publish, delete, or edit anything. The worst they can do is fill your review queue with things
+        <b>A partner can never put a question in front of a child.</b> They can read your packs, propose
+        questions to <b>AI Review</b>, create and rename packs, and preview, edit or reject items that are
+        still <i>waiting</i> in the queue. They <b>cannot approve anything</b> — approving is only possible
+        here in the CMS, and it stays the only route into live content. They also cannot delete a pack or
+        touch a question that's already live. The worst they can do is fill your review queue with things
         you then reject.
       </div>
 
@@ -7618,6 +7641,7 @@ function ConnectorView() {
           <li>They paste <b>just the URL</b> above and click Add. (Nothing goes in the OAuth boxes.)</li>
           <li>They click <b>Connect</b>. A Positive Minds sign-in page opens — they paste their token there.</li>
           <li>Then they simply talk to it: <i>"Write me 15 questions for the Calmness pack about worries at bedtime."</i></li>
+          <li>They can also ask it to <b>show how a question looks to a child</b> at each level, start a <b>new pack</b>, or go through what's <b>waiting in review</b> and fix or reject items. Approving stays with you, here.</li>
         </ol>
         <div style={{ fontSize: 13, color: C.sub, marginTop: 12, lineHeight: 1.65, paddingTop: 12, borderTop: "1px solid " + C.lineSoft }}>
           Behind the scenes, Claude reads the pack so it doesn't repeat words you've already used,
@@ -9150,8 +9174,9 @@ function SystemArchitectureView() {
         <div style={{ background: C.goodSoft, border: "1px solid " + C.line, borderRadius: R.md, padding: S.md + "px " + S.lg + "px", fontSize: 12.8, color: C.ink2, lineHeight: 1.65 }}>
           <strong style={{ color: C.goodInk }}>Nothing you propose goes live by itself.</strong> Every question is validated
           by the same engine the CMS uses and written <strong>only</strong> to the review queue. It reaches the game only
-          when a human approves it on the <strong>AI Review</strong> page. The connector can read packs and propose — it
-          can publish, edit, and delete nothing.
+          when a human approves it on the <strong>AI Review</strong> page. Through the connector you can propose, preview,
+          edit and reject things that are still <em>waiting</em> — but <strong>approving is not possible there</strong>, and
+          nothing can touch a question that's already live.
         </div>
         <div style={{ background: C.warnSoft, border: "1px solid " + C.warn, borderRadius: R.md, padding: S.md + "px " + S.lg + "px", fontSize: 12.5, color: C.warnInk, lineHeight: 1.6 }}>
           <strong>Lost or leaked a token?</strong> Go to the <strong>Claude Connector</strong> page and revoke it — that
