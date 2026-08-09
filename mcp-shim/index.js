@@ -47,24 +47,36 @@ const UI_TOOL = "preview_questions";
 // the questions. The rendering instruction has to be here too, for the same reason: by the time the
 // result arrives, the choice of how to present it has often already been made.
 const PREVIEW_DESC_EXTRA =
-  " USE THIS whenever the person says anything like \"preview\", \"let's review the pending questions\", " +
-  "\"show me what's waiting\", \"let's go through the queue\", or \"how would this look in the game\" — " +
-  "with no arguments it returns everything awaiting review. THEN RENDER IT AS A PLAYABLE CARD: build " +
-  "an interactive artifact showing the sentence with the blank exactly as returned, tabs to switch " +
-  "level, and the two words as big tappable buttons that turn green (correct) or red (wrong) when " +
-  "tapped. Never reveal which word is correct before it is tapped, and never reword or reorder " +
-  "anything — the whole point is to see it exactly as a child does. Do not just list them as text.";
+  " USE THIS whenever the person wants to SEE or PLAY questions rather than read counts. Trigger " +
+  "phrasings include: \"preview\", \"let's preview these\", \"review the pending questions\", \"go " +
+  "through the queue\", \"show me what's waiting\", \"what needs reviewing\", \"play this\", \"let me " +
+  "try it\", \"play the question bank\", \"show me the questions in <pack>\", \"how would this look in " +
+  "the game\", \"what does the child see\". Treat any similar phrasing the same way — the intent is " +
+  "always: show the actual questions, playable.\n" +
+  "WHICH QUESTIONS: with no arguments it returns everything AWAITING REVIEW. Pass pack_slug to limit " +
+  "that to one pack. To play a pack's LIVE, already-approved bank instead (\"play the question bank " +
+  "from Calmness\"), first call get_pack_content for that pack, then pass its existing_questions here " +
+  "as `questions` — turn each `sentence` back into a template by replacing ____ with {blank}, and map " +
+  "`alternate` to `alt_answer`. Say which set you are showing.\n" +
+  "THEN RENDER IT AS A PLAYABLE CARD: build an interactive artifact showing the sentence with the " +
+  "blank exactly as returned, tabs to switch level, and the two words as big tappable buttons that " +
+  "turn green (correct) or red (wrong) when tapped. Never reveal which word is correct before it is " +
+  "tapped, and never reword or reorder anything — the whole point is to see it exactly as a child " +
+  "does. Do not just list them as text.";
 
 const STATUS_DESC_EXTRA =
   " This returns COUNTS and decisions, not the questions themselves. If the person wants to SEE or go " +
   "through the actual pending questions, use preview_questions instead.";
 
 const INSTRUCTIONS_EXTRA =
-  " WHEN THE PERSON WANTS TO PREVIEW OR REVIEW PENDING QUESTIONS: call preview_questions (no " +
-  "arguments returns the whole pending queue), then render the result as an interactive, playable " +
-  "artifact — sentence with the blank, level tabs, and the two words as tappable buttons that go " +
-  "green or red, with the correct one hidden until tapped. review_status is for counts and progress, " +
-  "not for showing the questions.";
+  " PREVIEWING AND PLAYING QUESTIONS: if the person asks to preview, review the pending questions, go " +
+  "through the queue, play a question, or play a pack's question bank — or says anything similar — " +
+  "call preview_questions and render the result as an interactive, PLAYABLE artifact: the sentence " +
+  "with its blank, tabs to switch level, and the two words as tappable buttons that go green or red, " +
+  "with the correct one hidden until tapped. preview_questions with no arguments returns the pending " +
+  "review queue; to play a pack's already-approved bank, call get_pack_content first and pass its " +
+  "existing_questions into preview_questions (replace ____ with {blank}, and `alternate` becomes " +
+  "`alt_answer`). review_status is for counts and progress only — it does not show the questions.";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
