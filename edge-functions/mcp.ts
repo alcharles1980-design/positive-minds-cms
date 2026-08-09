@@ -372,10 +372,10 @@ const TOOLS = [
   {
     name: 'review_status',
     description:
-      'Check what happened to the questions you have proposed: how many are still waiting for the ' +
-      'reviewer, how many were approved, and how many were rejected (with the reviewer\'s reasons). ' +
-      'Use this when the person asks about progress or "what happened to what I sent", and BEFORE ' +
-      'writing more for a pack — the rejection reasons tell you what to avoid repeating.',
+      'See the state of ALL question submissions from every contributor: what is still waiting for ' +
+      'the reviewer, what was approved, and what was rejected (with the reviewer\'s reasons). All ' +
+      'partners share the same full visibility. Use this when the person asks about progress or what ' +
+      'is pending, and BEFORE writing more for a pack — the rejection reasons show where the bar is.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -711,9 +711,10 @@ async function callTool(db: any, partner: string, name: string, args: any) {
   }
 
   // ---- review_status ----
-  // Read-only. Closes the feedback loop: a contributor proposes into a queue and otherwise never
-  // learns what became of it. Scope: THIS partner's own submissions in detail; other contributors
-  // are represented only as an overall backlog count, never by their content.
+  // Read-only. FULL SHARED VISIBILITY (decision, Aug 2026): every partner sees EVERY contributor's
+  // submissions, pending and decided, with attribution. This matches how the CMS itself works —
+  // partners share the admin login, so scoping this per-caller was a boundary that did not actually
+  // hold anywhere else. Seeing each other's rejections is also the fastest way to learn the bar.
   if (name === 'review_status') {
     let packFilter: any = null;
     if (args.pack_slug) {
@@ -722,63 +723,75 @@ async function callTool(db: any, partner: string, name: string, args: any) {
       packFilter = p;
     }
 
-    const mine = db.from('pm_review_queue')
-      .select('pack_id,status,edited,reject_reason,answer,alt_answer,template,created_at,decided_at')
-      .eq('provider', `partner:${partner}`).limit(5000);
-    if (packFilter) mine.eq('pack_id', packFilter.id);
-    const { data: rows } = await mine;
-
-    // The reviewer's whole backlog (every contributor) — a count only, so the person knows whether
-    // their items are behind a queue.
-    const { count: backlog } = await db.from('pm_review_queue')
-      .select('id', { count: 'exact', head: true }).eq('status', 'pending');
+    const q = db.from('pm_review_queue')
+      .select('pack_id,status,edited,reject_reason,answer,alt_answer,template,provider,created_at,decided_at,decided_by')
+      .limit(5000);
+    if (packFilter) q.eq('pack_id', packFilter.id);
+    const { data: rows } = await q;
 
     const all = rows || [];
+    const who = (r: any) => (r.provider || 'unknown').replace(/^partner:/, '');
     const byStatus = (s: string) => all.filter((r: any) => r.status === s);
     const pending = byStatus('pending'), approved = byStatus('approved'), rejected = byStatus('rejected');
-    const editedBeforeApproval = approved.filter((r: any) => r.edited).length;
 
-    // Per-pack breakdown, named rather than by id.
     const { data: packs } = await db.from('pm_packs').select('id,slug,name').limit(500);
     const packById: Record<string, any> = {};
     for (const p of packs || []) packById[p.id] = p;
+    const packName = (id: string) => packById[id]?.name || 'unknown';
+
+    // Per-pack and per-contributor breakdowns.
     const perPack: Record<string, any> = {};
+    const perContributor: Record<string, any> = {};
     for (const r of all) {
-      const p = packById[r.pack_id];
-      const key = p ? p.slug : 'unknown';
-      perPack[key] = perPack[key] || { pack: p ? p.name : 'unknown', pending: 0, approved: 0, rejected: 0 };
-      if (perPack[key][r.status] != null) perPack[key][r.status] += 1;
+      const pk = packById[r.pack_id]?.slug || 'unknown';
+      perPack[pk] = perPack[pk] || { pack: packName(r.pack_id), pending: 0, approved: 0, rejected: 0 };
+      if (perPack[pk][r.status] != null) perPack[pk][r.status] += 1;
+
+      const c = who(r);
+      perContributor[c] = perContributor[c] || { pending: 0, approved: 0, rejected: 0, approved_but_edited_first: 0 };
+      if (perContributor[c][r.status] != null) perContributor[c][r.status] += 1;
+      if (r.status === 'approved' && r.edited) perContributor[c].approved_but_edited_first += 1;
     }
 
-    // The genuinely useful part: WHY things were rejected, so the same mistake is not repeated.
+    const shape = (r: any) => ({
+      question: `"${(r.template || '').replace(/\{blank\}/g, '____')}" — ${r.answer} / ${r.alt_answer}`,
+      pack: packName(r.pack_id),
+      by: who(r),
+    });
+
+    // Everything still waiting on the reviewer, so any partner can see the shared backlog.
+    const awaiting = pending
+      .sort((a: any, b: any) => String(a.created_at || '').localeCompare(String(b.created_at || '')))
+      .slice(0, 50)
+      .map((r: any) => ({ ...shape(r), submitted: r.created_at }));
+
+    // Rejections with reasons — the fastest way for ANY contributor to learn the bar.
     const rejections = rejected
       .sort((a: any, b: any) => String(b.decided_at || '').localeCompare(String(a.decided_at || '')))
-      .slice(0, 15)
-      .map((r: any) => ({
-        question: `"${(r.template || '').replace(/\{blank\}/g, '____')}" — ${r.answer} / ${r.alt_answer}`,
-        pack: packById[r.pack_id]?.name || 'unknown',
-        reason: r.reject_reason || '(no reason given)',
-      }));
+      .slice(0, 25)
+      .map((r: any) => ({ ...shape(r), reason: r.reject_reason || '(no reason given)' }));
 
+    const meKey = partner;
     return {
       scope: packFilter ? `pack "${packFilter.name}"` : 'all packs',
-      your_submissions: {
+      visibility: 'Shared — every partner sees every contributor\'s submissions.',
+      totals_all_contributors: {
         total: all.length,
         awaiting_review: pending.length,
         approved: approved.length,
         rejected: rejected.length,
-        approved_but_edited_first: editedBeforeApproval,
       },
+      by_contributor: perContributor,
       by_pack: perPack,
+      awaiting_review_now: awaiting,
       why_things_were_rejected: rejections,
-      reviewer_backlog_all_contributors: backlog ?? 0,
+      your_own: perContributor[meKey] || { pending: 0, approved: 0, rejected: 0, approved_but_edited_first: 0 },
       note: all.length === 0
-        ? 'You have not proposed anything yet' + (packFilter ? ' for this pack.' : '.')
+        ? 'Nothing has been proposed yet' + (packFilter ? ' for this pack.' : '.')
         : (pending.length
-            ? `${pending.length} of your question(s) are still waiting for a human to approve, edit or reject.`
-            : 'Everything you have proposed has been decided on.') +
-          (editedBeforeApproval ? ` ${editedBeforeApproval} were edited by the reviewer before approval — worth reading those to see what they changed.` : '') +
-          (rejections.length ? ' Read why_things_were_rejected before writing more, so you do not repeat the same problem.' : ''),
+            ? `${pending.length} question(s) are waiting for a human to approve, edit or reject.`
+            : 'Everything proposed so far has been decided on.') +
+          (rejections.length ? ' Read why_things_were_rejected before writing more — those reasons apply to everyone.' : ''),
     };
   }
 
