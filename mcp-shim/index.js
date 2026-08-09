@@ -14,6 +14,24 @@
 
 const SUPABASE = "https://tytrmjjucqijzcrbwjfm.supabase.co";
 
+// ---- MCP Apps (SEP-1865) UI layer -------------------------------------------------------------
+// The UI is served from HERE rather than the Supabase function for one practical reason: this Worker
+// deploys exactly, via CI, from the repo. The mcp function can only be deployed by transcribing its
+// ~1,300 lines inline, which has already put a placeholder over the live function once. If this
+// proof works, the right home for it is mcp.ts.
+//
+// What the host does (and what we therefore have to answer):
+//   initialize      → client advertises io.modelcontextprotocol/ui; we must declare `resources`
+//   tools/list      → the tool must carry _meta.ui.resourceUri  (INSIDE the tool object)
+//   resources/list  → declare the ui:// resource
+//   resources/read  → return the HTML with mimeType text/html;profile=mcp-app
+//   tools/call      → return content AND structuredContent
+import { PREVIEW_APP_HTML } from "./preview-app.js";
+
+const UI_URI = "ui://positive-minds/question-preview";
+const UI_MIME = "text/html;profile=mcp-app";
+const UI_TOOL = "preview_questions";
+
 // Temporary diagnostic logging so the Worker's own traffic is visible. Remove once confirmed.
 const SHIM_LOG_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5dHJtamp1Y3FpanpjcmJ3amZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMwOTMyNDgsImV4cCI6MjA5ODY2OTI0OH0.KlFsPm7M015tflKE-jDjIstD_ZoCaz0jROUAoksJxOs";
 function shimLog(ctx, entry) {
@@ -199,6 +217,112 @@ export default {
     fwdHeaders.delete("host");
     const method = request.method;
     const reqBody = method === "GET" || method === "HEAD" ? undefined : await request.arrayBuffer();
+
+    // ---- MCP Apps interception -----------------------------------------------------------------
+    // Only for JSON-RPC POSTs to the MCP endpoint. Everything else passes through untouched.
+    if (method === "POST" && (path === "/mcp" || path === "/functions/v1/mcp")) {
+      let rpc = null;
+      try { rpc = JSON.parse(new TextDecoder().decode(reqBody)); } catch (_) { /* not JSON — pass through */ }
+
+      if (rpc && rpc.jsonrpc === "2.0") {
+        const rpcRes = (result) => new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: rpc.id ?? null, result }),
+          { headers: { ...CORS, "Content-Type": "application/json" } },
+        );
+
+        // resources/list — declare the UI resource. The Supabase function knows nothing about this.
+        if (rpc.method === "resources/list") {
+          shimLog(ctx, { method: "RPC", path: "resources/list", ua: "ui-layer", status: 200 });
+          return rpcRes({
+            resources: [{
+              uri: UI_URI,
+              name: "Question preview",
+              description: "Play a question exactly as a child sees it, at any level.",
+              mimeType: UI_MIME,
+            }],
+          });
+        }
+
+        // resources/read — hand over the app itself.
+        if (rpc.method === "resources/read") {
+          const want = rpc.params && rpc.params.uri;
+          shimLog(ctx, { method: "RPC", path: "resources/read:" + (want || "?"), ua: "ui-layer", status: 200 });
+          if (want === UI_URI) {
+            return rpcRes({
+              contents: [{
+                uri: UI_URI,
+                mimeType: UI_MIME,
+                text: PREVIEW_APP_HTML,
+                _meta: { ui: { prefersBorder: false } },
+              }],
+            });
+          }
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: rpc.id ?? null, error: { code: -32002, message: "Resource not found" } }),
+            { headers: { ...CORS, "Content-Type": "application/json" } },
+          );
+        }
+
+        // resources/templates/list — some hosts probe this; answer rather than 404.
+        if (rpc.method === "resources/templates/list") {
+          return rpcRes({ resourceTemplates: [] });
+        }
+
+        // initialize / tools/list / tools/call — forward, then patch the response.
+        if (rpc.method === "initialize" || rpc.method === "tools/list" || rpc.method === "tools/call") {
+          const up = await fetch(targetUrl, { method, headers: fwdHeaders, body: reqBody, redirect: "manual" });
+          const outH = new Headers(up.headers);
+          outH.delete("content-length"); outH.delete("content-encoding"); outH.delete("transfer-encoding");
+          for (const [k, v] of Object.entries(CORS)) outH.set(k, v);
+          if (outH.has("www-authenticate")) {
+            outH.set("WWW-Authenticate", `Bearer resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource"`);
+          }
+
+          let payload;
+          try { payload = JSON.parse(await up.text()); }
+          catch (_) { return new Response(up.body, { status: up.status, headers: outH }); }
+
+          if (payload && payload.result) {
+            if (rpc.method === "initialize") {
+              // Did the client actually ask for UI? This is the first rung of the diagnostic ladder.
+              const caps = (rpc.params && rpc.params.capabilities) || {};
+              const uiAsked = JSON.stringify(caps).includes("modelcontextprotocol/ui") ||
+                              !!caps["io.modelcontextprotocol/ui"];
+              shimLog(ctx, {
+                method: "RPC",
+                path: "initialize ui=" + uiAsked + " pv=" + ((rpc.params && rpc.params.protocolVersion) || "?"),
+                ua: request.headers.get("user-agent") || "", status: 200,
+              });
+              // Declare resources, and ECHO the client's protocol version — the function hardcodes an
+              // older one, and a downgrade can stop the host offering UI at all.
+              payload.result.capabilities = { ...(payload.result.capabilities || {}), resources: {} };
+              if (rpc.params && rpc.params.protocolVersion) {
+                payload.result.protocolVersion = rpc.params.protocolVersion;
+              }
+            }
+
+            if (rpc.method === "tools/list" && Array.isArray(payload.result.tools)) {
+              // _meta goes INSIDE the tool object, not on the result.
+              payload.result.tools = payload.result.tools.map((t) =>
+                t && t.name === UI_TOOL ? { ...t, _meta: { ui: { resourceUri: UI_URI } } } : t);
+            }
+
+            if (rpc.method === "tools/call" && rpc.params && rpc.params.name === UI_TOOL) {
+              // Hosts render from structuredContent; our function only returns text content.
+              const blocks = payload.result.content || [];
+              const textBlock = blocks.find((c) => c && c.type === "text");
+              if (textBlock) {
+                try { payload.result.structuredContent = JSON.parse(textBlock.text); } catch (_) { /* leave as text */ }
+              }
+              payload.result._meta = { ...(payload.result._meta || {}), ui: { resourceUri: UI_URI } };
+              shimLog(ctx, { method: "RPC", path: "tools/call:" + UI_TOOL + " structured=" + !!payload.result.structuredContent, ua: "ui-layer", status: 200 });
+            }
+          }
+
+          return new Response(JSON.stringify(payload), { status: up.status, headers: outH });
+        }
+      }
+    }
 
     const upstream = await fetch(targetUrl, { method, headers: fwdHeaders, body: reqBody, redirect: "manual" });
 
