@@ -405,11 +405,15 @@ const TOOLS = [
       'WHICH QUESTIONS: pass `questions` to preview drafts you have just written. Otherwise set ' +
       '`source` — "pending" (default) shows what is AWAITING REVIEW, "live" plays a pack\'s ' +
       'already-approved bank. `pack_slug` narrows either to one pack, and is required for "live".\n' +
-      'THEN RENDER IT AS A PLAYABLE CARD: build an interactive artifact showing the sentence with the ' +
-      'masked word exactly as returned, tabs to switch level, and the two words as big tappable ' +
-      'buttons that turn green (correct) or red (wrong) when tapped. Never reveal which word is ' +
-      'correct before it is tapped, and never reword or reorder anything — the whole point is to see ' +
-      'it exactly as a child does. Do not just list them as text.\n' +
+      'WHAT COMES BACK: `previews` is a list of QUESTIONS. Each has `sentence` (already masked and ' +
+      'ready to display), `options` (the two words), `correct`, `level_shown`, and `at_other_levels` ' +
+      'if you want level tabs. By default only ONE level is rendered — pass `levels` for more.\n' +
+      'THEN RENDER IT AS A PLAYABLE CARD: build an interactive artifact with ONE CARD PER QUESTION, in ' +
+      'the order given. Each card shows THAT question\'s `sentence` verbatim and its two `options` as ' +
+      'big tappable buttons that turn green (correct) or red (wrong) when tapped. Never reveal which ' +
+      'word is correct before it is tapped, and never reword or reorder anything.\n' +
+      'DO NOT produce a summary of the levels, a table of level rules, or one section per level. The ' +
+      'unit is the QUESTION — if there are twelve questions the person should see twelve cards.\n' +
       'MATCH THE CMS DESIGN (Positive Minds house style) so it feels like part of the product:\n' +
       '  page background #F6F5FB; each question in a white #FFFFFF card, 1px #E4E0F0 border, 16px ' +
       'radius, generous padding, soft shadow 0 2px 10px rgba(25,23,40,.05).\n' +
@@ -902,37 +906,47 @@ async function callTool(db: any, partner: string, name: string, args: any) {
   // resolveSlots would create a fifth parity copy. If a row has slots, the preview says so.
   if (name === 'preview_questions') {
     const { data: levels } = await db.from('pm_levels').select('*').order('level').limit(200);
-    const wanted = Array.isArray(args.levels) && args.levels.length
-      ? (levels || []).filter((l: any) => args.levels.includes(l.level))
-      : (levels || []);
+    const askedLevels = Array.isArray(args.levels) && args.levels.length ? args.levels : null;
+    // DEFAULT TO ONE LEVEL, NOT ALL TEN. Returning every level for every question made the payload
+    // overwhelmingly level-shaped (12 questions x 10 levels = 120 level objects), and the natural way
+    // to summarise that is level-by-level — which is the opposite of "show me the questions".
+    const wanted = askedLevels
+      ? (levels || []).filter((l: any) => askedLevels.includes(l.level))
+      : (levels || []).slice(0, 1);
 
+    const maskAt = (word: string, lvl: any) => {
+      const isWord = lvl.hidden_mode === 'word';
+      const letters = isWord ? word.length : Math.min(lvl.letters_hidden_default || 2, Math.max(1, word.length - 1));
+      return (isWord || letters >= word.length)
+        ? '_'.repeat(Math.max(3, word.length))
+        : maskWord(word, letters, lvl.letter_position || 'end', lvl.letter_grouping || 'grouped');
+    };
+
+    // QUESTION-FIRST: the sentence and the two words are the headline; levels are a compact list
+    // underneath for the card's tabs.
     const renderOne = (q: any) => {
       const word = (q.answer || '').toUpperCase();
       const alt = (q.alt_answer || '').toUpperCase();
-      return wanted.map((lvl: any) => {
-        const isWord = lvl.hidden_mode === 'word';
-        const letters = isWord ? word.length : Math.min(lvl.letters_hidden_default || 2, Math.max(1, word.length - 1));
-        const blank = (isWord || letters >= word.length)
-          ? '_'.repeat(Math.max(3, word.length))
-          : maskWord(word, letters, lvl.letter_position || 'end', lvl.letter_grouping || 'grouped');
-        const sentence = (q.template || '').replace(/\{blank\}/g, blank);
-        return {
+      const shown = wanted[0] || (levels || [])[0];
+      return {
+        sentence: (q.template || '').replace(/\{blank\}/g, shown ? maskAt(word, shown) : '____'),
+        options: [word, alt],
+        correct: word,
+        level_shown: shown ? shown.level : null,
+        at_other_levels: (askedLevels ? wanted : (levels || [])).map((lvl: any) => ({
           level: lvl.level,
-          level_name: lvl.name,
-          the_child_sees: sentence,
-          picks_between: [word, alt],
-          whole_word_hidden: isWord || letters >= word.length,
-        };
-      });
+          sentence: (q.template || '').replace(/\{blank\}/g, maskAt(word, lvl)),
+        })),
+      };
     };
 
     // Drafts supplied directly?
     if (Array.isArray(args.questions) && args.questions.length) {
       return {
         source: 'drafts (nothing saved)',
-        previews: args.questions.slice(0, 30).map((q: any) => ({
-          question: `${(q.answer || '').toUpperCase()} / ${(q.alt_answer || '').toUpperCase()}`,
-          at_each_level: renderOne(q),
+        previews: args.questions.slice(0, 30).map((q: any, i: number) => ({
+          n: i + 1,
+          ...renderOne(q),
         })),
         note: 'This is exactly how each one appears in the game. Check the TONE and MEANING here — the engine already checks the mechanics. Run check_questions before proposing.',
       };
@@ -965,13 +979,13 @@ async function callTool(db: any, partner: string, name: string, args: any) {
         total_in_pack: liveTotal ?? liveShown,
         showing: liveShown,
         truncated: (liveTotal ?? 0) > liveShown,
-        previews: (live || []).map((r: any) => ({
+        previews: (live || []).map((r: any, i: number) => ({
+          n: i + 1,
           // NOT a review-queue id — a live question id. Named so it cannot be mistaken for one that
           // reject_questions/edit_queued_question accept, which only ever take PENDING queue ids.
           question_id: r.id,
           pack: packFilter.name,
-          question: `${(r.answer || '').toUpperCase()} / ${(r.alt_answer || '').toUpperCase()}`,
-          at_each_level: renderOne(r),
+          ...renderOne(r),
         })),
         note: liveShown
           ? 'These are LIVE questions children can already see. Render them as playable cards. They cannot be edited or rejected from here — that is done in the CMS.' +
@@ -1001,12 +1015,12 @@ async function callTool(db: any, partner: string, name: string, args: any) {
       total_awaiting: pendingTotal ?? pendingShown,
       showing: pendingShown,
       truncated: (pendingTotal ?? 0) > pendingShown,
-      previews: (queued || []).map((r: any) => ({
+      previews: (queued || []).map((r: any, i: number) => ({
+        n: i + 1,
         id: r.id,
         pack: packName[r.pack_id] || 'unknown',
         by: (r.provider || 'unknown').replace(/^partner:/, ''),
-        question: `${(r.answer || '').toUpperCase()} / ${(r.alt_answer || '').toUpperCase()}`,
-        at_each_level: renderOne(r),
+        ...renderOne(r),
         has_slot_variations: !!(r.frame_slots && Object.keys(r.frame_slots).length),
       })),
       note: pendingShown
