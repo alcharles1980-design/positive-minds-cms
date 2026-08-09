@@ -726,7 +726,7 @@ plus create or rename pack containers. That is the entire blast radius. There is
 to DELETE a pack, and none to approve or publish a QUESTION.
 
 **The server:** edge function \`mcp\` (verify_jwt=FALSE — partners authenticate with their own token,
-not a Supabase JWT). Speaks JSON-RPC 2.0 over Streamable HTTP. Seven tools, deliberately narrow:
+not a Supabase JWT). Speaks JSON-RPC 2.0 over Streamable HTTP. Ten tools, deliberately narrow:
 | Tool | Reads | Writes |
 |---|---|---|
 | \`list_packs\` | packs (published + draft) w/ per-pack stats, level rules, the brief | — |
@@ -736,6 +736,9 @@ not a Supabase JWT). Speaks JSON-RPC 2.0 over Streamable HTTP. Seven tools, deli
 | \`create_pack\` | — | a new pack row (published immediately) |
 | \`update_pack\` | — | an existing pack's details (never its slug) |
 | \`review_status\` | ALL contributors' queue rows + reject reasons | — |
+| \`preview_questions\` | renders drafts/queue as a CHILD sees them | — |
+| \`reject_questions\` | — | rejects PENDING queue items (never approves) |
+| \`edit_queued_question\` | — | fixes a PENDING queue item, re-validated |
 
 **PACK CREATION (Aug 2026).** \`create_pack\` mirrors the CMS's own PackEditor + \`savePack\` convention
 EXACTLY — same \`slugify\` as core.jsx, \`sort_order = count + 1\`, emoji default 💪, the same pack-detail
@@ -769,6 +772,37 @@ cosmetic, and seeing each other's rejections is the fastest way for a new contri
 bar. It returns totals across all contributors, a \`by_contributor\` breakdown (incl.
 approved_but_edited_first per person), \`by_pack\`, the live pending queue with who submitted each
 and when, the reviewer's \`reject_reason\` for recent rejections, and a \`your_own\` convenience block.
+
+### Preview, edit and reject — the pre-approval review surface (Aug 2026)
+
+**\`preview_questions\` is the important one.** It renders a question EXACTLY as a child sees it —
+the sentence with the masked word in place — AT EVERY LEVEL. It mirrors buildLevelVariants in
+core.jsx: whole-word levels blank the entire word (min 3 underscores), otherwise maskWord hides
+letters_hidden_default letters at the level's position/grouping. It works on drafts (nothing saved)
+or on the pending queue, where it also returns the queue \`id\` so items can be acted on.
+
+Why it matters: every other check is mechanical. The engine can prove two words are different
+lengths; it cannot tell you whether a sentence is the right thing to teach a child. Seeing
+"I feel _____ when I try." the way a seven-year-old sees it is what makes a human judgement
+possible. NOTE: frame_slots are NOT resolved (connector questions never set them, and resolveSlots
+would be a fifth parity copy) — rows that have slots are flagged instead of rendered wrong.
+
+**\`reject_questions\`** rejects pending items with a required reason, via the existing
+pm_review_reject RPC (which enforces status='pending' itself). GOTCHA: that RPC stamps \`decided_by\`
+from a JWT email claim, which the service-role connector does not have — it would record 'admin'.
+The real actor is patched in afterwards as \`partner:<name>\`. Verified live.
+
+**\`edit_queued_question\`** fixes a PENDING item in place (the CMS edits at APPROVAL time instead,
+via pm_review_approve's optional params — this is a different, additive path). The merged result is
+RE-VALIDATED with the full engine and refused if it breaks a rule, so an edit can never make things
+worse; verified live by trying STEADY/GENTLE (same length) and having it correctly refused with the
+original left untouched. The row being edited is excluded from the dedup set or it would flag
+itself. It deliberately does NOT set the \`edited\` flag — that means "the APPROVER changed it at
+approval time" and is what review_status reports as approved_but_edited_first.
+
+**WHY THIS IS ALL SAFE:** every one of these is PRE-approval. Rejecting only removes something from
+the pipeline. An edited item stays pending. Nothing here can put a word in front of a child —
+pm_review_approve is still the only route, and there is deliberately no tool for it.
 
 \`check_questions\` is the interesting one: Claude validates its OWN drafts against the real engine
 before proposing, so it catches and fixes the same-length-words bug itself. Verified live — given
@@ -941,6 +975,11 @@ that network-first caches GETs).
      is; list_packs now includes draft packs and returns status. Plus **review_status**, which tells
      a contributor what happened to what they sent — counts by state, per pack, and the reviewer's
      reject reasons so Claude can avoid repeating a rejected mistake.
+  5. **preview_questions / reject_questions / edit_queued_question** — a pre-approval review surface
+     in chat. Preview renders a question as a CHILD sees it at every level, which is the one thing
+     no automated check can do (it lets a person judge tone). Reject and edit act only on PENDING
+     items; edits are re-validated and refused if they would break a rule. APPROVAL was deliberately
+     NOT added — see the note in DOC_CLAUDE_MD rule 4w.
   4. **Strict-dedup alignment.** The BRIEF and tool descriptions used to tell Claude to avoid word
      reuse and reversed pairs — things the validator no longer flags. Variety is now stated as a
      PREFERENCE; the only hard rule is the exact-triple duplicate.
@@ -1933,6 +1972,14 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    or edits a live question, and never let one write pm_questions directly.
    REVISED Aug 2026: create_pack and update_pack DO write, and that is acceptable, because a pack is a
    CONTAINER, not content — a connector-created pack is EMPTY until Albert approves questions into it.
+   preview_questions is READ-ONLY; reject_questions and edit_queued_question WRITE, but only to
+   PENDING queue rows — rejecting removes from the pipeline and an edited row stays pending, so
+   neither can reach a child. An edit is re-validated and refused if it breaks a rule.
+   APPROVE WAS CONSIDERED AND DELIBERATELY NOT BUILT (Aug 2026). Two reasons: pm_mcp_tokens has no
+   role column, so every token is equally powerful and an approve tool would let a partner approve
+   their OWN work in the same conversation; and reviewing content in the chat that just generated it
+   is a materially worse review environment than meeting it cold in the CMS. If approve is ever
+   added it needs: a role flag on tokens, one-at-a-time only, preview mandatory first.
    review_status also exists but is READ-ONLY. Its visibility is deliberately SHARED (all
    partners see all submissions) — matching the shared-admin model rather than inventing a boundary
    the CMS itself does not enforce.
@@ -2404,7 +2451,12 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    packs with their status), get_pack_content (existing questions + words already taken + a statistics
    summary), check_questions (validate drafts, SAVE NOTHING — this is what lets Claude fix its own
    mistakes before proposing), propose_questions (writes to the REVIEW QUEUE ONLY), create_pack and
-   update_pack, and review_status.
+   update_pack, review_status, preview_questions, reject_questions and edit_queued_question.
+   BUILD preview_questions EARLY — it renders a question exactly as a child sees it, at every level,
+   mirroring the CMS's own level-variant builder. It is the only way a human can judge TONE, which is
+   the thing every automated check misses and the reason the human reviewer exists at all.
+   reject and edit act ONLY on pending rows; re-validate every edit with the full engine and refuse
+   it if it would break a rule. Do NOT build an approve tool unless tokens carry a role flag.
    THE INVARIANT: pm_review_approve must remain the ONLY route a QUESTION can take into a pack. Never
    add a tool that approves, publishes or edits a live question, or writes pm_questions directly.
    review_status is READ-ONLY and closes the feedback loop that a queue otherwise breaks: a
