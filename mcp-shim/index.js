@@ -37,6 +37,18 @@ const SUPABASE = "https://tytrmjjucqijzcrbwjfm.supabase.co";
 //   tools/call      → return content AND structuredContent
 import { PREVIEW_APP_HTML } from "./preview-app.js";
 
+// TEMPORARY diagnostic: which tool is the client actually calling? Remove once resolved.
+const TOOL_LOG_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5dHJtamp1Y3FpanpjcmJ3amZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMwOTMyNDgsImV4cCI6MjA5ODY2OTI0OH0.KlFsPm7M015tflKE-jDjIstD_ZoCaz0jROUAoksJxOs";
+function toolLog(ctx, entry) {
+  try {
+    ctx.waitUntil(fetch(SUPABASE + "/rest/v1/pm_tool_log", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", apikey: TOOL_LOG_KEY, Authorization: "Bearer " + TOOL_LOG_KEY, Prefer: "return=minimal" },
+      body: JSON.stringify(entry),
+    }).catch(() => {}));
+  } catch (_) { /* never break the request */ }
+}
+
 const UI_URI = "ui://positive-minds/question-preview";
 const UI_MIME = "text/html;profile=mcp-app";
 const UI_TOOL = "preview_questions";
@@ -267,6 +279,16 @@ export default {
         }
 
         // initialize / tools/list / tools/call — forward, then patch the response.
+        if (rpc.method === "tools/call") {
+          toolLog(ctx, {
+            tool: (rpc.params && rpc.params.name) || "?",
+            args: JSON.stringify((rpc.params && rpc.params.arguments) || {}).slice(0, 300),
+            ua: request.headers.get("user-agent") || "",
+          });
+        }
+        if (rpc.method === "initialize") {
+          toolLog(ctx, { tool: "(initialize)", args: "", ua: request.headers.get("user-agent") || "" });
+        }
         if (rpc.method === "initialize" || rpc.method === "tools/list" || rpc.method === "tools/call") {
           const up = await fetch(targetUrl, { method, headers: fwdHeaders, body: reqBody, redirect: "manual" });
           const outH = new Headers(up.headers);
