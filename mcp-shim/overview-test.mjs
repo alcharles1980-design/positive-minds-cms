@@ -35,16 +35,16 @@ const check = (label, cond, detail) => {
   if (!cond) fail++;
 };
 
-function stubFetch({ packsOk = true, statusOk = true } = {}) {
+function stubFetch({ packsOk = true, statusOk = true, status = 503 } = {}) {
   globalThis.fetch = async (url, init) => {
     const body = JSON.parse(init.body);
     const tool = body.params.name;
     if (tool === "list_packs") {
-      if (!packsOk) return new Response("nope", { status: 503 });
+      if (!packsOk) return new Response("nope", { status });
       return Response.json({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: JSON.stringify(PACKS) }] } });
     }
     if (tool === "review_status") {
-      if (!statusOk) return new Response("nope", { status: 503 });
+      if (!statusOk) return new Response("nope", { status });
       return Response.json({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: JSON.stringify(STATUS) }] } });
     }
     throw new Error("unexpected upstream tool: " + tool);
@@ -59,12 +59,12 @@ async function callOverview() {
   });
   const res = await worker.fetch(req, {}, { waitUntil() {} });
   const j = await res.json();
-  return j.result.structuredContent;
+  return { res, j, o: j.result && j.result.structuredContent };
 }
 
 console.log("\nHappy path");
 stubFetch();
-let o = await callOverview();
+let o = (await callOverview()).o;
 check("counts the packs", o.content_status.packs_total === 5, o.content_status.packs_total + " packs");
 check("separates published from draft",
   o.content_status.published === 4 && o.content_status.draft === 1);
@@ -89,7 +89,7 @@ check("passes the review queue through", o.review_queue.by_pack.focus.pending ==
 
 console.log("\nUpstream failure — the case that matters");
 stubFetch({ statusOk: false });
-o = await callOverview();
+o = (await callOverview()).o;
 check("flags the failure instead of reporting a confident zero",
   Array.isArray(o.problems) && o.problems.length === 1, JSON.stringify(o.problems));
 check("headline says PARTIAL, so it cannot be read as complete",
@@ -100,9 +100,26 @@ check("tells the presenter not to pass partial numbers off as complete",
   /do not present partial numbers as complete/.test(o.how_to_show_this));
 
 stubFetch({ packsOk: false, statusOk: false });
-o = await callOverview();
+o = (await callOverview()).o;
 check("both legs failing is reported as two problems", o.problems && o.problems.length === 2);
 check("does not invent packs when the pack list is gone", o.packs.length === 0);
+
+console.log("\nAuth failure must not look like an empty CMS");
+stubFetch({ packsOk: false, statusOk: false, status: 401 });
+let r = await callOverview();
+check("propagates 401 rather than a 200 partial", r.res.status === 401, "HTTP " + r.res.status);
+check("sends WWW-Authenticate so the client re-runs OAuth",
+  /resource_metadata/.test(r.res.headers.get("WWW-Authenticate") || ""),
+  r.res.headers.get("WWW-Authenticate") || "(none)");
+check("returns an error, not a result", !!r.j.error && !r.j.result);
+check("says something a person can act on", /sign in/i.test(r.j.error.message), r.j.error.message);
+stubFetch({ packsOk: false, statusOk: false, status: 403 });
+r = await callOverview();
+check("403 is treated the same way", r.res.status === 403);
+stubFetch({ statusOk: false, status: 503 });
+r = await callOverview();
+check("a genuine outage is still a PARTIAL 200, not a 401",
+  r.res.status === 200 && /^Partial overview/.test(r.o.headline), "HTTP " + r.res.status);
 
 console.log("\nDeclaration");
 globalThis.fetch = async () => Response.json({

@@ -258,7 +258,7 @@ export default {
               headers: h,
               body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: toolName, arguments: {} } }),
             });
-            if (!r.ok) return { __error: "HTTP " + r.status };
+            if (!r.ok) return { __error: "HTTP " + r.status, __status: r.status };
             const j = await r.json().catch(() => null);
             if (!j || j.error) return { __error: (j && j.error && j.error.message) || "no result" };
             const blocks = (j.result && j.result.content) || [];
@@ -270,6 +270,22 @@ export default {
           // One at a time is fine here — two small reads, and it keeps the failure attributable.
           const packsRes = await callUpstream("list_packs");
           const statusRes = await callUpstream("review_status");
+
+          // AUTH FAILURE IS NOT A PARTIAL RESULT. Every other tool answers an unauthenticated call
+          // with 401 + WWW-Authenticate, and that is what makes an MCP client start the OAuth flow.
+          // Composing two reads would otherwise turn a 401 into a cheerful 200 "everything is empty"
+          // — and since overview is now the FIRST call of a session, an expired token would show a
+          // partner an empty CMS and never prompt them to sign in. Propagate the 401 instead.
+          if (packsRes.__status === 401 || statusRes.__status === 401 ||
+              packsRes.__status === 403 || statusRes.__status === 403) {
+            const status = packsRes.__status || statusRes.__status;
+            return new Response(
+              JSON.stringify({ jsonrpc: "2.0", id: rpc.id ?? null,
+                error: { code: -32001, message: "Not authorised — sign in to the connector again." } }),
+              { status, headers: { ...CORS, "Content-Type": "application/json",
+                "WWW-Authenticate": `Bearer resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource"` } },
+            );
+          }
 
           // If either leg fails, SAY SO rather than quietly reporting zeros. A confident "0 questions
           // awaiting review" that actually means "the call failed" is the worst possible output for
