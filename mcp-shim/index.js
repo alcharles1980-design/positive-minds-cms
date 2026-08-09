@@ -318,10 +318,14 @@ export default {
               }
             }
 
+            // WIDGET DISABLED (Aug 2026). The _meta.ui link is what makes the host render the MCP App.
+            // It rendered as an empty card three times running, and worse, it DISPLACED the artifact
+            // path that already worked — the host drew a blank widget instead of letting Claude build
+            // the card from the text result. Removing the link restores the working behaviour.
+            // resources/list and resources/read below still serve the UI resource, so re-enabling is
+            // a one-line change once the widget itself is understood.
             if (rpc.method === "tools/list" && Array.isArray(payload.result.tools)) {
-              // _meta goes INSIDE the tool object, not on the result.
-              payload.result.tools = payload.result.tools.map((t) =>
-                t && t.name === UI_TOOL ? { ...t, _meta: { ui: { resourceUri: UI_URI } } } : t);
+              // (no _meta.ui injection — see above)
             }
 
             if (rpc.method === "tools/call" && rpc.params && rpc.params.name === UI_TOOL) {
@@ -332,7 +336,7 @@ export default {
               if (textBlock) {
                 try { payload.result.structuredContent = JSON.parse(textBlock.text); } catch (_) { /* leave as text */ }
               }
-              payload.result._meta = { ...(payload.result._meta || {}), ui: { resourceUri: UI_URI } };
+              // No _meta.ui here either — see the note above.
             }
           }
 
