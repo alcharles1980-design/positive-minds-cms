@@ -5,8 +5,8 @@
 //
 // Run: node mcp-shim/widget-test.mjs
 import { JSDOM } from "/home/claude/node_modules/jsdom/lib/api.js";
-import { PREVIEW_APP_HTML } from "./preview-app.js";
-import { OVERVIEW_APP_HTML } from "./overview-app.js";
+import { VIEW_HTML as PREVIEW_APP_HTML } from "./view-app.js";
+import { VIEW_HTML as OVERVIEW_APP_HTML } from "./view-app.js";
 
 const QS = Array.from({ length: 12 }, (_, i) => ({
   n: i + 1, pack: "Focus Pack", by: "albert", level_shown: 1,
@@ -233,6 +233,15 @@ await settle();
 check("a partial overview says so on the face of it",
   /could not be loaded/.test(w3.document.body.textContent) &&
   w3.document.querySelectorAll(".warn").length === 1);
+
+console.log("\nOne view, both payloads");
+check("both URIs are served by the SAME file", PREVIEW_APP_HTML === OVERVIEW_APP_HTML);
+check("that one file carries both renderers",
+  PREVIEW_APP_HTML.includes("renderPreviews") && PREVIEW_APP_HTML.includes("renderOverview"));
+check("and dispatches on payload SHAPE, not on which tool the host thinks it is showing",
+  PREVIEW_APP_HTML.includes("function classify("));
+check("lifecycle code exists exactly once (no second copy to drift)",
+  PREVIEW_APP_HTML.split("ui/notifications/size-changed").length - 1 === 1);
 
 console.log(fail === 0 ? "\nALL WIDGET CHECKS PASS\n" : "\n" + fail + " CHECK(S) FAILED\n");
 process.exit(fail === 0 ? 0 : 1);

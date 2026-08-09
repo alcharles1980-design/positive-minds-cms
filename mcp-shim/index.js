@@ -35,8 +35,7 @@ const SUPABASE = "https://tytrmjjucqijzcrbwjfm.supabase.co";
 //   resources/list  → declare the ui:// resource
 //   resources/read  → return the HTML with mimeType text/html;profile=mcp-app
 //   tools/call      → return content AND structuredContent
-import { PREVIEW_APP_HTML } from "./preview-app.js";
-import { OVERVIEW_APP_HTML } from "./overview-app.js";
+import { VIEW_HTML } from "./view-app.js";
 
 // TEMPORARY diagnostic: which tool is the client actually calling? Remove once resolved.
 const TOOL_LOG_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5dHJtamp1Y3FpanpjcmJ3amZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMwOTMyNDgsImV4cCI6MjA5ODY2OTI0OH0.KlFsPm7M015tflKE-jDjIstD_ZoCaz0jROUAoksJxOs";
@@ -382,12 +381,18 @@ export default {
             ],
             what_you_cannot_do: "Approve. Nothing written here reaches a child until a human approves it in the CMS — " +
               "pm_review_approve is the only route a question takes into a pack, and it is not exposed as a tool.",
-            how_to_show_this: "Give the person a SHORT orientation, not this JSON. Lead with the headline. " +
-              "List the packs that have something in them (live or awaiting) with their counts, and say how many " +
-              "of the remaining packs are empty rather than listing them all. Then offer the options in " +
-              "what_you_can_do in plain language — not tool names — and let them pick. Mention what_you_cannot_do " +
-              "once, plainly, so nobody assumes their questions are live. If problems is present, say so up front; " +
-              "do not present partial numbers as complete.",
+            how_to_show_this: "Give the person a SHORT orientation, not this JSON. In this order:\n" +
+              "1. The headline.\n" +
+              "2. A bulleted list of the packs that have something in them (live or awaiting) with their " +
+              "counts, then one line saying how many of the rest are empty — do not list all fifteen.\n" +
+              "3. A NUMBERED LIST of EVERY item in what_you_can_do, using its \"do\" text. This list is " +
+              "REQUIRED and must be complete — do not summarise it, do not fold it into a sentence, and do " +
+              "not offer two or three options as prose. The people using this connector cannot see a menu " +
+              "anywhere else; if you do not print the list, they do not know what exists. Never show tool " +
+              "names — the \"how\" field is for you, not for them.\n" +
+              "4. what_you_cannot_do, once, plainly, so nobody assumes their questions are live.\n" +
+              "5. Close by asking which number they want.\n" +
+              "If problems is present, say so up front and do not present partial numbers as complete.",
           };
 
           return rpcRes({
@@ -419,7 +424,9 @@ export default {
         // resources/read — hand over the app itself.
         if (rpc.method === "resources/read") {
           const want = rpc.params && rpc.params.uri;
-          const VIEWS = { [UI_URI]: PREVIEW_APP_HTML, [OVERVIEW_URI]: OVERVIEW_APP_HTML };
+          // Both URIs serve the SAME view — the host picks one per connector and does not honour the
+          // per-tool link, so the view dispatches on payload shape instead. See view-app.js.
+          const VIEWS = { [UI_URI]: VIEW_HTML, [OVERVIEW_URI]: VIEW_HTML };
           if (VIEWS[want]) {
             return rpcRes({
               contents: [{
@@ -498,7 +505,11 @@ export default {
                 "and what they can do next — in plain language, never tool names, and never the raw JSON. " +
                 "Do not guess these numbers from memory or from an earlier turn; they change whenever " +
                 "anyone proposes or approves a question.\n" +
-                "Call it again whenever the person asks what they can do, what is here, or where things " +
+                "ALWAYS PRINT THE MENU AS A NUMBERED LIST. When you orient someone, list EVERY capability " +
+                "from what_you_can_do, numbered, one per line. Do not compress it into a sentence and do not " +
+                "pick a few to mention — a partner has no other way to discover what this connector does, and " +
+                "prose buries it. Then ask which number they want.\n" +
+                "Call overview again whenever the person asks what they can do, what is here, or where things " +
                 "stand.\n\n";
               if (typeof payload.result.instructions === "string" &&
                   !payload.result.instructions.startsWith("ORIENT FIRST")) {
@@ -556,8 +567,9 @@ export default {
             if (rpc.method === "tools/call" && payload.result && rpc.params &&
                 rpc.params.name !== OVERVIEW_TOOL) {
               payload.result.also_available = {
-                note: "Mention these to the person when it is useful — especially if this is the " +
-                      "first thing they have done in the session. Use plain language, never tool names.",
+                note: "If the person has not yet been shown the full menu in this conversation, print " +
+                      "this as a NUMBERED LIST after answering what they asked. They cannot see a menu " +
+                      "anywhere else. Plain language only, never tool names.",
                 you_can_also: [
                   "See or play the questions waiting for review",
                   "Play a pack's live questions as a child sees them",
