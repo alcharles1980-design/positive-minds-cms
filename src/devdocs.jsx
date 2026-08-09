@@ -804,6 +804,42 @@ approval time" and is what review_status reports as approved_but_edited_first.
 the pipeline. An edited item stays pending. Nothing here can put a word in front of a child —
 pm_review_approve is still the only route, and there is deliberately no tool for it.
 
+### How the preview is actually rendered — and the MCP Apps dead end (Aug 2026)
+
+The goal was a PLAYABLE card in chat: the sentence, level tabs, and the two words as tappable buttons
+that go green/red. We built it twice.
+
+**Attempt 1 — MCP Apps (SEP-1865). Correct, and it does not render.** The shim implements the full
+spec: \`initialize\` declares \`resources\` and ECHOES the client's protocolVersion (the mcp function
+hardcodes an older one, and a silent downgrade can stop a host offering UI at all);
+\`_meta.ui.resourceUri\` is injected INSIDE the preview_questions tool object (not on the result — a
+public bug report shows someone putting it at result level, which may be why theirs never worked);
+\`resources/list\` and \`resources/read\` serve a \`ui://positive-minds/question-preview\` resource as
+\`text/html;profile=mcp-app\`; and tools/call returns structuredContent. All five rungs verified over
+the wire.
+
+Claude Web still does not draw it. Instrumentation showed, across five real attempts, that the client
+advertises \`io.modelcontextprotocol/ui\`, accepts our capability declaration and the tool's \`_meta.ui\`
+— and then NEVER CALLS \`resources/list\` or \`resources/read\`. It never reaches for the widget. This
+matches a bug filed against anthropics/claude-ai-mcp: a spec-correct custom connector's widget is not
+rendered by Claude Web, and it is a platform-level gap, not a server problem. Interactive UI is
+currently a reviewed, DIRECTORY-connector feature; submitting a private children's-therapy CMS to a
+public directory is not an appropriate route.
+
+**Attempt 2 — what actually ships.** Claude, given the structured data, will build the interactive
+card itself as an artifact. That was happening by accident, so the shim now makes it deliberate:
+preview_questions results carry a \`how_to_show_this\` instruction telling Claude to render a playable
+artifact and, importantly, NOT to reveal which word is correct before it is tapped. Same experience,
+no platform dependency.
+
+**The MCP Apps layer is left in place and DORMANT.** It is spec-correct and costs nothing; if custom
+connectors are ever enabled it lights up on its own. Do not delete it thinking it is dead code.
+
+**Where this lives, and why it is in the shim not mcp.ts:** the Worker deploys exactly, from the repo,
+via CI. mcp.ts can only be deployed by transcribing ~1,300 lines inline. The shim owns "how a preview
+is presented"; the mcp function owns what a preview IS. If edge-function CI deploys are ever set up,
+the artifact hint belongs in the tool's own note in mcp.ts.
+
 \`check_questions\` is the interesting one: Claude validates its OWN drafts against the real engine
 before proposing, so it catches and fixes the same-length-words bug itself. Verified live — given
 BRIGHT/GENTLE it correctly reported "GENTLE also fits the blank at levels 7, 8, 9, 10 — two correct
@@ -975,6 +1011,10 @@ that network-first caches GETs).
      is; list_packs now includes draft packs and returns status. Plus **review_status**, which tells
      a contributor what happened to what they sent — counts by state, per pack, and the reviewer's
      reject reasons so Claude can avoid repeating a rejected mistake.
+  6. **Playable preview.** Tried MCP Apps (SEP-1865) for a real interactive widget — implemented
+     correctly and verified over the wire, but Claude Web never fetches the resource for a CUSTOM
+     connector (platform gap, matches an open anthropics/claude-ai-mcp issue). Shipped instead by
+     having the tool result ask Claude to render a playable artifact. MCP Apps layer left dormant.
   5. **preview_questions / reject_questions / edit_queued_question** — a pre-approval review surface
      in chat. Preview renders a question as a CHILD sees it at every level, which is the one thing
      no automated check can do (it lets a person judge tone). Reject and edit act only on PENDING
@@ -1969,6 +2009,13 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
 4y. **"It returned 200" is not "it works".** All three base-URL bugs in the OAuth server (http instead
    of https, wrong path, Supabase's INTERNAL hostname) returned a perfectly healthy 200 while telling
    Claude to go somewhere that did not exist. Read what the response SAYS, not just its status code.
+4v. **Check whether the PLATFORM supports a feature before building on it — and instrument the
+   negotiation, not just your own code.** MCP Apps was implemented to spec and verified end to end;
+   Claude Web simply never asks a custom connector for the UI resource. What proved it was logging
+   each rung (did the client advertise ui? did it call resources/list? resources/read?) — without
+   that, "it doesn't render" is indistinguishable from a bug in our own HTML. When a capability is
+   gated to reviewed/directory integrations, no amount of correct implementation will open it.
+   Ship the fallback that works today and leave the correct implementation dormant.
 4z. **A self-test that hard-codes what the CLIENT discovers is not a test.** The MCP self-test drove
    the OAuth flow by calling /register, /authorize and /token at URLs it already knew — so it passed,
    green, repeatedly, while the connector was completely unusable from a real Claude client. The step
@@ -2469,6 +2516,12 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    the thing every automated check misses and the reason the human reviewer exists at all.
    reject and edit act ONLY on pending rows; re-validate every edit with the full engine and refuse
    it if it would break a rule. Do NOT build an approve tool unless tokens carry a role flag.
+   RENDERING THE PREVIEW: the useful form is a PLAYABLE card — sentence, level tabs, two tappable
+   words, green/red on tap, and never reveal which is correct before it is tapped. Do not assume the
+   host will render a custom UI widget for you: MCP Apps (SEP-1865) is implemented here and is inert
+   because Claude Web does not fetch UI resources for custom (non-directory) connectors. The reliable
+   route is to return the structured data plus an explicit instruction telling the assistant to build
+   the interactive card as an artifact.
    THE INVARIANT: pm_review_approve must remain the ONLY route a QUESTION can take into a pack. Never
    add a tool that approves, publishes or edits a live question, or writes pm_questions directly.
    review_status is READ-ONLY and closes the feedback loop that a queue otherwise breaks: a
