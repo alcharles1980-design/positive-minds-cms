@@ -234,6 +234,46 @@ check("a partial overview says so on the face of it",
   /could not be loaded/.test(w3.document.body.textContent) &&
   w3.document.querySelectorAll(".warn").length === 1);
 
+console.log("\nDead-button protection");
+{
+  const sentX = [];
+  const wX = mountOverview(sentX).window;
+  await settle();
+  wX.postMessage({ jsonrpc: "2.0", method: "ui/notifications/tool-result",
+    params: { structuredContent: OVERVIEW } }, "*");
+  await settle();
+  const btn = wX.document.querySelectorAll(".act")[0];
+  btn.dispatchEvent(new wX.Event("click"));
+  await settle();
+  const req = sentX.find((m) => m.method === "ui/message");
+  check("ui/message is sent WITH an id, so the reply can be read", !!(req && req.id != null));
+
+  // Host rejects it — the button must not sit there looking like it worked.
+  wX.postMessage({ jsonrpc: "2.0", id: req.id,
+    error: { code: -32601, message: "Method not found" } }, "*");
+  await settle();
+  check("a rejected message turns the tile into something usable",
+    /Tap to copy/.test(btn.textContent), btn.textContent.trim().slice(0, 44));
+  check("and shows the exact phrase to paste",
+    btn.textContent.includes(OVERVIEW.what_you_can_do[0].say));
+  check("the status line names the reason",
+    /not delivered/.test(wX.document.getElementById("status").textContent),
+    wX.document.getElementById("status").textContent);
+}
+{
+  // Silence is the worse case: no reply at all. It must still not leave a dead button.
+  const sentY = [];
+  const wY = mountOverview(sentY).window;
+  await settle();
+  wY.postMessage({ jsonrpc: "2.0", method: "ui/notifications/tool-result",
+    params: { structuredContent: OVERVIEW } }, "*");
+  await settle();
+  const b2 = wY.document.querySelectorAll(".act")[1];
+  b2.dispatchEvent(new wY.Event("click"));
+  await new Promise((r) => setTimeout(r, 2800));
+  check("silence from the host also falls back to copy", /Tap to copy/.test(b2.textContent));
+}
+
 console.log("\nOne view, both payloads");
 check("both URIs are served by the SAME file", PREVIEW_APP_HTML === OVERVIEW_APP_HTML);
 check("that one file carries both renderers",

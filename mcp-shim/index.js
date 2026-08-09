@@ -387,9 +387,13 @@ export default {
               "counts, then one line saying how many of the rest are empty — do not list all fifteen.\n" +
               "3. A NUMBERED LIST of EVERY item in what_you_can_do, using its \"do\" text. This list is " +
               "REQUIRED and must be complete — do not summarise it, do not fold it into a sentence, and do " +
-              "not offer two or three options as prose. The people using this connector cannot see a menu " +
-              "anywhere else; if you do not print the list, they do not know what exists. Never show tool " +
-              "names — the \"how\" field is for you, not for them.\n" +
+              "not offer two or three options as prose. Never show tool names — the \"how\" field is for " +
+              "you, not for them.\n" +
+              "   PRINT IT EVEN IF A VISUAL CARD IS ALSO SHOWN. A card may be rendered above your reply " +
+              "with the same options on it. That is NOT a reason to leave the list out, and the two are " +
+              "not in conflict: the card does not appear in every client, does not survive being scrolled " +
+              "past or exported, and cannot be read back later. The text list is the durable copy. If you " +
+              "find yourself deciding the list would be redundant, print it anyway.\n" +
               "4. what_you_cannot_do, once, plainly, so nobody assumes their questions are live.\n" +
               "5. Close by asking which number they want.\n" +
               "If problems is present, say so up front and do not present partial numbers as complete.",
@@ -505,10 +509,13 @@ export default {
                 "and what they can do next — in plain language, never tool names, and never the raw JSON. " +
                 "Do not guess these numbers from memory or from an earlier turn; they change whenever " +
                 "anyone proposes or approves a question.\n" +
-                "ALWAYS PRINT THE MENU AS A NUMBERED LIST. When you orient someone, list EVERY capability " +
+                "ALWAYS PRINT THE MENU AS A NUMBERED LIST, IN TEXT, IN YOUR REPLY. List EVERY capability " +
                 "from what_you_can_do, numbered, one per line. Do not compress it into a sentence and do not " +
-                "pick a few to mention — a partner has no other way to discover what this connector does, and " +
-                "prose buries it. Then ask which number they want.\n" +
+                "pick a few to mention — prose buries it.\n" +
+                "DO THIS EVEN IF AN INTERACTIVE CARD IS RENDERED ALONGSIDE. The card and the text list are " +
+                "not duplicates of each other: the card is not present in every client and cannot be read " +
+                "back later, so the text is the durable copy. Redundancy here is intentional. Then ask which " +
+                "number they want.\n" +
                 "Call overview again whenever the person asks what they can do, what is here, or where things " +
                 "stand.\n\n";
               if (typeof payload.result.instructions === "string" &&

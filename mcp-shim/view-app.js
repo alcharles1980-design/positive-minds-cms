@@ -99,6 +99,7 @@ export const VIEW_HTML = `<!DOCTYPE html>
 (function(){
   var rpcId = 1, initId = null, initDone = false, DATA = null, ro = null;
   var lastW = -1, lastH = -1, pending = false;
+  var HOSTCAPS = null, msgIds = {};
   function setStatus(t){ var el = document.getElementById('status'); if (el) el.textContent = 'positive minds — ' + t; }
   setStatus('script running');
   window.addEventListener('error', function(e){ setStatus('JS ERROR: ' + (e.message || 'unknown')); });
@@ -160,6 +161,31 @@ export const VIEW_HTML = `<!DOCTYPE html>
       }
     }
     return null;
+  }
+
+  // When ui/message does not work, a tile must still be useful. Show the exact phrase and copy it,
+  // so the partner can paste it rather than be left with a button that does nothing.
+  function fallbackToCopy(btn, text, why){
+    btn.setAttribute('data-state', 'fallback');
+    btn.style.borderColor = '#C2352F';
+    btn.innerHTML = '';
+    var t = document.createElement('span');
+    t.style.cssText = 'font-size:11.5px;font-weight:700;line-height:1.4;display:block';
+    t.textContent = 'Tap to copy, then paste below:';
+    var q = document.createElement('span');
+    q.style.cssText = 'font-size:12px;font-weight:600;color:#4A32B0;line-height:1.4;display:block;margin-top:3px';
+    q.textContent = '\u201C' + text + '\u201D';
+    btn.appendChild(t); btn.appendChild(q);
+    btn.onclick = function(){
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text; document.body.appendChild(ta); ta.select();
+        document.execCommand('copy'); document.body.removeChild(ta);
+        t.textContent = 'Copied \u2014 paste it below.';
+      } catch(e){ t.textContent = 'Select and copy this:'; }
+    };
+    setStatus('ui/message not delivered (' + why + ') \u2014 tiles fall back to copy');
+    reportSize();
   }
 
   function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, function(c){
@@ -228,11 +254,19 @@ export const VIEW_HTML = `<!DOCTYPE html>
       b.innerHTML = '<span class="ic">' + esc(a.icon || '\\u2192') + '</span><span>' + esc(a.do) + '</span>';
       b.onclick = function(){
         // ui/message is a REQUEST in the spec, not a notification. It puts a message in the chat as
-        // if the partner had typed it, which is exactly what a menu should do — no tool names, no
-        // phrasing to learn.
-        request('ui/message', { role: 'user', content: { type: 'text', text: a.say || a.do } });
+        // if the partner had typed it. IT MAY NOT BE SUPPORTED: the spec lists no host capability
+        // for it, so the only way to know is to send one and READ THE REPLY. Firing and forgetting
+        // is how you end up with a button that looks like it worked and did nothing.
+        var id = rpcId++;
+        msgIds[id] = { btn: b, text: a.say || a.do };
+        post({ jsonrpc:'2.0', id: id, method:'ui/message',
+               params:{ role:'user', content:{ type:'text', text: a.say || a.do } } });
         b.style.borderColor = '#6C4CE0';
         b.style.background = '#EEE9FD';
+        b.setAttribute('data-state', 'sent');
+        setTimeout(function(){
+          if (b.getAttribute('data-state') === 'sent') fallbackToCopy(b, a.say || a.do, 'no reply from host');
+        }, 2500);
       };
       menu.appendChild(b);
     });
@@ -317,12 +351,23 @@ export const VIEW_HTML = `<!DOCTYPE html>
 
     // The handshake RESULT. Everything else the host sends comes after we acknowledge this, so a
     // missed reply here means a permanently empty widget.
+    // The reply to a ui/message we sent. This is the only way to learn whether the host supports it.
+    if (m.id != null && msgIds[m.id]){
+      var rec = msgIds[m.id]; delete msgIds[m.id];
+      if (m.error){ fallbackToCopy(rec.btn, rec.text, m.error.message || ('error ' + m.error.code)); }
+      else { rec.btn.setAttribute('data-state', 'ok'); setStatus('sent to chat'); }
+      return;
+    }
+
     if (m.id != null && m.id === initId && m.result){
       if (!initDone){
         initDone = true;
+        HOSTCAPS = m.result.hostCapabilities || {};
         applyHostContext(m.result.hostContext || {});
         notify('ui/notifications/initialized', {});
-        setStatus('connected, waiting for data');
+        // Name the host and what it says it supports — one screenshot then explains any dead button.
+        var hn = (m.result.hostInfo && m.result.hostInfo.name) || 'host';
+        setStatus('connected to ' + hn + ' [' + Object.keys(HOSTCAPS).join(',') + ']');
         reportSize();
       }
       return;
