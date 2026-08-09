@@ -73,7 +73,7 @@ function _extends(){return _extends=Object.assign?Object.assign.bind():function(
 //   - App shell (auth gate, routing via history, command surface)
 // ============================================================
 // ---------- config ----------
-const CFG={build:"2026.07.15-18",// bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+const CFG={build:"2026.07.15-19",// bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
 url:"https://tytrmjjucqijzcrbwjfm.supabase.co",key:"sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",adminEmail:"admin@positiveminds.app",sessionStore:"pm_admin_session_v2",sessionMaxAgeMs:7*24*60*60*1000,// keep users logged in for 7 days
 pageSize:40};// ============================================================
 // Session + Auth
@@ -2431,6 +2431,15 @@ half-deploying. Albert has chosen not to add it for now, so deploys remain by ha
 4y. **"It returned 200" is not "it works".** All three base-URL bugs in the OAuth server (http instead
    of https, wrong path, Supabase's INTERNAL hostname) returned a perfectly healthy 200 while telling
    Claude to go somewhere that did not exist. Read what the response SAYS, not just its status code.
+4t. **NEVER smoke-test with a WRITE tool against live data.** Verifying the connector after a deploy,
+   I called update_pack on the real Calmness pack to prove the handler worked. It did — and it
+   overwrote that pack's description, which no table records the previous value of, so it was simply
+   gone. The check itself caused the damage. Exercise READ tools (list_packs, get_pack_content,
+   review_status, preview_questions, check_questions) to prove a deploy landed; they cover the same
+   code paths for the purpose of "did the transcription survive". If a write path genuinely must be
+   tested, create a throwaway row first and act on that, or read the current value and put it back.
+   Note the asymmetry: this project has no history table, so an overwrite is unrecoverable while a
+   bad read costs nothing.
 4u. **Any capped read must report the true total.** A tool that returns \`limit(40)\` rows and then
    reports \`count: rows.length\` is lying by omission the moment there are 41. Count separately with a
    head/exact query and return total + showing + truncated, and say so in the note. This project has
