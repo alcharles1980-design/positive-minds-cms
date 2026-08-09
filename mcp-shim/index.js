@@ -14,11 +14,20 @@
 
 const SUPABASE = "https://tytrmjjucqijzcrbwjfm.supabase.co";
 
-// ---- MCP Apps (SEP-1865) UI layer -------------------------------------------------------------
+// ---- MCP Apps (SEP-1865) UI layer — SPEC-CORRECT BUT DORMANT -------------------------------------------------------------
 // The UI is served from HERE rather than the Supabase function for one practical reason: this Worker
 // deploys exactly, via CI, from the repo. The mcp function can only be deployed by transcribing its
 // ~1,300 lines inline, which has already put a placeholder over the live function once. If this
 // proof works, the right home for it is mcp.ts.
+//
+// STATUS (Aug 2026): Claude Web does NOT render MCP App widgets for CUSTOM connectors. Verified
+// over five real attempts: the host negotiates io.modelcontextprotocol/ui, receives our resources
+// capability and the _meta.ui.resourceUri, then NEVER calls resources/list or resources/read — it
+// does not even ask for the widget. Matches a known platform-level gap (anthropics/claude-ai-mcp
+// #471); interactive UI is currently a reviewed, DIRECTORY-connector feature. Left in place because
+// it is spec-correct and costs nothing: if that changes, it lights up on its own.
+// What delivers the interactive card TODAY is the how_to_show_this instruction injected into the
+// tool result below, which makes Claude build the same card as an artifact.
 //
 // What the host does (and what we therefore have to answer):
 //   initialize      → client advertises io.modelcontextprotocol/ui; we must declare `resources`
@@ -31,18 +40,6 @@ import { PREVIEW_APP_HTML } from "./preview-app.js";
 const UI_URI = "ui://positive-minds/question-preview";
 const UI_MIME = "text/html;profile=mcp-app";
 const UI_TOOL = "preview_questions";
-
-// Temporary diagnostic logging so the Worker's own traffic is visible. Remove once confirmed.
-const SHIM_LOG_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5dHJtamp1Y3FpanpjcmJ3amZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMwOTMyNDgsImV4cCI6MjA5ODY2OTI0OH0.KlFsPm7M015tflKE-jDjIstD_ZoCaz0jROUAoksJxOs";
-function shimLog(ctx, entry) {
-  try {
-    ctx.waitUntil(fetch(SUPABASE + "/rest/v1/pm_shim_log", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", apikey: SHIM_LOG_KEY, Authorization: "Bearer " + SHIM_LOG_KEY, Prefer: "return=minimal" },
-      body: JSON.stringify(entry),
-    }).catch(() => {}));
-  } catch (_) { /* never break the request */ }
-}
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -148,7 +145,6 @@ export default {
     const path = url.pathname;
     const ORIGIN = url.origin;
     const PUBLIC_MCP = ORIGIN + "/mcp";
-    shimLog(ctx, { method: request.method, path, ua: request.headers.get("user-agent") || "", status: 0 });
 
     if (request.method === "OPTIONS") return new Response("ok", { headers: CORS });
 
@@ -232,7 +228,6 @@ export default {
 
         // resources/list — declare the UI resource. The Supabase function knows nothing about this.
         if (rpc.method === "resources/list") {
-          shimLog(ctx, { method: "RPC", path: "resources/list", ua: "ui-layer", status: 200 });
           return rpcRes({
             resources: [{
               uri: UI_URI,
@@ -246,7 +241,6 @@ export default {
         // resources/read — hand over the app itself.
         if (rpc.method === "resources/read") {
           const want = rpc.params && rpc.params.uri;
-          shimLog(ctx, { method: "RPC", path: "resources/read:" + (want || "?"), ua: "ui-layer", status: 200 });
           if (want === UI_URI) {
             return rpcRes({
               contents: [{
@@ -282,11 +276,6 @@ export default {
           let payload = null;
           try { payload = JSON.parse(raw); } catch (_) { /* not JSON */ }
           // Unconditional: tells us the branch ran, and whether there was a result to patch.
-          shimLog(ctx, {
-            method: "RPC",
-            path: "patch:" + rpc.method + " status=" + up.status + " hasResult=" + !!(payload && payload.result),
-            ua: "ui-layer", status: up.status,
-          });
           if (!payload) return new Response(raw, { status: up.status, headers: outH });
 
           if (payload && payload.result) {
@@ -295,11 +284,6 @@ export default {
               const caps = (rpc.params && rpc.params.capabilities) || {};
               const uiAsked = JSON.stringify(caps).includes("modelcontextprotocol/ui") ||
                               !!caps["io.modelcontextprotocol/ui"];
-              shimLog(ctx, {
-                method: "RPC",
-                path: "initialize ui=" + uiAsked + " pv=" + ((rpc.params && rpc.params.protocolVersion) || "?"),
-                ua: request.headers.get("user-agent") || "", status: 200,
-              });
               // Declare resources, and ECHO the client's protocol version — the function hardcodes an
               // older one, and a downgrade can stop the host offering UI at all.
               payload.result.capabilities = { ...(payload.result.capabilities || {}), resources: {} };
@@ -319,10 +303,25 @@ export default {
               const blocks = payload.result.content || [];
               const textBlock = blocks.find((c) => c && c.type === "text");
               if (textBlock) {
-                try { payload.result.structuredContent = JSON.parse(textBlock.text); } catch (_) { /* leave as text */ }
+                let data = null;
+                try { data = JSON.parse(textBlock.text); } catch (_) { /* leave as text */ }
+                if (data) {
+                  // THE PART THAT ACTUALLY WORKS TODAY. Claude Web will not render our MCP App widget
+                  // for a custom connector (platform gap — see the header note), but it WILL happily
+                  // build the same thing as an artifact from this data. Asking for it explicitly turns
+                  // that from a lucky accident into reliable behaviour.
+                  data.how_to_show_this =
+                    "Build an interactive artifact so the person can PLAY these, don't just list them. " +
+                    "For each question: show the sentence with the blank exactly as given, tabs to switch " +
+                    "level, and the two words as big tappable buttons. Tapping shows green for the correct " +
+                    "word and red for the other, with a line explaining that if the other word ALSO fits " +
+                    "the blank the question is broken. Do not indicate which is correct before it's tapped, " +
+                    "and don't reorder or reword anything — the point is to see it exactly as a child does.";
+                  textBlock.text = JSON.stringify(data, null, 2);
+                  payload.result.structuredContent = data;
+                }
               }
               payload.result._meta = { ...(payload.result._meta || {}), ui: { resourceUri: UI_URI } };
-              shimLog(ctx, { method: "RPC", path: "tools/call:" + UI_TOOL + " structured=" + !!payload.result.structuredContent, ua: "ui-layer", status: 200 });
             }
           }
 
