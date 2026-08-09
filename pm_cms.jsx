@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.15-13", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.15-14", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -3786,7 +3786,7 @@ not a Supabase JWT). Speaks JSON-RPC 2.0 over Streamable HTTP. Seven tools, deli
 | \`propose_questions\` | — | **the review queue ONLY** |
 | \`create_pack\` | — | a new pack row (published immediately) |
 | \`update_pack\` | — | an existing pack's details (never its slug) |
-| \`review_status\` | the caller's own queue rows + reject reasons | — |
+| \`review_status\` | ALL contributors' queue rows + reject reasons | — |
 
 **PACK CREATION (Aug 2026).** \`create_pack\` mirrors the CMS's own PackEditor + \`savePack\` convention
 EXACTLY — same \`slugify\` as core.jsx, \`sort_order = count + 1\`, emoji default 💪, the same pack-detail
@@ -3810,12 +3810,16 @@ gaps are, instead of guessing. \`list_packs\` includes DRAFT packs as well as pu
 each pack's \`status\`) — otherwise a contributor could not see a pack that was not yet published.
 
 **REVIEW STATUS (Aug 2026).** \`review_status\` closes the feedback loop: a contributor proposes into
-a queue and otherwise never learns what became of it. It reports the CALLER's own submissions
-(awaiting_review / approved / rejected, plus approved_but_edited_first — a useful signal about what
-the reviewer had to fix), a per-pack breakdown, and the reviewer's \`reject_reason\` for recent
-rejections so the same mistake is not repeated. Optional \`pack_slug\` narrows it. PRIVACY BOUNDARY:
-a partner sees their OWN rows in detail; other contributors appear only as an overall pending
-backlog count, never by their content. Read-only.
+a queue and otherwise never learns what became of it. Read-only. Optional \`pack_slug\` narrows it.
+
+VISIBILITY IS SHARED AND EQUAL — every partner sees EVERY contributor's submissions, with
+attribution. An earlier version scoped it to the caller; that was removed because the boundary did
+not hold anywhere else: under the shared-admin model (option B) partners log into the CMS with the
+same credentials and can already see everything. A per-caller filter on this one tool was therefore
+cosmetic, and seeing each other's rejections is the fastest way for a new contributor to learn the
+bar. It returns totals across all contributors, a \`by_contributor\` breakdown (incl.
+approved_but_edited_first per person), \`by_pack\`, the live pending queue with who submitted each
+and when, the reviewer's \`reject_reason\` for recent rejections, and a \`your_own\` convenience block.
 
 \`check_questions\` is the interesting one: Claude validates its OWN drafts against the real engine
 before proposing, so it catches and fixes the same-length-words bug itself. Verified live — given
@@ -4980,7 +4984,9 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    or edits a live question, and never let one write pm_questions directly.
    REVISED Aug 2026: create_pack and update_pack DO write, and that is acceptable, because a pack is a
    CONTAINER, not content — a connector-created pack is EMPTY until Albert approves questions into it.
-   review_status also exists but is READ-ONLY (and scoped to the caller's own rows).
+   review_status also exists but is READ-ONLY. Its visibility is deliberately SHARED (all
+   partners see all submissions) — matching the shared-admin model rather than inventing a boundary
+   the CMS itself does not enforce.
    The blast radius is still "a queue full of things Albert rejects", plus pack names he can rename.
    Deliberately still absent: DELETE for packs (destructive — it takes the questions with it), and
    anything touching a question's live status. If a partner needs those, they belong in the CMS.
@@ -5456,8 +5462,10 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    contributor proposes and never finds out what happened. Report the CALLER's own submissions
    (awaiting / approved / rejected, plus how many were approved only AFTER the reviewer edited them),
    a per-pack breakdown, and the reviewer's reject_reason for recent rejections — that last part is
-   what stops the same mistake being made again. Scope it to the caller: other contributors may
-   appear as an overall backlog COUNT, never by their content.
+   what stops the same mistake being made again. Make visibility SHARED AND EQUAL: every contributor
+   sees every other contributor's submissions, with attribution. Do NOT scope it per-caller unless
+   contributors also have separate CMS logins — otherwise the filter is cosmetic (they can see it all
+   in the CMS anyway) and it hides the rejection feedback that helps everyone.
    Pack tools are allowed because a pack is a CONTAINER, not content: a connector-created pack is
    EMPTY until the reviewer approves questions into it. NEVER add a pack DELETE tool.
    create_pack must mirror the CMS's own PackEditor + savePack convention exactly — the SAME slugify
@@ -8890,7 +8898,7 @@ WHAT I'D LIKE YOU TO DO:
 3. Once I choose, call **get_pack_content** for that pack. Show me its current statistics and a sense of what's already in it. Then we'll write new questions together for that pack.
 4. Before proposing anything, ALWAYS call **check_questions** on our drafts. It checks them against the real game engine AND the pack's existing content, so we never send a duplicate or a broken puzzle. Fix anything it flags, then check again.
 5. When they're clean, call **propose_questions**. That sends them to a human review queue — nothing goes live on its own; a person approves, edits or rejects every one.
-6. If I ask what happened to questions I sent earlier, call **review_status** — it shows how many are still waiting, approved or rejected, and the reviewer's reasons for any rejections. Worth checking before writing more for the same pack.
+6. If I ask about progress or what's pending, call **review_status** — it shows everything across all contributors: what's still waiting, what was approved or rejected, and the reviewer's reasons. Worth checking before writing more for the same pack.
 
 Keep sentences warm, simple and first-person ("I am…", "I feel…"). Prefer fresh words and sentences for variety, but the only hard repetition rule is: don't reproduce an existing question exactly (same sentence AND the same two words).
 

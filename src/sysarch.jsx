@@ -26,7 +26,7 @@ WHAT I'D LIKE YOU TO DO:
 3. Once I choose, call **get_pack_content** for that pack. Show me its current statistics and a sense of what's already in it. Then we'll write new questions together for that pack.
 4. Before proposing anything, ALWAYS call **check_questions** on our drafts. It checks them against the real game engine AND the pack's existing content, so we never send a duplicate or a broken puzzle. Fix anything it flags, then check again.
 5. When they're clean, call **propose_questions**. That sends them to a human review queue — nothing goes live on its own; a person approves, edits or rejects every one.
-6. If I ask what happened to questions I sent earlier, call **review_status** — it shows how many are still waiting, approved or rejected, and the reviewer's reasons for any rejections. Worth checking before writing more for the same pack.
+6. If I ask about progress or what's pending, call **review_status** — it shows everything across all contributors: what's still waiting, what was approved or rejected, and the reviewer's reasons. Worth checking before writing more for the same pack.
 
 Keep sentences warm, simple and first-person ("I am…", "I feel…"). Prefer fresh words and sentences for variety, but the only hard repetition rule is: don't reproduce an existing question exactly (same sentence AND the same two words).
 
