@@ -1,41 +1,26 @@
 // Positive Minds — MCP OAuth discovery shim (Cloudflare Worker)
 //
 // WHY THIS EXISTS
-// The MCP server itself lives in a Supabase edge function at
+// The MCP server itself is a Supabase edge function at
 //   https://tytrmjjucqijzcrbwjfm.supabase.co/functions/v1/mcp
-// Supabase serves functions only under the /functions/v1/<name> path prefix, so it CANNOT serve
-// the OAuth discovery documents at the domain ROOT (/.well-known/...). Claude's custom-connector
-// OAuth flow discovers the authorization server by probing the ORIGIN ROOT
-// (/.well-known/oauth-protected-resource[/mcp] and /.well-known/oauth-authorization-server[/mcp])
-// and by constructing the RFC 8414 host-inserted metadata URL. Against a bare Supabase function
-// every one of those 404s, so Claude never starts the sign-in flow and reports "no tools available."
-//
-// This Worker sits in front on its own origin (…workers.dev), where it CAN serve /.well-known/* at
-// the root. It:
-//   1. serves the two discovery documents itself, advertising THIS worker's URLs; and
-//   2. transparently proxies /mcp, /mcp/authorize, /mcp/token, /mcp/register (and the login form's
-//      POST) through to the unchanged Supabase function.
-// It also rewrites the 401 WWW-Authenticate header to point at its own discovery doc, and rewrites
-// the login page's form action so the browser posts back through this origin. The Supabase function
-// — including all the OAuth 2.1 + PKCE logic — is left exactly as it is.
-//
-// Connector URL for Claude:  https://<this-worker>.workers.dev/mcp
+// Supabase serves functions only under /functions/v1/<name>, so it cannot serve the OAuth discovery
+// documents at the domain ROOT (/.well-known/...), which is where Claude's custom-connector OAuth
+// discovery probes. This Worker sits in front on its own origin (…workers.dev) and:
+//   1. serves the discovery documents at the root (advertising this worker's URLs);
+//   2. serves its OWN sign-in page for the authorize step (CMS-themed, JS submit) so it renders and
+//      submits reliably inside Claude's OAuth window; and
+//   3. proxies everything else (/mcp, /mcp/token, /mcp/register, and the authorize POST) through to
+//      the UNCHANGED Supabase function, which still does all the OAuth 2.1 + PKCE work.
 
 const SUPABASE = "https://tytrmjjucqijzcrbwjfm.supabase.co";
 
-// Fire-and-forget diagnostic logging so the Worker's own traffic (esp. discovery-doc fetches, which
-// never reach Supabase) is visible. Temporary; remove once the connector flow is confirmed.
+// Temporary diagnostic logging so the Worker's own traffic is visible. Remove once confirmed.
 const SHIM_LOG_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5dHJtamp1Y3FpanpjcmJ3amZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMwOTMyNDgsImV4cCI6MjA5ODY2OTI0OH0.KlFsPm7M015tflKE-jDjIstD_ZoCaz0jROUAoksJxOs";
 function shimLog(ctx, entry) {
   try {
     ctx.waitUntil(fetch(SUPABASE + "/rest/v1/pm_shim_log", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        apikey: SHIM_LOG_KEY,
-        Authorization: "Bearer " + SHIM_LOG_KEY,
-        Prefer: "return=minimal",
-      },
+      headers: { "Content-Type": "application/json", apikey: SHIM_LOG_KEY, Authorization: "Bearer " + SHIM_LOG_KEY, Prefer: "return=minimal" },
       body: JSON.stringify(entry),
     }).catch(() => {}));
   } catch (_) { /* never break the request */ }
@@ -43,106 +28,188 @@ function shimLog(ctx, entry) {
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, content-type, mcp-session-id, mcp-protocol-version",
+  "Access-Control-Allow-Headers": "authorization, content-type, mcp-session-id, mcp-protocol-version, x-shim-ajax",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 };
+
+// CMS palette (light theme) — keep in sync with core.jsx.
+const T = {
+  bg: "#F6F5FB", panel: "#FFFFFF", ink: "#191728", ink2: "#4A4763", sub: "#6E6B85",
+  line: "#E4E0F0", lineSoft: "#EFECF7", brand: "#6C4CE0", brand2: "#8A6EF0",
+  brandSoft: "#EEE9FD", brandInk: "#4A32B0", good: "#0E8C7E", warnSoft: "#FBEEDD",
+  warn: "#C06D18", warnInk: "#9C5B14", errBg: "#FDECEC", errLine: "#F3C7C7", errInk: "#C2352F",
+};
+
+// Our own sign-in page. `p` holds the OAuth params pulled from the authorize URL. The Connect button
+// submits via fetch (reliable inside Claude's OAuth window, unlike a native form POST) and then
+// navigates to the callback the server returns.
+function loginPage(p) {
+  const data = JSON.stringify(p).replace(/</g, "\\u003c");
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect to Positive Minds</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:22px;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    background:radial-gradient(1200px 600px at 50% -10%, ${T.brandSoft} 0%, ${T.bg} 55%);color:${T.ink}}
+  .card{background:${T.panel};border:1px solid ${T.line};border-radius:20px;padding:32px 30px;
+    max-width:430px;width:100%;box-shadow:0 18px 50px rgba(25,23,40,.12)}
+  .badge{display:inline-flex;align-items:center;gap:8px;font-size:12px;font-weight:800;
+    letter-spacing:.3px;color:${T.brandInk};background:${T.brandSoft};border:1px solid ${T.line};
+    padding:6px 12px;border-radius:999px;margin-bottom:18px}
+  .dot{width:8px;height:8px;border-radius:999px;background:${T.brand}}
+  h1{margin:0 0 7px;font-size:22px;font-weight:800;letter-spacing:-.3px}
+  .lead{margin:0 0 22px;color:${T.sub};font-size:14px;line-height:1.6}
+  label{display:block;font-size:12px;font-weight:800;color:${T.ink2};margin-bottom:7px;
+    text-transform:uppercase;letter-spacing:.4px}
+  input{width:100%;padding:14px 15px;border:1.5px solid ${T.line};border-radius:12px;font-size:16px;
+    font-family:ui-monospace,Menlo,monospace;background:#FBFAFE;color:${T.ink};transition:border-color .15s,box-shadow .15s}
+  input::placeholder{color:#B7B2CC}
+  input:focus{outline:none;border-color:${T.brand};box-shadow:0 0 0 4px rgba(108,76,224,.14)}
+  button{width:100%;margin-top:18px;padding:14px;border:none;border-radius:12px;background:${T.brand};
+    color:#fff;font-size:15.5px;font-weight:800;cursor:pointer;font-family:inherit;
+    box-shadow:0 6px 18px rgba(108,76,224,.30);transition:background .15s,transform .05s,opacity .15s}
+  button:hover{background:#5B3FCC}
+  button:active{transform:translateY(1px)}
+  button:disabled{opacity:.65;cursor:default;box-shadow:none}
+  .err{display:none;background:${T.errBg};border:1px solid ${T.errLine};color:${T.errInk};
+    padding:12px 14px;border-radius:11px;font-size:13.5px;margin-bottom:18px;line-height:1.5}
+  .note{margin-top:20px;padding-top:18px;border-top:1px solid ${T.lineSoft};font-size:12.5px;
+    color:${T.sub};line-height:1.6}
+  .note b{color:${T.ink2}}
+</style></head><body>
+<div class="card">
+  <span class="badge"><span class="dot"></span>Positive Minds</span>
+  <h1>Connect your account</h1>
+  <p class="lead">Paste the access token you were sent. Once connected, you can write question content just by asking Claude.</p>
+  <div class="err" id="err"></div>
+  <label for="tk">Your access token</label>
+  <input id="tk" type="password" placeholder="pmk_…" autocomplete="off" autocapitalize="off" spellcheck="false" autofocus>
+  <button id="btn" type="button">Connect</button>
+  <div class="note"><b>Everything you write goes to a review queue for approval first</b> — nothing you send goes live on its own.</div>
+</div>
+<script>
+  var P = ${data};
+  var tk = document.getElementById('tk'), btn = document.getElementById('btn'), err = document.getElementById('err');
+  function showErr(m){ err.textContent = m; err.style.display = 'block'; btn.disabled = false; btn.textContent = 'Connect'; }
+  async function connect(){
+    var token = (tk.value || '').trim();
+    err.style.display = 'none';
+    if (!token){ showErr('Please paste your token.'); tk.focus(); return; }
+    btn.disabled = true; btn.textContent = 'Connecting…';
+    try {
+      var params = new URLSearchParams();
+      params.set('token', token);
+      params.set('client_id', P.client_id || '');
+      params.set('redirect_uri', P.redirect_uri || '');
+      params.set('code_challenge', P.code_challenge || '');
+      params.set('state', P.state || '');
+      var r = await fetch(location.pathname, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Shim-Ajax': '1' },
+        body: params.toString(),
+      });
+      var d = await r.json();
+      if (d && d.ok && d.redirect){ window.location.href = d.redirect; return; }
+      showErr((d && d.error) || 'That token was not recognised, or access has been revoked.');
+    } catch (e) {
+      showErr('Something went wrong — please try again.');
+    }
+  }
+  btn.addEventListener('click', connect);
+  tk.addEventListener('keydown', function(e){ if (e.key === 'Enter') connect(); });
+</script>
+</body></html>`;
+}
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
-    const ORIGIN = url.origin;            // https://positive-minds-mcp.<sub>.workers.dev
-    const PUBLIC_MCP = ORIGIN + "/mcp";   // the URL a user enters into Claude as the connector
-    const ua = request.headers.get("user-agent") || "";
-    shimLog(ctx, { method: request.method, path, ua, status: 0 });
+    const ORIGIN = url.origin;
+    const PUBLIC_MCP = ORIGIN + "/mcp";
+    shimLog(ctx, { method: request.method, path, ua: request.headers.get("user-agent") || "", status: 0 });
 
-    if (request.method === "OPTIONS") {
-      return new Response("ok", { headers: CORS });
+    if (request.method === "OPTIONS") return new Response("ok", { headers: CORS });
+
+    const jsonRes = (obj, status = 200) =>
+      new Response(JSON.stringify(obj), { status, headers: { ...CORS, "Content-Type": "application/json" } });
+
+    // ---- 1. OAuth discovery documents at the ORIGIN ROOT ----
+    if (path === "/.well-known/oauth-protected-resource" ||
+        path === "/.well-known/oauth-protected-resource/mcp" ||
+        path === "/mcp/.well-known/oauth-protected-resource") {
+      return jsonRes({ resource: PUBLIC_MCP, authorization_servers: [PUBLIC_MCP], scopes_supported: ["mcp:tools"], bearer_methods_supported: ["header"] });
     }
-
-    const jsonRes = (obj) =>
-      new Response(JSON.stringify(obj), { headers: { ...CORS, "Content-Type": "application/json" } });
-
-    // ---- 1. OAuth discovery documents, served at the ORIGIN ROOT (the whole reason this exists) ----
-    // Cover the root form, the RFC-8414 host-inserted form (…/mcp), and the OIDC path-appended form.
-    if (
-      path === "/.well-known/oauth-protected-resource" ||
-      path === "/.well-known/oauth-protected-resource/mcp" ||
-      path === "/mcp/.well-known/oauth-protected-resource"
-    ) {
-      return jsonRes({
-        resource: PUBLIC_MCP,
-        authorization_servers: [PUBLIC_MCP],
-        scopes_supported: ["mcp:tools"],
-        bearer_methods_supported: ["header"],
-      });
-    }
-    if (
-      path === "/.well-known/oauth-authorization-server" ||
-      path === "/.well-known/oauth-authorization-server/mcp" ||
-      path === "/mcp/.well-known/oauth-authorization-server" ||
-      path === "/.well-known/openid-configuration" ||
-      path === "/.well-known/openid-configuration/mcp"
-    ) {
+    if (path === "/.well-known/oauth-authorization-server" ||
+        path === "/.well-known/oauth-authorization-server/mcp" ||
+        path === "/mcp/.well-known/oauth-authorization-server" ||
+        path === "/.well-known/openid-configuration" ||
+        path === "/.well-known/openid-configuration/mcp") {
       return jsonRes({
         issuer: PUBLIC_MCP,
         authorization_endpoint: PUBLIC_MCP + "/authorize",
         token_endpoint: PUBLIC_MCP + "/token",
         registration_endpoint: PUBLIC_MCP + "/register",
-        response_types_supported: ["code"],
-        grant_types_supported: ["authorization_code"],
-        code_challenge_methods_supported: ["S256"], // OAuth 2.1 / MCP requires PKCE S256
-        token_endpoint_auth_methods_supported: ["none"],
+        response_types_supported: ["code"], grant_types_supported: ["authorization_code"],
+        code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"],
         scopes_supported: ["mcp:tools"],
       });
     }
 
-    // ---- 2. Proxy everything else to the Supabase edge function ----
-    let targetPath;
-    if (path === "/mcp" || path.startsWith("/mcp/")) {
-      targetPath = "/functions/v1" + path;      // /mcp -> /functions/v1/mcp, /mcp/token -> …/mcp/token
-    } else if (path.startsWith("/functions/v1/mcp")) {
-      targetPath = path;                        // passthrough (belt-and-suspenders for the form action)
-    } else {
-      targetPath = "/functions/v1/mcp";         // root or anything else behaves like the MCP endpoint
+    // ---- 2a. Sign-in page: serve OUR OWN (GET /mcp/authorize) ----
+    if (request.method === "GET" && path.endsWith("/mcp/authorize")) {
+      const p = {
+        client_id: url.searchParams.get("client_id") || "",
+        redirect_uri: url.searchParams.get("redirect_uri") || "",
+        code_challenge: url.searchParams.get("code_challenge") || "",
+        state: url.searchParams.get("state") || "",
+      };
+      return new Response(loginPage(p), { status: 200, headers: { ...CORS, "Content-Type": "text/html; charset=utf-8" } });
     }
+
+    // ---- 2b. Sign-in submit from our page (POST /mcp/authorize + X-Shim-Ajax) → JSON ----
+    if (request.method === "POST" && path.endsWith("/mcp/authorize") && request.headers.get("x-shim-ajax")) {
+      const body = await request.arrayBuffer();
+      const up = await fetch(SUPABASE + "/functions/v1/mcp/authorize", {
+        method: "POST",
+        headers: { "Content-Type": request.headers.get("content-type") || "application/x-www-form-urlencoded" },
+        body,
+        redirect: "manual",
+      });
+      if (up.status >= 300 && up.status < 400) {
+        const loc = up.headers.get("location");
+        if (loc) return jsonRes({ ok: true, redirect: loc });
+        return jsonRes({ ok: false, error: "The sign-in server did not return a destination. Please try again." });
+      }
+      // 200 back from Supabase = it re-rendered the login page with an error (bad/expired token).
+      return jsonRes({ ok: false, error: "That token was not recognised, or access has been revoked. Check it and try again, or issue a fresh one." });
+    }
+
+    // ---- 3. Proxy everything else to the Supabase edge function ----
+    let targetPath;
+    if (path === "/mcp" || path.startsWith("/mcp/")) targetPath = "/functions/v1" + path;
+    else if (path.startsWith("/functions/v1/mcp")) targetPath = path;
+    else targetPath = "/functions/v1/mcp";
     const targetUrl = SUPABASE + targetPath + url.search;
 
     const fwdHeaders = new Headers(request.headers);
-    fwdHeaders.delete("host"); // let fetch set the correct Host for Supabase
+    fwdHeaders.delete("host");
     const method = request.method;
-    const body = method === "GET" || method === "HEAD" ? undefined : await request.arrayBuffer();
+    const reqBody = method === "GET" || method === "HEAD" ? undefined : await request.arrayBuffer();
 
-    const upstream = await fetch(targetUrl, { method, headers: fwdHeaders, body, redirect: "manual" });
+    const upstream = await fetch(targetUrl, { method, headers: fwdHeaders, body: reqBody, redirect: "manual" });
 
-    // Is this the login page (HTML we must render + rewrite)? Detect by path — reliable regardless of
-    // what content-type the upstream/proxy reports — as well as by an html content-type.
-    const upstreamCT = upstream.headers.get("content-type") || "";
-    const isAuthorizePage = method === "GET" && path.endsWith("/authorize");
-    const isHtml = isAuthorizePage || upstreamCT.includes("text/html");
-
-    // Copy headers, but DROP the ones that become wrong once we read/transform the body
-    // (content-length, content-encoding, transfer-encoding). Re-add CORS.
     const outHeaders = new Headers(upstream.headers);
     outHeaders.delete("content-length");
     outHeaders.delete("content-encoding");
     outHeaders.delete("transfer-encoding");
     if (outHeaders.has("www-authenticate")) {
-      outHeaders.set(
-        "WWW-Authenticate",
-        `Bearer resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource"`,
-      );
+      outHeaders.set("WWW-Authenticate", `Bearer resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource"`);
     }
     for (const [k, v] of Object.entries(CORS)) outHeaders.set(k, v);
-
-    if (isHtml) {
-      let html = await upstream.text();
-      // The Supabase login page posts to /functions/v1/mcp/authorize; rewrite to our /mcp/authorize
-      // so the browser stays on this origin.
-      html = html.split("/functions/v1/mcp/authorize").join("/mcp/authorize");
-      outHeaders.set("Content-Type", "text/html; charset=utf-8"); // force correct rendering
-      return new Response(html, { status: upstream.status, headers: outHeaders });
-    }
 
     return new Response(upstream.body, { status: upstream.status, headers: outHeaders });
   },
