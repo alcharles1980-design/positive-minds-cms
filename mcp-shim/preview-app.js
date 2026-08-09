@@ -1,18 +1,29 @@
 // The MCP App UI resource — a PLAYABLE question preview.
 //
 // Rendered by the host inside a sandboxed iframe. It speaks raw JSON-RPC over postMessage per
-// SEP-1865 (no SDK dependency), because this Worker has no bundler:
-//   → ui/initialize (request)          then  ui/notifications/initialized (notification)
-//   ← ui/notifications/tool-result     the tool's structuredContent arrives here
-//   ← ui/notifications/host-context-changed   theme / safe-area
+// SEP-1865 (no SDK dependency, because this Worker has no bundler). Full lifecycle:
+//   → ui/initialize (request, carries appInfo + appCapabilities)
+//   ← McpUiInitializeResult (hostContext: theme, containerDimensions, displayMode)
+//   → ui/notifications/initialized     ONLY after the result arrives — the host MUST NOT send
+//                                      anything before it, so getting this wrong stalls everything
+//   ← ui/notifications/tool-input      then
+//   ← ui/notifications/tool-result     the payload arrives here
+//   → ui/notifications/size-changed    CONTINUOUSLY, via ResizeObserver
+//   ← ui/notifications/host-context-changed   theme / display mode / container resize
 //   ← ui/resource-teardown             respond {} and stop
 //
 // WHY PLAYABLE, not just a rendering: tapping GENTLE at level 7 and being told you are wrong is how
 // a person FEELS the same-length bug. Reading "both words are 6 letters" is abstract. This is the
 // judgement the human reviewer exists to make, and no automated check can make it.
 //
-// It is defensive about where the payload lives (structuredContent vs result.structuredContent vs a
-// bare object) because the spec is young and host behaviour still varies.
+// THE HEIGHT BUG (fixed Aug 2026). The first version rendered fine and was CLIPPED to roughly one
+// card, which read as "blank/broken". It never sent ui/notifications/size-changed, so the host had
+// no idea the content was taller than the initial frame. Per the spec, when a host uses flexible
+// dimensions the VIEW owns its height and MUST report it; a min-height in CSS does nothing, because
+// the iframe is sized from outside. Any change to layout here must keep reportSize() reachable.
+//
+// It stays defensive about where the payload lives (structuredContent vs result.structuredContent vs
+// a bare object) because host behaviour still varies.
 
 export const PREVIEW_APP_HTML = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -20,9 +31,9 @@ export const PREVIEW_APP_HTML = `<!DOCTYPE html>
 <title>Question preview</title>
 <style>
   *{box-sizing:border-box}
-  html,body{margin:0;padding:0;min-height:160px}
+  html,body{margin:0;padding:0}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
-    background:#F6F5FB;color:#191728;padding:8px;min-height:160px}
+    background:#F6F5FB;color:#191728;padding:8px}
   .card{background:#fff;border:1px solid #E4E0F0;border-radius:16px;padding:16px 16px 14px;
     margin-bottom:10px;box-shadow:0 2px 10px rgba(25,23,40,.05)}
   .meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;
@@ -55,13 +66,45 @@ export const PREVIEW_APP_HTML = `<!DOCTYPE html>
 <div id="app"><div class="empty">Waiting for data from the host…</div></div>
 <script>
 (function(){
-  var rpcId = 1, initDone = false, DATA = null;
+  var rpcId = 1, initId = null, initDone = false, DATA = null, ro = null;
+  var lastW = -1, lastH = -1, pending = false;
   function setStatus(t){ var el = document.getElementById('status'); if (el) el.textContent = 'PM widget v2 — ' + t; }
   setStatus('script running');
   window.addEventListener('error', function(e){ setStatus('JS ERROR: ' + (e.message || 'unknown')); });
   function post(m){ try { window.parent.postMessage(m, '*'); } catch(e){} }
   function request(method, params){ post({ jsonrpc:'2.0', id: rpcId++, method: method, params: params||{} }); }
   function notify(method, params){ post({ jsonrpc:'2.0', method: method, params: params||{} }); }
+
+  // THE FIX. When the host gives a flexible height (maxHeight, or nothing at all) the iframe is
+  // sized from what we report — not from our CSS. Without this the frame keeps whatever height it
+  // started at and the content is simply cut off, which is what "the widget renders blank" was.
+  function reportSize(){
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(function(){
+      pending = false;
+      var d = document.documentElement;
+      var h = Math.max(d.scrollHeight, document.body ? document.body.scrollHeight : 0);
+      var w = d.clientWidth || d.scrollWidth;
+      if (h === lastH && w === lastW) return;
+      lastH = h; lastW = w;
+      notify('ui/notifications/size-changed', { width: w, height: h });
+    });
+  }
+
+  function applyHostContext(ctx){
+    if (!ctx) return;
+    if (ctx.theme) document.body.classList.toggle('dark', ctx.theme === 'dark');
+    var cd = ctx.containerDimensions;
+    if (cd){
+      var d = document.documentElement;
+      // Fixed => fill the space the host allotted. Flexible => we own the height, up to their cap.
+      if ('height' in cd)          { d.style.height = '100vh'; d.style.maxHeight = ''; }
+      else if (cd.maxHeight != null){ d.style.maxHeight = cd.maxHeight + 'px'; d.style.height = ''; }
+      if ('width' in cd)           { d.style.width = '100vw'; d.style.maxWidth = ''; }
+      else if (cd.maxWidth != null) { d.style.maxWidth = cd.maxWidth + 'px'; d.style.width = ''; }
+    }
+  }
 
   // Find the previews array wherever the host chose to put it.
   function dig(o, depth){
@@ -129,7 +172,7 @@ export const PREVIEW_APP_HTML = `<!DOCTYPE html>
           '<div class="verdict"></div>';
 
         card.querySelectorAll('.lv').forEach(function(b){
-          b.onclick = function(){ sel = parseInt(b.getAttribute('data-j'),10); paint(); };
+          b.onclick = function(){ sel = parseInt(b.getAttribute('data-j'),10); paint(); reportSize(); };
         });
         var verdict = card.querySelector('.verdict');
         card.querySelectorAll('.opt').forEach(function(b){
@@ -141,9 +184,11 @@ export const PREVIEW_APP_HTML = `<!DOCTYPE html>
             verdict.textContent = ok
               ? 'Correct \u2014 that is what the child should pick.'
               : 'Marked wrong. If this word ALSO fits the blank, the question is broken.';
-            notify('ui/notifications/context-update', {
-              text: 'Reviewer tried \"' + w + '\" on Q' + (p.n || (i+1)) + ' \u2014 ' + (ok ? 'correct' : 'marked wrong') + '.'
+            request('ui/update-model-context', {
+              content: [{ type:'text', text:
+                'Reviewer tried \"' + w + '\" on Q' + (p.n || (i+1)) + ' \u2014 ' + (ok ? 'correct' : 'marked wrong') + '.' }]
             });
+            reportSize();
           };
         });
       }
@@ -155,27 +200,67 @@ export const PREVIEW_APP_HTML = `<!DOCTYPE html>
   window.addEventListener('message', function(e){
     var m = e.data;
     if (!m || m.jsonrpc !== '2.0') return;
+
+    // The handshake RESULT. Everything else the host sends comes after we acknowledge this, so a
+    // missed reply here means a permanently empty widget.
+    if (m.id != null && m.id === initId && m.result){
+      if (!initDone){
+        initDone = true;
+        applyHostContext(m.result.hostContext || {});
+        notify('ui/notifications/initialized', {});
+        setStatus('connected, waiting for data');
+        reportSize();
+      }
+      return;
+    }
+
     if (m.method === 'ui/notifications/tool-result' || m.method === 'ui/notifications/tool-input'){
       var found = dig(m.params, 0);
-      setStatus(found ? ('data received — ' + found.length + ' question(s)') : 'message received but no previews array found');
-      if (found){ DATA = found; render(DATA); }
+      if (found){
+        DATA = found;
+        setStatus(found.length + ' question(s)');
+        render(DATA);
+        reportSize();
+      } else if (m.method === 'ui/notifications/tool-result'){
+        setStatus('message received but no previews array found');
+      }
+      return;
+    }
+    if (m.method === 'ui/notifications/tool-cancelled'){
+      setStatus('tool cancelled by host' + (m.params && m.params.reason ? ' — ' + m.params.reason : ''));
       return;
     }
     if (m.method === 'ui/notifications/host-context-changed'){
-      var t = m.params && (m.params.theme || (m.params.hostContext && m.params.hostContext.theme));
-      document.body.classList.toggle('dark', t === 'dark');
+      applyHostContext(m.params || {});
+      reportSize();
       return;
     }
-    if (m.method === 'ui/resource-teardown'){ if (m.id != null) post({ jsonrpc:'2.0', id:m.id, result:{} }); return; }
-    if (m.id != null && m.result && !initDone){ initDone = true; notify('ui/notifications/initialized', {}); }
+    if (m.method === 'ui/resource-teardown'){
+      if (ro) { try { ro.disconnect(); } catch(_){} }
+      if (m.id != null) post({ jsonrpc:'2.0', id:m.id, result:{} });
+      return;
+    }
   });
 
+  if (window.ResizeObserver){
+    ro = new ResizeObserver(function(){ reportSize(); });
+    try { ro.observe(document.documentElement); if (document.body) ro.observe(document.body); } catch(_){}
+  }
+  window.addEventListener('load', reportSize);
+
   setStatus('handshake sent, waiting for host');
-  request('ui/initialize', { protocolVersion: '2026-01-26', capabilities: {} });
+  initId = rpcId++;
+  post({ jsonrpc:'2.0', id: initId, method:'ui/initialize', params:{
+    protocolVersion: '2025-06-18',
+    appInfo: { name: 'Positive Minds question preview', version: '2.0.0' },
+    appCapabilities: { availableDisplayModes: ['inline', 'fullscreen'] }
+  }});
+
   // If the host never handshakes, say so rather than spinning forever.
   setTimeout(function(){
-    if (!DATA) setStatus('NO DATA after 4s — host never sent tool-result');
-  }, 4000);
+    if (!initDone) setStatus('NO HANDSHAKE after 5s — host never answered ui/initialize');
+    else if (!DATA) setStatus('connected but NO DATA after 5s — host never sent tool-result');
+  }, 5000);
 })();
 </script>
 </body></html>`;

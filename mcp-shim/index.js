@@ -318,14 +318,25 @@ export default {
               }
             }
 
-            // WIDGET DISABLED (Aug 2026). The _meta.ui link is what makes the host render the MCP App.
-            // It rendered as an empty card three times running, and worse, it DISPLACED the artifact
-            // path that already worked — the host drew a blank widget instead of letting Claude build
-            // the card from the text result. Removing the link restores the working behaviour.
-            // resources/list and resources/read below still serve the UI resource, so re-enabling is
-            // a one-line change once the widget itself is understood.
+            // WIDGET RE-ENABLED (Aug 2026). The _meta.ui.resourceUri link is what makes the host
+            // render the MCP App. It was removed after the widget came up clipped to about one card
+            // — which read as "blank" — and displaced the artifact path that already worked.
+            // ROOT CAUSE, found from the spec, not from guessing: the view never sent
+            // ui/notifications/size-changed. When a host uses flexible dimensions the VIEW owns its
+            // height and MUST report it; our CSS min-height was irrelevant because the iframe is
+            // sized from outside. preview-app.js now handshakes properly, reads containerDimensions
+            // and reports its height via ResizeObserver. See mcp-shim/widget-test.mjs.
+            // THE FALLBACK STAYS REACHABLE (rule 4.24): the text content block below still carries
+            // the full JSON, so a host without MCP Apps — or with a broken widget — still gets the
+            // playable artifact. The widget's status bar makes its own failure loud rather than
+            // silent. Nested _meta.ui is the current form; flat _meta["ui/resourceUri"] is
+            // deprecated in the spec and deliberately not sent.
             if (rpc.method === "tools/list" && Array.isArray(payload.result.tools)) {
-              // (no _meta.ui injection — see above)
+              for (const t of payload.result.tools) {
+                if (t && t.name === UI_TOOL) {
+                  t._meta = { ...(t._meta || {}), ui: { resourceUri: UI_URI, visibility: ["model", "app"] } };
+                }
+              }
             }
 
             if (rpc.method === "tools/call" && rpc.params && rpc.params.name === UI_TOOL) {
@@ -336,7 +347,7 @@ export default {
               if (textBlock) {
                 try { payload.result.structuredContent = JSON.parse(textBlock.text); } catch (_) { /* leave as text */ }
               }
-              // No _meta.ui here either — see the note above.
+              payload.result._meta = { ...(payload.result._meta || {}), ui: { resourceUri: UI_URI } };
             }
           }
 
