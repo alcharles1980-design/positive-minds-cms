@@ -244,8 +244,12 @@ errBlock +
 '</div></body></html>';
 }
 
+// How many questions a single preview returns. Named so the true total can be reported alongside
+// it, rather than the capped length being mistaken for the whole set.
+const PREVIEW_CAP = 40;
+
 // ============================================================
-// THE TOOLS. Four of them. Deliberately narrow.
+// THE TOOLS. Ten of them. Deliberately narrow: read, propose, preview, and pre-approval fixes only.
 // ============================================================
 const TOOLS = [
   {
@@ -944,30 +948,46 @@ async function callTool(db: any, partner: string, name: string, args: any) {
     // ---- live: the pack's already-approved question bank ----
     if (source === 'live') {
       if (!packFilter) return { error: 'To play a live question bank, say which pack — pass pack_slug.' };
+      // Count the true total separately. Reporting only the capped length silently under-reports once
+      // a pack passes the cap — the exact silent-truncation trap that has bitten this project before.
+      const { count: liveTotal } = await db.from('pm_questions')
+        .select('id', { count: 'exact', head: true })
+        .eq('pack_id', packFilter.id).eq('status', 'active');
       const { data: live } = await db.from('pm_questions')
         .select('id,template,answer,alt_answer')
-        .eq('pack_id', packFilter.id).eq('status', 'active').order('sort_order').limit(40);
+        .eq('pack_id', packFilter.id).eq('status', 'active').order('sort_order').limit(PREVIEW_CAP);
+      const liveShown = (live || []).length;
       return {
         source: `LIVE question bank — pack "${packFilter.name}" (already approved and in the game)`,
-        count: (live || []).length,
+        total_in_pack: liveTotal ?? liveShown,
+        showing: liveShown,
+        truncated: (liveTotal ?? 0) > liveShown,
         previews: (live || []).map((r: any) => ({
-          id: r.id,
+          // NOT a review-queue id — a live question id. Named so it cannot be mistaken for one that
+          // reject_questions/edit_queued_question accept, which only ever take PENDING queue ids.
+          question_id: r.id,
           pack: packFilter.name,
           question: `${(r.answer || '').toUpperCase()} / ${(r.alt_answer || '').toUpperCase()}`,
           at_each_level: renderOne(r),
         })),
-        note: (live || []).length
-          ? 'These are LIVE questions children can already see. Render them as playable cards. They cannot be edited or rejected from here — that is done in the CMS.'
+        note: liveShown
+          ? 'These are LIVE questions children can already see. Render them as playable cards. They cannot be edited or rejected from here — that is done in the CMS.' +
+            ((liveTotal ?? 0) > liveShown ? ` Showing the first ${liveShown} of ${liveTotal} — ask for specific levels or a follow-up batch to see the rest.` : '')
           : 'This pack has no approved questions yet.',
       };
     }
 
     // ---- pending: what is awaiting review ----
+    const qCount = db.from('pm_review_queue').select('id', { count: 'exact', head: true }).eq('status', 'pending');
+    if (packFilter) qCount.eq('pack_id', packFilter.id);
+    const { count: pendingTotal } = await qCount;
+
     const qq = db.from('pm_review_queue')
       .select('id,pack_id,template,answer,alt_answer,provider,frame_slots,created_at')
-      .eq('status', 'pending').order('created_at').limit(40);
+      .eq('status', 'pending').order('created_at').limit(PREVIEW_CAP);
     if (packFilter) qq.eq('pack_id', packFilter.id);
     const { data: queued } = await qq;
+    const pendingShown = (queued || []).length;
 
     const { data: packs } = await db.from('pm_packs').select('id,name').limit(500);
     const packName: Record<string, string> = {};
@@ -975,7 +995,9 @@ async function callTool(db: any, partner: string, name: string, args: any) {
 
     return {
       source: packFilter ? `pending review queue — pack "${packFilter.name}"` : 'pending review queue (all packs)',
-      awaiting: (queued || []).length,
+      total_awaiting: pendingTotal ?? pendingShown,
+      showing: pendingShown,
+      truncated: (pendingTotal ?? 0) > pendingShown,
       previews: (queued || []).map((r: any) => ({
         id: r.id,
         pack: packName[r.pack_id] || 'unknown',
@@ -984,8 +1006,9 @@ async function callTool(db: any, partner: string, name: string, args: any) {
         at_each_level: renderOne(r),
         has_slot_variations: !!(r.frame_slots && Object.keys(r.frame_slots).length),
       })),
-      note: (queued || []).length
-        ? 'Render these as playable cards. The person can reject any with reject_questions (using the id), or fix one with edit_queued_question. APPROVING is not possible here — that is done in the CMS.'
+      note: pendingShown
+        ? 'Render these as playable cards. The person can reject any with reject_questions (using the id), or fix one with edit_queued_question. APPROVING is not possible here — that is done in the CMS.' +
+          ((pendingTotal ?? 0) > pendingShown ? ` Showing the first ${pendingShown} of ${pendingTotal} still waiting.` : '')
         : 'Nothing is awaiting review. If they wanted to play a pack\'s existing questions, call this again with source:"live" and a pack_slug.',
     };
   }

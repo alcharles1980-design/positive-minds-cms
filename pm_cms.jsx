@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.07.15-17", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.07.15-18", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -3838,6 +3838,30 @@ lengths; it cannot tell you whether a sentence is the right thing to teach a chi
 possible. NOTE: frame_slots are NOT resolved (connector questions never set them, and resolveSlots
 would be a fifth parity copy) — rows that have slots are flagged instead of rendered wrong.
 
+**\`preview_questions\` takes \`source\`** — "pending" (default, what is awaiting review) or "live"
+(a pack's already-approved bank, requires \`pack_slug\`). The SERVER fetches and renders either. An
+earlier version achieved the live case by instructing the assistant to call get_pack_content, convert
+____ back to {blank} and remap fields; that worked but was the server's job done by a prompt, and it
+was replaced.
+
+**Truncation is reported, never silent.** A preview returns at most PREVIEW_CAP (40) questions, but
+the TRUE total is counted separately and returned as \`total_in_pack\` / \`total_awaiting\` alongside
+\`showing\` and a \`truncated\` flag, with the note saying so. Reporting only the capped length would
+have quietly told the person "12 questions" when the pack had 90 — the same silent-truncation trap
+that has bitten this project twice before. Not currently reachable (largest pack is 12) — fixed while
+it was still latent.
+
+**The live branch returns \`question_id\`, not \`id\`.** Deliberate: reject_questions and
+edit_queued_question only ever accept PENDING review-queue ids. A field called \`id\` on a live
+question invites feeding it to those tools; it would fail safely ("Review item not found") but the
+naming removes the trap.
+
+**The rendering instruction carries the CMS design tokens** (taken from core.jsx, verified to match):
+background #F6F5FB, white cards with #E4E0F0 borders at 16px radius, ink #191728 / #6E6B85, brand
+#6C4CE0 for the selected level tab and the masked blank, correct #DEF5F1/#0E8C7E/#0A6B60, wrong
+#FDECEC/#C2352F, monospace words — so the playable card looks like part of the product rather than a
+generic widget. If the palette in core.jsx changes, this instruction must change with it.
+
 **\`reject_questions\`** rejects pending items with a required reason, via the existing
 pm_review_reject RPC (which enforces status='pending' itself). GOTCHA: that RPC stamps \`decided_by\`
 from a JWT email claim, which the service-role connector does not have — it would record 'admin'.
@@ -4062,6 +4086,13 @@ that network-first caches GETs).
      is; list_packs now includes draft packs and returns status. Plus **review_status**, which tells
      a contributor what happened to what they sent — counts by state, per pack, and the reviewer's
      reject reasons so Claude can avoid repeating a rejected mistake.
+  7. **Preview tidied + latent truncation bug fixed.** preview_questions gained source pending|live
+     so the server does the work instead of the assistant reshaping data; tool descriptions and
+     connection instructions moved back out of the shim into mcp.ts where they belong; the render
+     instruction now carries the CMS design tokens. Fixed while latent: previews reported the CAPPED
+     length as the total, which would have under-reported once any pack passed 40 — now total/showing/
+     truncated are all returned. Renamed the live branch's \`id\` to \`question_id\` so it cannot be
+     mistaken for a review-queue id. Corrected a stale "THE TOOLS. Four of them" comment (ten).
   6. **Playable preview.** Tried MCP Apps (SEP-1865) for a real interactive widget — implemented
      correctly and verified over the wire, but Claude Web never fetches the resource for a CUSTOM
      connector (platform gap, matches an open anthropics/claude-ai-mcp issue). Shipped instead by
@@ -5031,7 +5062,14 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    the deployed copy and the repo copy stop matching even when behaviour is identical. Rules: after
    ANY inline deploy, fetch the deployed copy back and compare; and never treat "it deployed" as "it
    works" — exercise the changed tool over the wire before moving on.
-   **THE REAL FIX IS CI.** The repo has CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID, which is why the
+   **A CI WORKFLOW NOW EXISTS: .github/workflows/deploy-edge-functions.yml.** It stages the flat
+edge-functions/<slug>.ts into the supabase/functions/<slug>/index.ts layout the CLI wants and deploys
+byte-for-byte, with --no-verify-jwt for the functions that authenticate their own callers (mcp,
+content-api, game-feed, pack-describe) and the JWT gate left on for generate-questions. It is DORMANT
+until a SUPABASE_ACCESS_TOKEN repository secret is added, and fails with a clear error rather than
+half-deploying. Albert has chosen not to add it for now, so deploys remain by hand.
+
+**THE REAL FIX IS CI.** The repo has CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID, which is why the
    site and the mcp-shim Worker deploy automatically and exactly. There is NO SUPABASE_ACCESS_TOKEN,
    which is the only reason edge functions cannot. Adding that one secret would let a workflow run
    supabase functions deploy straight from edge-functions/*.ts, making deployed == repo true by
@@ -5060,6 +5098,14 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
 4y. **"It returned 200" is not "it works".** All three base-URL bugs in the OAuth server (http instead
    of https, wrong path, Supabase's INTERNAL hostname) returned a perfectly healthy 200 while telling
    Claude to go somewhere that did not exist. Read what the response SAYS, not just its status code.
+4u. **Any capped read must report the true total.** A tool that returns \`limit(40)\` rows and then
+   reports \`count: rows.length\` is lying by omission the moment there are 41. Count separately with a
+   head/exact query and return total + showing + truncated, and say so in the note. This project has
+   now hit the silent-truncation class three times (PostgREST's 1,000-row cap, Alpaca's ~2,000-row
+   cap, and this one) — the pattern is always the same: the response looks healthy and the number is
+   simply wrong. Assume every cap will be reached eventually and fix it while it is still latent.
+   Related: name identifiers for what they are. A live-question \`id\` sitting next to tools that take
+   review-queue ids is a trap even when the wrong id fails safely.
 4v. **Check whether the PLATFORM supports a feature before building on it — and instrument the
    negotiation, not just your own code.** MCP Apps was implemented to spec and verified end to end;
    Claude Web simply never asks a custom connector for the UI resource. What proved it was logging
@@ -5567,6 +5613,11 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    the thing every automated check misses and the reason the human reviewer exists at all.
    reject and edit act ONLY on pending rows; re-validate every edit with the full engine and refuse
    it if it would break a rule. Do NOT build an approve tool unless tokens carry a role flag.
+   Give preview_questions a \`source\` of pending|live so the SERVER decides what to fetch; do not push
+   that onto the assistant by telling it to re-shape another tool's output. Cap how many you return,
+   but ALWAYS count the true total separately and return total/showing/truncated — returning only the
+   capped length is silent truncation and it will mislead. Name ids for what they are: a live question
+   id must not be called \`id\` when another tool takes review-queue ids.
    RENDERING THE PREVIEW: the useful form is a PLAYABLE card — sentence, level tabs, two tappable
    words, green/red on tap, and never reveal which is correct before it is tapped. Do not assume the
    host will render a custom UI widget for you: MCP Apps (SEP-1865) is implemented here and is inert
