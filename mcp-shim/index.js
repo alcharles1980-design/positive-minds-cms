@@ -41,6 +41,31 @@ const UI_URI = "ui://positive-minds/question-preview";
 const UI_MIME = "text/html;profile=mcp-app";
 const UI_TOOL = "preview_questions";
 
+// Guidance injected at DECISION time (tools/list) rather than only in the tool's result. Claude picks
+// a tool from its description, so if the description does not say "this is the one for 'let's review
+// the pending questions'", that phrasing lands on review_status and the person gets counts instead of
+// the questions. The rendering instruction has to be here too, for the same reason: by the time the
+// result arrives, the choice of how to present it has often already been made.
+const PREVIEW_DESC_EXTRA =
+  " USE THIS whenever the person says anything like \"preview\", \"let's review the pending questions\", " +
+  "\"show me what's waiting\", \"let's go through the queue\", or \"how would this look in the game\" — " +
+  "with no arguments it returns everything awaiting review. THEN RENDER IT AS A PLAYABLE CARD: build " +
+  "an interactive artifact showing the sentence with the blank exactly as returned, tabs to switch " +
+  "level, and the two words as big tappable buttons that turn green (correct) or red (wrong) when " +
+  "tapped. Never reveal which word is correct before it is tapped, and never reword or reorder " +
+  "anything — the whole point is to see it exactly as a child does. Do not just list them as text.";
+
+const STATUS_DESC_EXTRA =
+  " This returns COUNTS and decisions, not the questions themselves. If the person wants to SEE or go " +
+  "through the actual pending questions, use preview_questions instead.";
+
+const INSTRUCTIONS_EXTRA =
+  " WHEN THE PERSON WANTS TO PREVIEW OR REVIEW PENDING QUESTIONS: call preview_questions (no " +
+  "arguments returns the whole pending queue), then render the result as an interactive, playable " +
+  "artifact — sentence with the blank, level tabs, and the two words as tappable buttons that go " +
+  "green or red, with the correct one hidden until tapped. review_status is for counts and progress, " +
+  "not for showing the questions.";
+
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, content-type, mcp-session-id, mcp-protocol-version, x-shim-ajax",
@@ -290,12 +315,27 @@ export default {
               if (rpc.params && rpc.params.protocolVersion) {
                 payload.result.protocolVersion = rpc.params.protocolVersion;
               }
+              // Connection-level guidance, so the preview/review routing is known from the start.
+              payload.result.instructions = (payload.result.instructions || "") + INSTRUCTIONS_EXTRA;
             }
 
             if (rpc.method === "tools/list" && Array.isArray(payload.result.tools)) {
-              // _meta goes INSIDE the tool object, not on the result.
-              payload.result.tools = payload.result.tools.map((t) =>
-                t && t.name === UI_TOOL ? { ...t, _meta: { ui: { resourceUri: UI_URI } } } : t);
+              // _meta goes INSIDE the tool object, not on the result. Descriptions are augmented here
+              // so the guidance is present when Claude CHOOSES a tool, not just after it calls one.
+              payload.result.tools = payload.result.tools.map((t) => {
+                if (!t) return t;
+                if (t.name === UI_TOOL) {
+                  return {
+                    ...t,
+                    description: (t.description || "") + PREVIEW_DESC_EXTRA,
+                    _meta: { ui: { resourceUri: UI_URI } },
+                  };
+                }
+                if (t.name === "review_status") {
+                  return { ...t, description: (t.description || "") + STATUS_DESC_EXTRA };
+                }
+                return t;
+              });
             }
 
             if (rpc.method === "tools/call" && rpc.params && rpc.params.name === UI_TOOL) {
