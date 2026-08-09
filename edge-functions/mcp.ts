@@ -10,8 +10,11 @@
 //   partner can do — even a compromised one — is fill the review queue with things Albert rejects.
 //   That is the entire blast radius.
 //
-//   There is deliberately NO tool to publish, delete, or edit a pack. If a partner needs to do more
-//   than propose content, they should be in the CMS, not a chat window.
+//   Partners CAN create a pack (create_pack) and edit a pack's details (update_pack) — a decision
+//   taken in Aug 2026 so a contributor can set up a new theme and write into it without waiting.
+//   That does not weaken the guarantee above: a pack is only a container. Its QUESTIONS still go
+//   solely to the review queue, so a new pack is simply empty until Albert approves content into it.
+//   There is still deliberately NO tool to DELETE a pack, and none to approve or publish a question.
 //
 // AUTH: OAuth 2.1 with PKCE. This is NOT optional — Claude's "Add custom connector" screen offers a
 // URL and an OAuth client ID/secret, and NOTHING else. There is no field to paste a bearer token, so
