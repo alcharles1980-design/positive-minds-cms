@@ -834,37 +834,60 @@ approval time" and is what review_status reports as approved_but_edited_first.
 the pipeline. An edited item stays pending. Nothing here can put a word in front of a child —
 pm_review_approve is still the only route, and there is deliberately no tool for it.
 
-### How the preview is rendered — and the MCP Apps widget, now DISABLED
+### How the preview is rendered — BOTH paths now work
 
 The goal was a PLAYABLE card in chat: sentence, level tabs, two tappable words going green/red.
+There are two ways it can happen, and as of Aug 2026 both are live.
 
-**What ships, and works: an ARTIFACT.** preview_questions returns structured data, and the tool
-description asks the assistant to build the interactive card as an artifact. That is what the person
-actually sees and uses. No platform dependency.
+**Path 1 — the ARTIFACT (always available, no platform dependency).** preview_questions returns
+structured data and the tool description asks the assistant to build the card as an artifact. This
+is the FALLBACK and it must stay working: any host without MCP Apps support gets this, and so does
+any session whose tools/list predates the widget being enabled.
 
-**What does NOT ship: the MCP Apps (SEP-1865) widget.** It is fully implemented in mcp-shim/ —
-resources/list, resources/read serving a ui:// resource as text/html;profile=mcp-app, capability
-declaration, echoed protocolVersion — and all of it verified over the wire. It is DISABLED by one
-omission: the shim no longer injects _meta.ui.resourceUri into tools/list or tools/call, and that
-link is the only thing that makes a host render an MCP App. Re-enabling is a one-line change.
+**Path 2 — the MCP Apps (SEP-1865) WIDGET, verified rendering Aug 2026.** The shim serves a ui://
+resource as text/html;profile=mcp-app via resources/list + resources/read, and injects
+_meta.ui.resourceUri INSIDE the preview_questions tool object in tools/list (nested form; the flat
+_meta["ui/resourceUri"] is deprecated in the spec and deliberately not sent). The view itself is
+mcp-shim/preview-app.js, raw JSON-RPC over postMessage, no SDK, because the Worker has no bundler.
 
-WHY IT IS DISABLED, and this is the important part: it rendered as an EMPTY card three times running,
-and worse, it DISPLACED the artifact path that already worked. The host drew a blank widget instead
-of letting the assistant build the card, and the assistant reported "all 12 are up" because from its
-side the widget had rendered. A working feature was regressed by an attempt to improve it, and the
-failure was invisible from the inside. If you add a UI layer over something that already works, make
-sure failure is visible — here it was not.
+THE BUG THAT MADE IT LOOK IMPOSSIBLE, and it is worth knowing exactly what it was. For three
+iterations the widget was described as rendering BLANK, and the file recorded a platform gap as the
+likely cause. It was never blank. It was CLIPPED to about one card's header. The evidence was in the
+screenshot the whole time: the diagnostic status bar read "data received — 12 question(s)" and the
+first card's chips were drawing. The host had fetched the resource, the view had mounted, the data
+had arrived.
 
-WHAT REMAINS UNKNOWN: the widget stayed blank even with an always-present status bar, a forced 160px
-min-height and a solid background — so not even STATIC markup appeared. That points at the iframe
-never running the HTML rather than at the renderer, but it was never confirmed. If this is revisited,
-confirm that first and do not iterate blind: the status bar being present or absent settles it in one
-look, and a beacon fetch (with the worker origin declared in _meta.ui.csp.resourceDomains, since the
-sandbox blocks undeclared domains) would settle it without a person having to describe anything.
+The actual cause: the view never sent \`ui/notifications/size-changed\`. Per SEP-1865, when a host
+uses FLEXIBLE dimensions (maxHeight, or nothing at all) the VIEW owns its height and MUST report it,
+and the host resizes the iframe to match. The min-height:160px that had been added to force the issue
+could never have worked — an iframe is sized from OUTSIDE, so its own stylesheet cannot make it
+taller. Three further deviations were found in the same reading of the spec: ui/initialize sent the
+wrong params (it wants appInfo + appCapabilities, and availableDisplayModes is what lets a host offer
+fullscreen); the initialize RESULT was never read, discarding hostContext.containerDimensions, theme
+and displayMode; and \`ui/notifications/context-update\` is not a method in the spec at all, so every
+reviewer interaction had been posting into the void — the real one is the ui/update-model-context
+REQUEST.
 
-An earlier conclusion in this file said Claude Web never fetches the UI resource for a CUSTOM
-connector. That no longer holds — the host did render the widget frame. Treat the platform's
-behaviour here as moving, and re-check rather than trusting either conclusion.
+The lesson is not about iframes. Three sessions were spent iterating against a guess when the answer
+was in the specification, and a screenshot that showed the widget half-working was read as showing it
+not working at all. See rules 4.33 and 4.21.
+
+**Regression safety.** The text content block still carries the full JSON, so path 1 stays reachable
+if the widget fails or the host does not support it. The status bar in the view is permanent and
+deliberate: it states its own state ("handshake sent", "NO HANDSHAKE after 5s", "12 question(s)"), so
+a failure is loud rather than silent. That is rule 4.24, which this feature broke once already.
+
+**Test:** mcp-shim/widget-test.mjs drives the view through the real lifecycle in jsdom — handshake,
+capabilities, containerDimensions applied, one card per question, level tabs, correct answer not
+revealed before tapping, size reported AND tracking content (2,580px for 12 cards, not 60), spec
+method used for context updates, teardown answered. 15 checks. Run it with node directly; it is not
+in npm test because it needs jsdom, which is not a dependency of the site build.
+CAVEAT, per rule 4.20: this harness MODELS the host, so it can only catch bugs that were modelled.
+It is not proof of a render. The render was confirmed by a person looking at a real client.
+
+**If you change the widget's layout, keep reportSize() reachable.** Anything that changes height —
+level taps, answer taps, theme, font loading, wrapping — must end up calling it, or the frame will
+be wrong again in exactly the way that cost three sessions.
 
 ### The preview payload is QUESTION-FIRST, on purpose
 
@@ -905,36 +928,39 @@ approval time" and is what review_status reports as approved_but_edited_first.
 the pipeline. An edited item stays pending. Nothing here can put a word in front of a child —
 pm_review_approve is still the only route, and there is deliberately no tool for it.
 
-### How the preview is actually rendered — and the MCP Apps dead end (Aug 2026)
+### How the preview is rendered — the MCP Apps route, and what the "dead end" really was
 
-The goal was a PLAYABLE card in chat: the sentence, level tabs, and the two words as tappable buttons
-that go green/red. We built it twice.
+This section previously recorded MCP Apps as a platform-level dead end. That conclusion was WRONG,
+and it is left here in corrected form because the way it went wrong is the useful part.
 
-**Attempt 1 — MCP Apps (SEP-1865). Correct, and it does not render.** The shim implements the full
-spec: \`initialize\` declares \`resources\` and ECHOES the client's protocolVersion (the mcp function
+**The MCP Apps route (SEP-1865) works and is enabled.** The shim implements every rung to spec:
+\`initialize\` declares \`resources\` and ECHOES the client's protocolVersion (the mcp function
 hardcodes an older one, and a silent downgrade can stop a host offering UI at all);
-\`_meta.ui.resourceUri\` is injected INSIDE the preview_questions tool object (not on the result — a
-public bug report shows someone putting it at result level, which may be why theirs never worked);
-\`resources/list\` and \`resources/read\` serve a \`ui://positive-minds/question-preview\` resource as
-\`text/html;profile=mcp-app\`; and tools/call returns structuredContent. All five rungs verified over
-the wire.
+\`_meta.ui.resourceUri\` is injected INSIDE the preview_questions tool object, not on the result;
+\`resources/list\` and \`resources/read\` serve \`ui://positive-minds/question-preview\` as
+\`text/html;profile=mcp-app\`; and tools/call returns structuredContent. All verified over the wire.
 
-Claude Web still does not draw it. Instrumentation showed, across five real attempts, that the client
-advertises \`io.modelcontextprotocol/ui\`, accepts our capability declaration and the tool's \`_meta.ui\`
-— and then NEVER CALLS \`resources/list\` or \`resources/read\`. It never reaches for the widget. This
-matches a bug filed against anthropics/claude-ai-mcp: a spec-correct custom connector's widget is not
-rendered by Claude Web, and it is a platform-level gap, not a server problem. Interactive UI is
-currently a reviewed, DIRECTORY-connector feature; submitting a private children's-therapy CMS to a
-public directory is not an appropriate route.
+**THE FALSE CONCLUSION, and how it survived five attempts.** This file used to state that Claude Web
+advertises \`io.modelcontextprotocol/ui\`, accepts the capability declaration and the tool's
+\`_meta.ui\`, and then NEVER calls \`resources/list\` or \`resources/read\` — a platform gap matching a
+public bug report, unfixable from here. Every part of that was mistaken. The host did fetch the
+resource and did mount the view. What looked like "never reaches for the widget" was a view that
+mounted, received its data, rendered, and was then CLIPPED to about one card because it never
+reported its height (see the section above for the mechanism and the three other spec deviations).
 
-**Attempt 2 — what actually ships.** Claude, given the structured data, will build the interactive
+Two things kept the wrong answer alive. First, a screenshot showing the widget HALF working — status
+bar populated, first card drawing — was read as showing it not working. Second, a matching public bug
+report made the platform explanation feel confirmed; it was pattern-matched to, not tested against.
+The instrumentation that "showed" resources/read was never called was measuring the wrong thing.
+
+**Both paths ship.** The artifact path stays as the fallback:  Claude, given the structured data, will build the interactive
 card itself as an artifact. That was happening by accident, so the shim now makes it deliberate:
 preview_questions results carry a \`how_to_show_this\` instruction telling Claude to render a playable
 artifact and, importantly, NOT to reveal which word is correct before it is tapped. Same experience,
 no platform dependency.
 
-**The MCP Apps layer is left in place and DORMANT.** It is spec-correct and costs nothing; if custom
-connectors are ever enabled it lights up on its own. Do not delete it thinking it is dead code.
+**The MCP Apps layer is ACTIVE, not dormant.** Earlier text here said to leave it in place because it
+might light up one day. It has. Do not delete it and do not treat it as speculative.
 
 **Where this lives, and why it is in the shim not mcp.ts:** the Worker deploys exactly, from the repo,
 via CI. mcp.ts can only be deployed by transcribing ~1,300 lines inline. The shim owns "how a preview
@@ -1121,7 +1147,8 @@ NOT AUTOMATED, AND THE MAIN SOURCE OF RISK
 TEMPORARY THINGS STILL IN PLACE (remove when convenient)
 - Table pm_tool_log and the toolLog() calls in mcp-shim/index.js — diagnostic logging that records
   which tool a client actually calls. It is what made the routing bug findable; harmless but noise.
-- The MCP Apps widget code in mcp-shim/ is dormant (see the widget section). Not dead code.
+- (The MCP Apps widget is no longer here. It is ACTIVE and verified rendering — see the widget
+  section. It is not temporary and must not be removed.)
 
 KNOWN OUTSTANDING (not bugs in the code)
 - Admin password is weak, and Supabase leaked-password protection is off. One shared admin account is
@@ -1177,13 +1204,17 @@ KNOWN OUTSTANDING (not bugs in the code)
      pending|live; instructions now route by intent rather than opening with "ALWAYS call list_packs
      first" (which was hijacking preview requests into showing level rules); the payload was
      restructured QUESTION-FIRST after the level-shaped version kept being summarised as levels; the
-     render instruction carries the CMS design tokens. The MCP Apps widget was enabled, rendered
-     blank three times, was found to be DISPLACING the working artifact path, and was disabled by
-     removing the _meta.ui link. Also fixed while latent: capped reads now report the true total.
+     render instruction carries the CMS design tokens. The MCP Apps widget was enabled, appeared to
+     render blank three times, was found to be DISPLACING the working artifact path, and was disabled
+     by removing the _meta.ui link. Also fixed while latent: capped reads now report the true total.
+     [SUPERSEDED — see item 9. It was never blank; it was clipped, because the view never reported
+     its height. The widget is now enabled and confirmed rendering.]
   6. **Playable preview.** Tried MCP Apps (SEP-1865) for a real interactive widget — implemented
-     correctly and verified over the wire, but Claude Web never fetches the resource for a CUSTOM
-     connector (platform gap, matches an open anthropics/claude-ai-mcp issue). Shipped instead by
-     having the tool result ask Claude to render a playable artifact. MCP Apps layer left dormant.
+     correctly and verified over the wire, but concluded Claude Web never fetches the resource for a
+     CUSTOM connector (platform gap, matching an open anthropics/claude-ai-mcp issue). Shipped
+     instead by having the tool result ask Claude to render a playable artifact.
+     [SUPERSEDED — see item 9. The platform-gap conclusion was WRONG; the host does fetch and render.
+     The artifact path remains as the fallback, which is why it was worth building.]
   5. **preview_questions / reject_questions / edit_queued_question** — a pre-approval review surface
      in chat. Preview renders a question as a CHILD sees it at every level, which is the one thing
      no automated check can do (it lets a person judge tone). Reject and edit act only on PENDING
@@ -2120,6 +2151,25 @@ there were two 4t, two 4u, two 4r, two 4s, two 4v and two 4d, so "see rule 4t" w
    the edge function didn't, so a question with its own letter_position rendered differently
    in-game than in the CMS.) After any engine edit, diff the two by fetching the deployed edge
    function and comparing, or run a parity test with a question that has its own overrides.
+4.33. **Read the specification before diagnosing, and believe a screenshot over a theory.**
+   The preview widget was called "blank" for three sessions. It was never blank. It was CLIPPED to
+   about one card, and the proof was sitting in a screenshot the whole time: the diagnostic status
+   bar read "data received — 12 question(s)" and the first card's chips were drawing. A view that
+   mounts, receives data and renders is not a view the host refused to fetch. The reported symptom
+   ("it's blank") was accepted as an observation when it was already an interpretation.
+   THE ACTUAL CAUSE, found by reading SEP-1865 rather than iterating: a view must send
+   \`ui/notifications/size-changed\`. Under flexible dimensions the VIEW owns its height and the host
+   resizes the iframe to what it reports. Ours never sent it once. The min-height:160px added to
+   force the issue could never have worked — an iframe is sized from OUTSIDE, so its own stylesheet
+   cannot make it taller. Reading the spec properly turned up three more deviations in the same pass:
+   wrong ui/initialize params, the initialize RESULT never read (discarding containerDimensions,
+   theme, displayMode), and a \`ui/notifications/context-update\` method that does not exist, so every
+   reviewer interaction had been going nowhere.
+   THE RULE: when integrating against a published spec, the cost of reading it is one session and the
+   cost of not reading it was three. Before iterating on a symptom, (a) go to the primary
+   specification, not blog posts or an issue tracker; (b) re-read the evidence you already have and
+   ask what it PROVES rather than what it suggests; (c) distrust any hypothesis that conveniently
+   makes the problem someone else's. See also 4.21.
 4.32. **Questions are never pre-rendered — level rules propagate live.** A question row stores only
    its template + answer/alt + optional own overrides. Its level-variations (masked blanks, one per pm_levels row) are
    COMPUTED ON DEMAND by buildLevelVariants from the current pm_levels rows every time — in the CMS
@@ -2202,10 +2252,15 @@ half-deploying. Albert has chosen not to add it for now, so deploys remain by ha
    wrongly, look at what dominates the payload before writing another instruction.
 4.24. **Do not let a nicer version regress a working one, and make failure visible if you try.**
    The preview already worked: the assistant built a playable card from the data. Adding an MCP Apps
-   widget made the host render the widget INSTEAD — blank — and the assistant still reported success,
-   because from its side the widget had rendered. A working feature was replaced by a broken one and
+   widget made the host render the widget INSTEAD — and the assistant still reported success, because
+   from its side the widget had rendered. A working feature was replaced by a broken-looking one and
    the failure was invisible from the inside. If you layer a new renderer over a working path, keep
    the old path reachable and make the new one fail loudly.
+   (The widget was later found to be CLIPPED, not blank — see rule 4.33. That does not weaken this
+   rule, it vindicates it: the rollback kept a working preview available for three sessions while the
+   real cause was still misdiagnosed. The widget now ships WITH this rule satisfied — the text content
+   block still carries the full JSON so the artifact path stays reachable, and the view's status bar
+   announces its own state, so a failure is loud rather than silent.)
 4.23. **NEVER smoke-test with a WRITE tool against live data.** Verifying the connector after a deploy,
    I called update_pack on the real Calmness pack to prove the handler worked. It did — and it
    overwrote that pack's description, which no table records the previous value of, so it was simply
@@ -2223,13 +2278,24 @@ half-deploying. Albert has chosen not to add it for now, so deploys remain by ha
    simply wrong. Assume every cap will be reached eventually and fix it while it is still latent.
    Related: name identifiers for what they are. A live-question \`id\` sitting next to tools that take
    review-queue ids is a trap even when the wrong id fails safely.
-4.21. **Check whether the PLATFORM supports a feature before building on it — and instrument the
-   negotiation, not just your own code.** MCP Apps was implemented to spec and verified end to end;
-   Claude Web simply never asks a custom connector for the UI resource. What proved it was logging
-   each rung (did the client advertise ui? did it call resources/list? resources/read?) — without
-   that, "it doesn't render" is indistinguishable from a bug in our own HTML. When a capability is
-   gated to reviewed/directory integrations, no amount of correct implementation will open it.
-   Ship the fallback that works today and leave the correct implementation dormant.
+4.21. **Instrument the negotiation, not just your own code — and do not let a plausible external
+   explanation end the investigation.**
+   ORIGINAL FORM: this rule said MCP Apps was implemented to spec but Claude Web never asks a custom
+   connector for the UI resource, so no amount of correct implementation would open it. THAT WAS
+   FALSE, and it was believed for three sessions. The host did fetch the resource and did render the
+   view; it was clipped because the view never reported its height (rule 4.33).
+   WHAT ACTUALLY WENT WRONG is worth more than the original advice. An open bug report existed that
+   matched the symptom, so the symptom was pattern-matched to it and treated as confirmed. A
+   screenshot showing the widget HALF working — status bar populated, first card drawing — was read
+   as showing it not working at all. The rung-logging that supposedly proved resources/read was never
+   called was measuring the wrong thing, and its result was never sanity-checked against the
+   screenshot sitting in the same conversation.
+   THE RULE: instrumenting each rung is still right. But an external cause (platform gap, upstream
+   bug, someone else's issue tracker) is the most comfortable answer available and therefore the one
+   to distrust most. Before accepting it, state what you would expect to see if the cause were LOCAL,
+   and go and check that. Here the local hypothesis predicted exactly what the screenshot showed.
+   AND: ship the fallback that works today anyway. That part held up — the artifact path is why there
+   was something usable throughout, and it is still the fallback for hosts without MCP Apps.
 4.20. **A self-test that hard-codes what the CLIENT discovers is not a test.** The MCP self-test drove
    the OAuth flow by calling /register, /authorize and /token at URLs it already knew — so it passed,
    green, repeatedly, while the connector was completely unusable from a real Claude client. The step
@@ -2757,16 +2823,30 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    as a table of level rules no matter what the instructions say. Default to ONE level.
    ROUTE INSTRUCTIONS BY INTENT, not as one chain. An unconditional "always call X first" will hijack
    every unrelated request; say what to do for previewing, for writing, for progress, separately.
-   MCP APPS: an interactive widget is possible (tools declare _meta.ui.resourceUri, the server serves
-   a ui:// HTML resource). It is implemented here and DISABLED, because it rendered blank and
-   displaced the artifact path that worked. Ship the artifact version first; only add a widget if you
-   can make its failure visible.
    RENDERING THE PREVIEW: the useful form is a PLAYABLE card — sentence, level tabs, two tappable
-   words, green/red on tap, and never reveal which is correct before it is tapped. Do not assume the
-   host will render a custom UI widget for you: MCP Apps (SEP-1865) is implemented here and is inert
-   because Claude Web does not fetch UI resources for custom (non-directory) connectors. The reliable
-   route is to return the structured data plus an explicit instruction telling the assistant to build
-   the interactive card as an artifact.
+   words, green/red on tap, and never reveal which is correct before it is tapped. BUILD TWO ROUTES
+   TO IT, in this order.
+   ROUTE 1, always: return the structured data plus an explicit instruction telling the assistant to
+   build the interactive card as an artifact, carrying the CMS design tokens. This has no platform
+   dependency and is the fallback forever — build it FIRST and never remove it.
+   ROUTE 2, the MCP Apps widget (SEP-1865): the tool declares _meta.ui.resourceUri (NESTED under
+   _meta.ui, inside the TOOL object in tools/list, not on the result; the flat _meta["ui/resourceUri"]
+   is deprecated), and the shim serves a ui:// HTML resource as text/html;profile=mcp-app via
+   resources/list and resources/read. The view speaks raw JSON-RPC over postMessage — no SDK, the
+   Worker has no bundler.
+   THE ONE THING THAT WILL WASTE YOUR TIME IF YOU MISS IT: the view MUST send
+   ui/notifications/size-changed (ResizeObserver, debounced through rAF). Under flexible dimensions
+   the VIEW owns its height and the host resizes the iframe to what it reports. A view that does not
+   report will render correctly and be CLIPPED to its initial frame, which looks exactly like "the
+   widget is blank" and is not. CSS min-height cannot fix it — the iframe is sized from outside.
+   Also: send appInfo + appCapabilities.availableDisplayModes on ui/initialize; READ the result
+   (hostContext carries containerDimensions, theme, displayMode) and apply it; send
+   ui/notifications/initialized only on the MATCHING request id, because the host must not send
+   anything before it; use the ui/update-model-context REQUEST for reviewer interactions (there is no
+   ui/notifications/context-update — it is not a method, and sending it does nothing).
+   MAKE THE VIEW STATE ITS OWN STATE. A permanent status line ("handshake sent", "NO HANDSHAKE after
+   5s", "12 question(s)") is what turns a silent failure into a diagnosable one, and is the difference
+   between one session and three.
    THE INVARIANT: pm_review_approve must remain the ONLY route a QUESTION can take into a pack. Never
    add a tool that approves, publishes or edits a live question, or writes pm_questions directly.
    review_status is READ-ONLY and closes the feedback loop that a queue otherwise breaks: a
