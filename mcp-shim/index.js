@@ -36,6 +36,7 @@ const SUPABASE = "https://tytrmjjucqijzcrbwjfm.supabase.co";
 //   resources/read  → return the HTML with mimeType text/html;profile=mcp-app
 //   tools/call      → return content AND structuredContent
 import { PREVIEW_APP_HTML } from "./preview-app.js";
+import { OVERVIEW_APP_HTML } from "./overview-app.js";
 
 // TEMPORARY diagnostic: which tool is the client actually calling? Remove once resolved.
 const TOOL_LOG_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5dHJtamp1Y3FpanpjcmJ3amZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMwOTMyNDgsImV4cCI6MjA5ODY2OTI0OH0.KlFsPm7M015tflKE-jDjIstD_ZoCaz0jROUAoksJxOs";
@@ -51,6 +52,7 @@ function toolLog(ctx, entry) {
 
 const UI_URI = "ui://positive-minds/question-preview";
 const OVERVIEW_TOOL = "overview";
+const OVERVIEW_URI = "ui://positive-minds/overview";
 const UI_MIME = "text/html;profile=mcp-app";
 const UI_TOOL = "preview_questions";
 
@@ -346,16 +348,37 @@ export default {
               your_own: statusRes.your_own,
               visibility: statusRes.visibility,
             },
+            // `say` is what a menu BUTTON sends into the chat, so it has to read like something a
+            // person would actually type. `how` is the tool chain, for the assistant's benefit only —
+            // never show tool names to a partner.
             what_you_can_do: [
-              { do: "See or play the questions waiting for review", how: "preview_questions (source: pending)" },
-              { do: "Play a pack's live questions as a child sees them", how: "preview_questions (source: live, pack_slug)" },
-              { do: "Write new questions for a pack", how: "get_pack_content, then check_questions, then propose_questions" },
-              { do: "Test drafts against the real engine without saving anything", how: "check_questions" },
-              { do: "Fix a question already in the queue", how: "edit_queued_question" },
-              { do: "Take a question out of the queue, with a reason", how: "reject_questions" },
-              { do: "Check progress and see why things were rejected", how: "review_status" },
-              { do: "Start a new themed pack", how: "create_pack" },
-              { do: "Sharpen an existing pack's purpose, focus or style", how: "update_pack" },
+              { do: "Review what is waiting", icon: "\u23F3",
+                how: "preview_questions (source: pending)",
+                say: "Show me the questions waiting for review so I can play them." },
+              { do: "Play a pack as a child sees it", icon: "\u25B6",
+                how: "preview_questions (source: live, pack_slug)",
+                say: "Let me play the live questions in one of the packs." },
+              { do: "Write new questions", icon: "\u270D",
+                how: "get_pack_content, then check_questions, then propose_questions",
+                say: "I would like to write some new questions for a pack." },
+              { do: "Test drafts without saving", icon: "\u2713",
+                how: "check_questions",
+                say: "I have some draft questions I want checked against the engine before proposing them." },
+              { do: "Fix something in the queue", icon: "\u270E",
+                how: "edit_queued_question",
+                say: "I want to fix a question that is already waiting for review." },
+              { do: "Take something out of the queue", icon: "\u2716",
+                how: "reject_questions",
+                say: "I want to remove a question from the review queue and give a reason." },
+              { do: "See progress and rejections", icon: "\u25F4",
+                how: "review_status",
+                say: "How is the review queue doing, and what has been rejected and why?" },
+              { do: "Start a new pack", icon: "\u2726",
+                how: "create_pack",
+                say: "I would like to start a new themed pack." },
+              { do: "Sharpen a pack's definition", icon: "\u2699",
+                how: "update_pack",
+                say: "I want to refine the purpose, focus or style of an existing pack." },
             ],
             what_you_cannot_do: "Approve. Nothing written here reaches a child until a human approves it in the CMS — " +
               "pm_review_approve is the only route a question takes into a pack, and it is not exposed as a tool.",
@@ -370,6 +393,7 @@ export default {
           return rpcRes({
             content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
             structuredContent: payload,
+            _meta: { ui: { resourceUri: OVERVIEW_URI } },
           });
         }
 
@@ -381,6 +405,13 @@ export default {
               name: "Question preview",
               description: "Play a question exactly as a child sees it, at any level.",
               mimeType: UI_MIME,
+              _meta: { ui: { prefersBorder: false } },
+            }, {
+              uri: OVERVIEW_URI,
+              name: "Overview",
+              description: "Where the content stands, and what you can do — as a tappable menu.",
+              mimeType: UI_MIME,
+              _meta: { ui: { prefersBorder: false } },
             }],
           });
         }
@@ -388,12 +419,13 @@ export default {
         // resources/read — hand over the app itself.
         if (rpc.method === "resources/read") {
           const want = rpc.params && rpc.params.uri;
-          if (want === UI_URI) {
+          const VIEWS = { [UI_URI]: PREVIEW_APP_HTML, [OVERVIEW_URI]: OVERVIEW_APP_HTML };
+          if (VIEWS[want]) {
             return rpcRes({
               contents: [{
-                uri: UI_URI,
+                uri: want,
                 mimeType: UI_MIME,
-                text: PREVIEW_APP_HTML,
+                text: VIEWS[want],
                 _meta: { ui: { prefersBorder: false } },
               }],
             });
@@ -501,6 +533,7 @@ export default {
                     "than raw data. Read-only — it changes nothing.",
                   inputSchema: { type: "object", properties: {}, additionalProperties: false },
                   annotations: { readOnlyHint: true, title: "Overview" },
+                  _meta: { ui: { resourceUri: OVERVIEW_URI, visibility: ["model", "app"] } },
                 });
               }
             }
