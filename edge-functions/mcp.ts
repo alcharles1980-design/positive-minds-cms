@@ -383,6 +383,68 @@ const TOOLS = [
       },
     },
   },
+  {
+    name: 'preview_questions',
+    description:
+      'Render questions EXACTLY as a child sees them in the game — the sentence with the masked word ' +
+      'in place, at each level, with the two options. Use it on drafts before proposing, and on the ' +
+      'pending queue so a person can judge tone and meaning rather than just mechanics. Pass ' +
+      '`questions` to preview drafts, or `pack_slug` (or nothing) to preview what is awaiting review.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        questions: {
+          type: 'array',
+          description: 'Drafts to preview. Omit to preview the pending review queue instead.',
+          items: {
+            type: 'object',
+            properties: {
+              template: { type: 'string' },
+              answer: { type: 'string' },
+              alt_answer: { type: 'string' },
+            },
+            required: ['template', 'answer', 'alt_answer'],
+          },
+        },
+        pack_slug: { type: 'string', description: 'Limit the queue preview to one pack.' },
+        levels: { type: 'array', items: { type: 'number' }, description: 'Only these levels (default: all).' },
+      },
+    },
+  },
+  {
+    name: 'reject_questions',
+    description:
+      'Reject questions that are waiting in the review queue, with a reason. Rejecting only REMOVES ' +
+      'something from the pipeline — it can never put content in front of a child — so it is safe to ' +
+      'do from here. Get the ids from preview_questions. Approving is deliberately NOT possible ' +
+      'through this connector; that happens in the CMS.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ids: { type: 'array', items: { type: 'string' }, description: 'Review-queue ids to reject.' },
+        reason: { type: 'string', description: 'Why — this is shown to whoever wrote it, so be specific and kind.' },
+      },
+      required: ['ids', 'reason'],
+    },
+  },
+  {
+    name: 'edit_queued_question',
+    description:
+      'Fix a question that is still waiting in the review queue — change the sentence, the correct ' +
+      'word, or the wrong word. The edit is re-checked against the real game engine and is REJECTED ' +
+      'if it would break a rule (e.g. both words the same length), so you cannot make it worse. The ' +
+      'item stays pending and still needs a human to approve it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The review-queue id (from preview_questions).' },
+        template: { type: 'string', description: 'New sentence, with exactly one {blank}.' },
+        answer: { type: 'string', description: 'New correct word.' },
+        alt_answer: { type: 'string', description: 'New wrong word — must be a DIFFERENT length.' },
+      },
+      required: ['id'],
+    },
+  },
 ];
 
 // The brief Claude needs to write good content. Returned by list_packs so it is always in context.
@@ -792,6 +854,173 @@ async function callTool(db: any, partner: string, name: string, args: any) {
             ? `${pending.length} question(s) are waiting for a human to approve, edit or reject.`
             : 'Everything proposed so far has been decided on.') +
           (rejections.length ? ' Read why_things_were_rejected before writing more — those reasons apply to everyone.' : ''),
+    };
+  }
+
+  // ---- preview_questions ----
+  // Renders a question the way a child actually sees it. This MIRRORS buildLevelVariants in core.jsx:
+  // whole-word levels blank the entire word (min 3 underscores); otherwise maskWord hides
+  // letters_hidden_default letters at the level's position/grouping. NOTE: frame_slots (slot
+  // variations) are NOT resolved here — connector-proposed questions never set them, and adding
+  // resolveSlots would create a fifth parity copy. If a row has slots, the preview says so.
+  if (name === 'preview_questions') {
+    const { data: levels } = await db.from('pm_levels').select('*').order('level').limit(200);
+    const wanted = Array.isArray(args.levels) && args.levels.length
+      ? (levels || []).filter((l: any) => args.levels.includes(l.level))
+      : (levels || []);
+
+    const renderOne = (q: any) => {
+      const word = (q.answer || '').toUpperCase();
+      const alt = (q.alt_answer || '').toUpperCase();
+      return wanted.map((lvl: any) => {
+        const isWord = lvl.hidden_mode === 'word';
+        const letters = isWord ? word.length : Math.min(lvl.letters_hidden_default || 2, Math.max(1, word.length - 1));
+        const blank = (isWord || letters >= word.length)
+          ? '_'.repeat(Math.max(3, word.length))
+          : maskWord(word, letters, lvl.letter_position || 'end', lvl.letter_grouping || 'grouped');
+        const sentence = (q.template || '').replace(/\{blank\}/g, blank);
+        return {
+          level: lvl.level,
+          level_name: lvl.name,
+          the_child_sees: sentence,
+          picks_between: [word, alt],
+          whole_word_hidden: isWord || letters >= word.length,
+        };
+      });
+    };
+
+    // Drafts supplied directly?
+    if (Array.isArray(args.questions) && args.questions.length) {
+      return {
+        source: 'drafts (nothing saved)',
+        previews: args.questions.slice(0, 30).map((q: any) => ({
+          question: `${(q.answer || '').toUpperCase()} / ${(q.alt_answer || '').toUpperCase()}`,
+          at_each_level: renderOne(q),
+        })),
+        note: 'This is exactly how each one appears in the game. Check the TONE and MEANING here — the engine already checks the mechanics. Run check_questions before proposing.',
+      };
+    }
+
+    // Otherwise: preview what is awaiting review.
+    let packFilter: any = null;
+    if (args.pack_slug) {
+      const { data: p } = await db.from('pm_packs').select('id,slug,name').eq('slug', args.pack_slug).maybeSingle();
+      if (!p) return { error: `No pack with slug "${args.pack_slug}". Call list_packs to see what exists.` };
+      packFilter = p;
+    }
+    const qq = db.from('pm_review_queue')
+      .select('id,pack_id,template,answer,alt_answer,provider,frame_slots,created_at')
+      .eq('status', 'pending').order('created_at').limit(40);
+    if (packFilter) qq.eq('pack_id', packFilter.id);
+    const { data: queued } = await qq;
+
+    const { data: packs } = await db.from('pm_packs').select('id,name').limit(500);
+    const packName: Record<string, string> = {};
+    for (const p of packs || []) packName[p.id] = p.name;
+
+    return {
+      source: packFilter ? `pending review queue — pack "${packFilter.name}"` : 'pending review queue (all packs)',
+      awaiting: (queued || []).length,
+      previews: (queued || []).map((r: any) => ({
+        id: r.id,
+        pack: packName[r.pack_id] || 'unknown',
+        by: (r.provider || 'unknown').replace(/^partner:/, ''),
+        question: `${(r.answer || '').toUpperCase()} / ${(r.alt_answer || '').toUpperCase()}`,
+        at_each_level: renderOne(r),
+        has_slot_variations: !!(r.frame_slots && Object.keys(r.frame_slots).length),
+      })),
+      note: (queued || []).length
+        ? 'Show these to the person as the child would see them. They can reject any with reject_questions (using the id), or fix one with edit_queued_question. APPROVING is not possible here — that is done in the CMS.'
+        : 'Nothing is awaiting review.',
+    };
+  }
+
+  // ---- reject_questions ----
+  // Safe by construction: rejecting only removes something from the pipeline. pm_review_reject
+  // enforces status='pending' itself. It stamps decided_by from a JWT email, which the connector
+  // (service role) does not have — so it would record 'admin'. We patch the real actor in after.
+  if (name === 'reject_questions') {
+    const ids: string[] = Array.isArray(args.ids) ? args.ids.filter(Boolean) : [];
+    if (!ids.length) return { error: 'No ids given. Get them from preview_questions.' };
+    if (ids.length > 30) return { error: 'Too many at once — 30 maximum per call.' };
+    const reason = String(args.reason || '').trim();
+    if (!reason) return { error: 'Give a reason — it is shown to whoever wrote the question.' };
+
+    const done: any[] = [], failed: any[] = [];
+    for (const id of ids) {
+      const { error } = await db.rpc('pm_review_reject', { p_id: id, p_reason: reason });
+      if (error) { failed.push({ id, why: String(error.message || error) }); continue; }
+      // Record who actually rejected it (the RPC cannot see the partner).
+      try {
+        await db.from('pm_review_queue').update({ decided_by: `partner:${partner}` }).eq('id', id);
+      } catch { /* attribution is best-effort */ }
+      done.push(id);
+    }
+
+    return {
+      rejected: done.length,
+      rejected_ids: done,
+      failed,
+      reason,
+      note: failed.length
+        ? 'Some could not be rejected — most likely they were already approved or rejected.'
+        : 'Rejected. They are out of the queue and will not reach a child. Nothing was deleted — they stay on record with the reason.',
+    };
+  }
+
+  // ---- edit_queued_question ----
+  // Fixes a PENDING item in place. Safe: it stays pending and still needs human approval. The edit is
+  // re-validated with the full engine, so it cannot be made worse. Deliberately does NOT set the
+  // `edited` flag — that flag means "the APPROVER changed it at approval time" (see pm_review_approve)
+  // and is what review_status reports as approved_but_edited_first.
+  if (name === 'edit_queued_question') {
+    const { data: row } = await db.from('pm_review_queue')
+      .select('id,pack_id,template,answer,alt_answer,status').eq('id', args.id).maybeSingle();
+    if (!row) return { error: `No review-queue item with id "${args.id}". Get ids from preview_questions.` };
+    if (row.status !== 'pending') return { error: `That item is already ${row.status} — only pending items can be edited.` };
+
+    const merged = {
+      template: args.template != null ? String(args.template) : row.template,
+      answer: args.answer != null ? String(args.answer).toUpperCase().trim() : row.answer,
+      alt_answer: args.alt_answer != null ? String(args.alt_answer).toUpperCase().trim() : row.alt_answer,
+    };
+    if (merged.template === row.template && merged.answer === row.answer && merged.alt_answer === row.alt_answer) {
+      return { error: 'Nothing changed — supply a new template, answer or alt_answer.' };
+    }
+
+    const { data: pack } = await db.from('pm_packs').select('id,name,level').eq('id', row.pack_id).maybeSingle();
+    const { data: levels } = await db.from('pm_levels').select('*').order('level').limit(200);
+    const { data: liveQs } = await db.from('pm_questions')
+      .select('template,answer,alt_answer').eq('pack_id', row.pack_id).limit(2000);
+    const { data: otherQueued } = await db.from('pm_review_queue')
+      .select('id,template,answer,alt_answer,status')
+      .eq('pack_id', row.pack_id).in('status', ['pending', 'rejected']).limit(2000);
+
+    // Exclude the row being edited, or it would flag itself as a duplicate.
+    const existing = [
+      ...(liveQs || []),
+      ...(otherQueued || []).filter((q: any) => q.id !== row.id),
+    ];
+
+    const result = validateQuestion(merged, levels || [], { targetLevel: pack?.level ?? 1, existing });
+    if (!result.ok) {
+      return {
+        saved: false,
+        problems: result.flags.map((f: any) => f.detail),
+        note: 'NOT saved — the edit would break a rule. Fix these and try again; the original is untouched.',
+      };
+    }
+
+    const { error: uErr } = await db.from('pm_review_queue')
+      .update({ template: merged.template, answer: merged.answer, alt_answer: merged.alt_answer, validation: result })
+      .eq('id', row.id);
+    if (uErr) return { error: String(uErr.message || uErr) };
+
+    return {
+      saved: true,
+      was: `"${row.template}" — ${row.answer} / ${row.alt_answer}`,
+      now: `"${merged.template}" — ${merged.answer} / ${merged.alt_answer}`,
+      note: 'Updated and re-checked against the engine. It is still PENDING and still needs a human to approve it. Call preview_questions to see how it now looks to a child.',
     };
   }
 
