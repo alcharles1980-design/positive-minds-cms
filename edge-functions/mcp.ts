@@ -399,6 +399,9 @@ const TOOLS = [
       '"what needs reviewing", "play this", "let me try it", "play the question bank", "show me the ' +
       'questions in <pack>", "how would this look in the game", "what does the child see". Treat any ' +
       'similar phrasing the same way — the intent is always: show the actual questions, playable.\n' +
+      'DO NOT call list_packs for this. That returns LEVEL RULES (how many letters are hidden, word ' +
+      'lengths) — useful when writing, but showing level rules to someone who asked to see the ' +
+      'QUESTIONS is the wrong answer. Come straight here.\n' +
       'WHICH QUESTIONS: pass `questions` to preview drafts you have just written. Otherwise set ' +
       '`source` — "pending" (default) shows what is AWAITING REVIEW, "live" plays a pack\'s ' +
       'already-approved bank. `pack_slug` narrows either to one pack, and is required for "live".\n' +
@@ -1334,22 +1337,24 @@ Deno.serve(async (req) => {
       capabilities: { tools: {} },
       serverInfo: { name: 'positive-minds', version: '1.0.0' },
       instructions:
-        'Write therapeutic word-puzzle content for children. ALWAYS call list_packs first (it ' +
-        'returns the brief), then get_pack_content for the pack you are writing for, then ' +
-        'check_questions on your drafts, and only then propose_questions. Nothing you propose goes ' +
-        'live — a human reviews every question. You can also create a new pack (create_pack) or edit ' +
-        'a pack\'s details (update_pack) when the person wants a theme that does not exist yet; the ' +
-        'pack itself is created immediately, but its questions still go to the review queue. You can ' +
-        'fix (edit_queued_question) or reject (reject_questions) items still waiting in the queue; ' +
-        'APPROVING is deliberately not possible here — that happens in the CMS. Use review_status for ' +
-        'counts and progress across all contributors, and read its rejection reasons before writing ' +
-        'more. PREVIEWING AND PLAYING: if the person asks to preview, review the pending questions, ' +
-        'go through the queue, play a question, or play a pack\'s question bank — or anything ' +
-        'similar — call preview_questions and render the result as an interactive PLAYABLE artifact: ' +
-        'the sentence with its blank, tabs to switch level, and the two words as tappable buttons ' +
-        'that go green or red, with the correct one hidden until tapped. Pass source:"live" with a ' +
-        'pack_slug to play a pack\'s approved bank; the default shows what is awaiting review. ' +
-        'review_status is for counts only — it does not show the questions.',
+        'Positive Minds — therapeutic word-puzzle content for children. ROUTE BY WHAT IS ASKED:\n' +
+        '• PREVIEW / PLAY / REVIEW WHAT IS PENDING — "preview the pending questions", "show me these ' +
+        'as a child would see them", "play the question bank", "go through the queue", "what does the ' +
+        'child see": go STRAIGHT to preview_questions. Do NOT call list_packs first — list_packs ' +
+        'returns LEVEL RULES (how many letters are hidden, word lengths), not questions, and showing ' +
+        'those instead of the actual questions is the wrong answer to this request. Default shows what ' +
+        'is awaiting review; source:"live" with a pack_slug plays a pack\'s approved bank. Then render ' +
+        'the result as an interactive PLAYABLE artifact: one card per QUESTION showing its sentence ' +
+        'with the blank, tabs to switch level, and the two words as tappable buttons that go green or ' +
+        'red, with the correct one hidden until tapped.\n' +
+        '• WRITING NEW CONTENT: call list_packs first (it returns the brief), then get_pack_content ' +
+        'for the chosen pack, then check_questions on your drafts, and only then propose_questions. ' +
+        'Nothing you propose goes live — a human reviews every question.\n' +
+        '• PROGRESS / HOW MANY: review_status (counts and decisions only — it does not show questions).\n' +
+        '• PACKS: create_pack for a theme that does not exist yet, update_pack to change one\'s details. ' +
+        'A new pack appears in the CMS immediately; its questions still go to the review queue.\n' +
+        '• FIXING THE QUEUE: edit_queued_question to correct a pending item, reject_questions to drop ' +
+        'one. APPROVING is deliberately not possible here — that happens in the CMS.',
     });
   }
   if (method === 'notifications/initialized') return new Response(null, { status: 202, headers: cors });
