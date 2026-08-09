@@ -278,9 +278,16 @@ export default {
             outH.set("WWW-Authenticate", `Bearer resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource"`);
           }
 
-          let payload;
-          try { payload = JSON.parse(await up.text()); }
-          catch (_) { return new Response(up.body, { status: up.status, headers: outH }); }
+          const raw = await up.text();
+          let payload = null;
+          try { payload = JSON.parse(raw); } catch (_) { /* not JSON */ }
+          // Unconditional: tells us the branch ran, and whether there was a result to patch.
+          shimLog(ctx, {
+            method: "RPC",
+            path: "patch:" + rpc.method + " status=" + up.status + " hasResult=" + !!(payload && payload.result),
+            ua: "ui-layer", status: up.status,
+          });
+          if (!payload) return new Response(raw, { status: up.status, headers: outH });
 
           if (payload && payload.result) {
             if (rpc.method === "initialize") {
