@@ -369,6 +369,20 @@ const TOOLS = [
       required: ['pack_slug'],
     },
   },
+  {
+    name: 'review_status',
+    description:
+      'Check what happened to the questions you have proposed: how many are still waiting for the ' +
+      'reviewer, how many were approved, and how many were rejected (with the reviewer\'s reasons). ' +
+      'Use this when the person asks about progress or "what happened to what I sent", and BEFORE ' +
+      'writing more for a pack — the rejection reasons tell you what to avoid repeating.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pack_slug: { type: 'string', description: 'Optional — limit the report to one pack.' },
+      },
+    },
+  },
 ];
 
 // The brief Claude needs to write good content. Returned by list_packs so it is always in context.
@@ -566,7 +580,7 @@ async function callTool(db: any, partner: string, name: string, args: any) {
         question: `"${c.q.template}" — ${c.q.answer} / ${c.q.alt_answer}`,
         problems: c.result.flags.map((f: any) => f.detail),
       })),
-      note: 'These are now waiting for a human to approve, edit or reject. Nothing is live yet.',
+      note: 'These are now waiting for a human to approve, edit or reject. Nothing is live yet. Call review_status later to see what was approved or rejected.',
     };
   }
 
@@ -693,6 +707,78 @@ async function callTool(db: any, partner: string, name: string, args: any) {
       changed_fields: Object.keys(patch).filter(k => k !== 'updated_at'),
       warning: levelWarning,
       note: 'Pack details updated. The slug is unchanged — the game keys on it.',
+    };
+  }
+
+  // ---- review_status ----
+  // Read-only. Closes the feedback loop: a contributor proposes into a queue and otherwise never
+  // learns what became of it. Scope: THIS partner's own submissions in detail; other contributors
+  // are represented only as an overall backlog count, never by their content.
+  if (name === 'review_status') {
+    let packFilter: any = null;
+    if (args.pack_slug) {
+      const { data: p } = await db.from('pm_packs').select('id,slug,name').eq('slug', args.pack_slug).maybeSingle();
+      if (!p) return { error: `No pack with slug "${args.pack_slug}". Call list_packs to see what exists.` };
+      packFilter = p;
+    }
+
+    const mine = db.from('pm_review_queue')
+      .select('pack_id,status,edited,reject_reason,answer,alt_answer,template,created_at,decided_at')
+      .eq('provider', `partner:${partner}`).limit(5000);
+    if (packFilter) mine.eq('pack_id', packFilter.id);
+    const { data: rows } = await mine;
+
+    // The reviewer's whole backlog (every contributor) — a count only, so the person knows whether
+    // their items are behind a queue.
+    const { count: backlog } = await db.from('pm_review_queue')
+      .select('id', { count: 'exact', head: true }).eq('status', 'pending');
+
+    const all = rows || [];
+    const byStatus = (s: string) => all.filter((r: any) => r.status === s);
+    const pending = byStatus('pending'), approved = byStatus('approved'), rejected = byStatus('rejected');
+    const editedBeforeApproval = approved.filter((r: any) => r.edited).length;
+
+    // Per-pack breakdown, named rather than by id.
+    const { data: packs } = await db.from('pm_packs').select('id,slug,name').limit(500);
+    const packById: Record<string, any> = {};
+    for (const p of packs || []) packById[p.id] = p;
+    const perPack: Record<string, any> = {};
+    for (const r of all) {
+      const p = packById[r.pack_id];
+      const key = p ? p.slug : 'unknown';
+      perPack[key] = perPack[key] || { pack: p ? p.name : 'unknown', pending: 0, approved: 0, rejected: 0 };
+      if (perPack[key][r.status] != null) perPack[key][r.status] += 1;
+    }
+
+    // The genuinely useful part: WHY things were rejected, so the same mistake is not repeated.
+    const rejections = rejected
+      .sort((a: any, b: any) => String(b.decided_at || '').localeCompare(String(a.decided_at || '')))
+      .slice(0, 15)
+      .map((r: any) => ({
+        question: `"${(r.template || '').replace(/\{blank\}/g, '____')}" — ${r.answer} / ${r.alt_answer}`,
+        pack: packById[r.pack_id]?.name || 'unknown',
+        reason: r.reject_reason || '(no reason given)',
+      }));
+
+    return {
+      scope: packFilter ? `pack "${packFilter.name}"` : 'all packs',
+      your_submissions: {
+        total: all.length,
+        awaiting_review: pending.length,
+        approved: approved.length,
+        rejected: rejected.length,
+        approved_but_edited_first: editedBeforeApproval,
+      },
+      by_pack: perPack,
+      why_things_were_rejected: rejections,
+      reviewer_backlog_all_contributors: backlog ?? 0,
+      note: all.length === 0
+        ? 'You have not proposed anything yet' + (packFilter ? ' for this pack.' : '.')
+        : (pending.length
+            ? `${pending.length} of your question(s) are still waiting for a human to approve, edit or reject.`
+            : 'Everything you have proposed has been decided on.') +
+          (editedBeforeApproval ? ` ${editedBeforeApproval} were edited by the reviewer before approval — worth reading those to see what they changed.` : '') +
+          (rejections.length ? ' Read why_things_were_rejected before writing more, so you do not repeat the same problem.' : ''),
     };
   }
 
@@ -933,7 +1019,9 @@ Deno.serve(async (req) => {
         'check_questions on your drafts, and only then propose_questions. Nothing you propose goes ' +
         'live — a human reviews every question. You can also create a new pack (create_pack) or edit ' +
         'a pack\'s details (update_pack) when the person wants a theme that does not exist yet; the ' +
-        'pack itself is created immediately, but its questions still go to the review queue.',
+        'pack itself is created immediately, but its questions still go to the review queue. Use ' +
+        'review_status to report what happened to previously proposed questions, and read its ' +
+        'rejection reasons before writing more.',
     });
   }
   if (method === 'notifications/initialized') return new Response(null, { status: 202, headers: cors });
