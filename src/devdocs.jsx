@@ -726,7 +726,7 @@ plus create or rename pack containers. That is the entire blast radius. There is
 to DELETE a pack, and none to approve or publish a QUESTION.
 
 **The server:** edge function \`mcp\` (verify_jwt=FALSE — partners authenticate with their own token,
-not a Supabase JWT). Speaks JSON-RPC 2.0 over Streamable HTTP. Six tools, deliberately narrow:
+not a Supabase JWT). Speaks JSON-RPC 2.0 over Streamable HTTP. Seven tools, deliberately narrow:
 | Tool | Reads | Writes |
 |---|---|---|
 | \`list_packs\` | packs (published + draft) w/ per-pack stats, level rules, the brief | — |
@@ -735,6 +735,7 @@ not a Supabase JWT). Speaks JSON-RPC 2.0 over Streamable HTTP. Six tools, delibe
 | \`propose_questions\` | — | **the review queue ONLY** |
 | \`create_pack\` | — | a new pack row (published immediately) |
 | \`update_pack\` | — | an existing pack's details (never its slug) |
+| \`review_status\` | the caller's own queue rows + reject reasons | — |
 
 **PACK CREATION (Aug 2026).** \`create_pack\` mirrors the CMS's own PackEditor + \`savePack\` convention
 EXACTLY — same \`slugify\` as core.jsx, \`sort_order = count + 1\`, emoji default 💪, the same pack-detail
@@ -756,6 +757,14 @@ distinct_answer_words, awaiting_review) plus a \`how_to_start\` hint, and \`get_
 \`statistics\` summary. This exists so a contributor can SEE how full each pack is and choose where the
 gaps are, instead of guessing. \`list_packs\` includes DRAFT packs as well as published (and returns
 each pack's \`status\`) — otherwise a contributor could not see a pack that was not yet published.
+
+**REVIEW STATUS (Aug 2026).** \`review_status\` closes the feedback loop: a contributor proposes into
+a queue and otherwise never learns what became of it. It reports the CALLER's own submissions
+(awaiting_review / approved / rejected, plus approved_but_edited_first — a useful signal about what
+the reviewer had to fix), a per-pack breakdown, and the reviewer's \`reject_reason\` for recent
+rejections so the same mistake is not repeated. Optional \`pack_slug\` narrows it. PRIVACY BOUNDARY:
+a partner sees their OWN rows in detail; other contributors appear only as an overall pending
+backlog count, never by their content. Read-only.
 
 \`check_questions\` is the interesting one: Claude validates its OWN drafts against the real engine
 before proposing, so it catches and fixes the same-length-words bug itself. Verified live — given
@@ -925,7 +934,9 @@ that network-first caches GETs).
      only to the review queue, so a new pack is empty until approved into. No delete tool. Attributed
      in pm_activity as \`partner:<name>\`.
   3. **Per-pack statistics** in list_packs/get_pack_content, so a contributor sees how full each pack
-     is; list_packs now includes draft packs and returns status.
+     is; list_packs now includes draft packs and returns status. Plus **review_status**, which tells
+     a contributor what happened to what they sent — counts by state, per pack, and the reviewer's
+     reject reasons so Claude can avoid repeating a rejected mistake.
   4. **Strict-dedup alignment.** The BRIEF and tool descriptions used to tell Claude to avoid word
      reuse and reversed pairs — things the validator no longer flags. Variety is now stated as a
      PREFERENCE; the only hard rule is the exact-triple duplicate.
@@ -939,8 +950,8 @@ that network-first caches GETs).
   FOUR TOOLS, deliberately narrow: list_packs, get_pack_content, check_questions (pure validation —
   saves nothing), propose_questions (writes to the REVIEW QUEUE only). No publish. No delete. No pack
   editing.
-  [SUPERSEDED Aug 2026 — see the top entry: there are now SIX tools; create_pack and update_pack were
-  added. The question-side invariant below is UNCHANGED and still holds.]
+  [SUPERSEDED Aug 2026 — see the top entry: there are now SEVEN tools; create_pack, update_pack and
+  review_status were added. The question-side invariant below is UNCHANGED and still holds.]
   THE POINT: a partner cannot reach a child. pm_review_approve is still the only path into live
   content. The worst they can do — even compromised — is fill the queue with things you reject.
   \`check_questions\` means Claude catches its OWN mistakes before proposing. Verified live: given
@@ -1918,6 +1929,7 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
    or edits a live question, and never let one write pm_questions directly.
    REVISED Aug 2026: create_pack and update_pack DO write, and that is acceptable, because a pack is a
    CONTAINER, not content — a connector-created pack is EMPTY until Albert approves questions into it.
+   review_status also exists but is READ-ONLY (and scoped to the caller's own rows).
    The blast radius is still "a queue full of things Albert rejects", plus pack names he can rename.
    Deliberately still absent: DELETE for packs (destructive — it takes the questions with it), and
    anything touching a question's live status. If a partner needs those, they belong in the CMS.
@@ -2381,14 +2393,20 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    JSON-RPC 2.0 over Streamable HTTP. Handle \`initialize\` (return protocolVersion, capabilities.tools,
    serverInfo, and instructions telling Claude the order to call things), \`notifications/initialized\`
    (202, no body), \`tools/list\` and \`tools/call\`.
-   SIX TOOLS: list_packs (packs + level rules + THE BRIEF so the rules are always in context, each
+   SEVEN TOOLS: list_packs (packs + level rules + THE BRIEF so the rules are always in context, each
    pack carrying stats: live_questions / distinct_answer_words / awaiting_review, and INCLUDING draft
    packs with their status), get_pack_content (existing questions + words already taken + a statistics
    summary), check_questions (validate drafts, SAVE NOTHING — this is what lets Claude fix its own
    mistakes before proposing), propose_questions (writes to the REVIEW QUEUE ONLY), create_pack and
-   update_pack.
+   update_pack, and review_status.
    THE INVARIANT: pm_review_approve must remain the ONLY route a QUESTION can take into a pack. Never
    add a tool that approves, publishes or edits a live question, or writes pm_questions directly.
+   review_status is READ-ONLY and closes the feedback loop that a queue otherwise breaks: a
+   contributor proposes and never finds out what happened. Report the CALLER's own submissions
+   (awaiting / approved / rejected, plus how many were approved only AFTER the reviewer edited them),
+   a per-pack breakdown, and the reviewer's reject_reason for recent rejections — that last part is
+   what stops the same mistake being made again. Scope it to the caller: other contributors may
+   appear as an overall backlog COUNT, never by their content.
    Pack tools are allowed because a pack is a CONTAINER, not content: a connector-created pack is
    EMPTY until the reviewer approves questions into it. NEVER add a pack DELETE tool.
    create_pack must mirror the CMS's own PackEditor + savePack convention exactly — the SAME slugify
