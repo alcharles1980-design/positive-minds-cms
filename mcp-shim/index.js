@@ -50,6 +50,7 @@ function toolLog(ctx, entry) {
 }
 
 const UI_URI = "ui://positive-minds/question-preview";
+const OVERVIEW_TOOL = "overview";
 const UI_MIME = "text/html;profile=mcp-app";
 const UI_TOOL = "preview_questions";
 
@@ -242,6 +243,120 @@ export default {
           { headers: { ...CORS, "Content-Type": "application/json" } },
         );
 
+        // ---- overview — the orientation a partner gets when they arrive -----------------------
+        // Composed IN THE SHIM from two existing read tools, called with the CALLER'S OWN token.
+        // No new credentials, no new privilege, nothing this partner could not already read; it
+        // just saves them three round trips and a lot of phrasing. The shim can do this because it
+        // deploys from the repo on push — mcp.ts is a hand-paste (rule 4.30) and this needed to be
+        // changeable. If edge-function CI ever lands, this belongs upstream in mcp.ts.
+        if (rpc.method === "tools/call" && rpc.params && rpc.params.name === OVERVIEW_TOOL) {
+          const callUpstream = async (toolName) => {
+            const h = new Headers(fwdHeaders);
+            h.set("Content-Type", "application/json");
+            const r = await fetch(SUPABASE + "/functions/v1/mcp", {
+              method: "POST",
+              headers: h,
+              body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: toolName, arguments: {} } }),
+            });
+            if (!r.ok) return { __error: "HTTP " + r.status };
+            const j = await r.json().catch(() => null);
+            if (!j || j.error) return { __error: (j && j.error && j.error.message) || "no result" };
+            const blocks = (j.result && j.result.content) || [];
+            const t = blocks.find((c) => c && c.type === "text");
+            if (!t) return { __error: "no text block" };
+            try { return JSON.parse(t.text); } catch (_) { return { __error: "unparseable" }; }
+          };
+
+          // One at a time is fine here — two small reads, and it keeps the failure attributable.
+          const packsRes = await callUpstream("list_packs");
+          const statusRes = await callUpstream("review_status");
+
+          // If either leg fails, SAY SO rather than quietly reporting zeros. A confident "0 questions
+          // awaiting review" that actually means "the call failed" is the worst possible output for
+          // a tool whose entire job is to tell someone where things stand (rule 4.22).
+          const problems = [];
+          if (packsRes.__error) problems.push("pack list unavailable (" + packsRes.__error + ")");
+          if (statusRes.__error) problems.push("review queue unavailable (" + statusRes.__error + ")");
+
+          const packs = Array.isArray(packsRes.packs) ? packsRes.packs : [];
+          const totals = statusRes.totals_all_contributors || {};
+          const byPack = statusRes.by_pack || {};
+
+          const shaped = packs.map((p) => {
+            const st = p.stats || {};
+            return {
+              slug: p.slug,
+              name: p.name,
+              emoji: p.emoji,
+              status: p.status,
+              description: p.description || null,
+              live_questions: st.live_questions || 0,
+              awaiting_review: st.awaiting_review || 0,
+              distinct_answer_words: st.distinct_answer_words || 0,
+            };
+          });
+          // Packs a person can actually act on come first: things waiting, then things with content,
+          // then the empty ones. Alphabetical order buries the 12 pending questions in the middle.
+          const rank = (p) => (p.awaiting_review > 0 ? 0 : p.live_questions > 0 ? 1 : 2);
+          shaped.sort((a, b) => rank(a) - rank(b) || b.awaiting_review - a.awaiting_review ||
+                                b.live_questions - a.live_questions || a.name.localeCompare(b.name));
+
+          const withLive = shaped.filter((p) => p.live_questions > 0).length;
+          const liveTotal = shaped.reduce((n, p) => n + p.live_questions, 0);
+          const awaitingTotal = shaped.reduce((n, p) => n + p.awaiting_review, 0);
+
+          const payload = {
+            headline: problems.length
+              ? "Partial overview — " + problems.join("; ")
+              : awaitingTotal + " question(s) waiting for a human, " + liveTotal +
+                " live across " + withLive + " pack(s).",
+            problems: problems.length ? problems : undefined,
+            content_status: {
+              packs_total: shaped.length,
+              published: shaped.filter((p) => p.status === "published").length,
+              draft: shaped.filter((p) => p.status !== "published").length,
+              packs_with_live_questions: withLive,
+              packs_empty: shaped.filter((p) => p.live_questions === 0 && p.awaiting_review === 0).length,
+              live_questions_total: liveTotal,
+              awaiting_review_total: awaitingTotal,
+              approved_all_time: totals.approved,
+              rejected_all_time: totals.rejected,
+            },
+            packs: shaped,
+            review_queue: {
+              total_awaiting: awaitingTotal,
+              by_pack: byPack,
+              by_contributor: statusRes.by_contributor,
+              your_own: statusRes.your_own,
+              visibility: statusRes.visibility,
+            },
+            what_you_can_do: [
+              { do: "See or play the questions waiting for review", how: "preview_questions (source: pending)" },
+              { do: "Play a pack's live questions as a child sees them", how: "preview_questions (source: live, pack_slug)" },
+              { do: "Write new questions for a pack", how: "get_pack_content, then check_questions, then propose_questions" },
+              { do: "Test drafts against the real engine without saving anything", how: "check_questions" },
+              { do: "Fix a question already in the queue", how: "edit_queued_question" },
+              { do: "Take a question out of the queue, with a reason", how: "reject_questions" },
+              { do: "Check progress and see why things were rejected", how: "review_status" },
+              { do: "Start a new themed pack", how: "create_pack" },
+              { do: "Sharpen an existing pack's purpose, focus or style", how: "update_pack" },
+            ],
+            what_you_cannot_do: "Approve. Nothing written here reaches a child until a human approves it in the CMS — " +
+              "pm_review_approve is the only route a question takes into a pack, and it is not exposed as a tool.",
+            how_to_show_this: "Give the person a SHORT orientation, not this JSON. Lead with the headline. " +
+              "List the packs that have something in them (live or awaiting) with their counts, and say how many " +
+              "of the remaining packs are empty rather than listing them all. Then offer the options in " +
+              "what_you_can_do in plain language — not tool names — and let them pick. Mention what_you_cannot_do " +
+              "once, plainly, so nobody assumes their questions are live. If problems is present, say so up front; " +
+              "do not present partial numbers as complete.",
+          };
+
+          return rpcRes({
+            content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+            structuredContent: payload,
+          });
+        }
+
         // resources/list — declare the UI resource. The Supabase function knows nothing about this.
         if (rpc.method === "resources/list") {
           return rpcRes({
@@ -316,6 +431,26 @@ export default {
               if (rpc.params && rpc.params.protocolVersion) {
                 payload.result.protocolVersion = rpc.params.protocolVersion;
               }
+
+              // THE CONNECTION-TIME HOOK. There is no "on connect" event in MCP — nothing fires when
+              // a partner attaches the connector. `instructions` is the one thing a host reads at
+              // connection, so the orientation has to be a DIRECTIVE TO CALL a tool, not the content
+              // itself: it is a static string and would be stale the moment a question was proposed.
+              // Prepended, not replaced — the upstream instructions carry the routing rules that stop
+              // an unconditional "always call X first" from hijacking unrelated requests (rule 4.18).
+              const orient =
+                "ORIENT FIRST. At the start of a session — and whenever the person opens with a greeting, " +
+                "asks what this is, what they can do, what is here, or where things stand — call the " +
+                "'overview' tool BEFORE answering, and present a short orientation from it: what packs " +
+                "exist, what is waiting for review, and what they can do next. It is read-only. Do not " +
+                "recite the raw JSON, and do not guess these numbers from memory or from an earlier turn " +
+                "in the conversation; they change whenever anyone proposes or approves a question.\n\n";
+              if (typeof payload.result.instructions === "string" &&
+                  !payload.result.instructions.startsWith("ORIENT FIRST")) {
+                payload.result.instructions = orient + payload.result.instructions;
+              } else if (!payload.result.instructions) {
+                payload.result.instructions = orient;
+              }
             }
 
             // WIDGET RE-ENABLED (Aug 2026). The _meta.ui.resourceUri link is what makes the host
@@ -336,6 +471,21 @@ export default {
                 if (t && t.name === UI_TOOL) {
                   t._meta = { ...(t._meta || {}), ui: { resourceUri: UI_URI, visibility: ["model", "app"] } };
                 }
+              }
+              // Declare overview FIRST. Position is not decorative — a tool listed first is the one
+              // reached for when someone opens with "what's here?", which is exactly the intent.
+              if (!payload.result.tools.some((t) => t && t.name === OVERVIEW_TOOL)) {
+                payload.result.tools.unshift({
+                  name: OVERVIEW_TOOL,
+                  description:
+                    "START HERE. Where the content stands right now and what you can do with it: every pack " +
+                    "with its live and awaiting-review counts, the size and shape of the review queue, and the " +
+                    "list of actions available to you. Call this FIRST in a session, before answering anything " +
+                    "about packs, questions or progress, and present the result as a short orientation rather " +
+                    "than raw data. Read-only — it changes nothing.",
+                  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+                  annotations: { readOnlyHint: true, title: "Overview" },
+                });
               }
             }
 
