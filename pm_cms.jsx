@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.08.09-22", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.08.09-23", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -3940,6 +3940,74 @@ It is not proof of a render. The render was confirmed by a person looking at a r
 level taps, answer taps, theme, font loading, wrapping — must end up calling it, or the frame will
 be wrong again in exactly the way that cost three sessions.
 
+### ARRIVAL: the \`overview\` tool and the connection-time hook
+
+A partner attaching the connector used to arrive at ten tools and no idea what was in the system.
+They now get a full picture on arrival.
+
+**THERE IS NO "ON CONNECT" EVENT IN MCP.** Nothing fires when someone attaches a connector, so there
+is nowhere to push a greeting. The one thing a host reads at connection is the \`instructions\` string
+from \`initialize\`. That is the hook — and it must be a DIRECTIVE TO CALL a tool, never the content
+itself: instructions are a static string and would be stale the moment anyone proposed a question.
+
+The shim PREPENDS its orientation directive rather than replacing what the mcp function returns; the
+upstream instructions carry the intent-routing that stops an unconditional "always call X first"
+from hijacking unrelated requests. It also fires on a greeting or "what can I do here", not only on
+a literal first message, because that is when people actually ask.
+
+**THE TOOL.** \`overview\` is read-only and declared FIRST in tools/list. Position is not decorative —
+a tool listed first is the one reached for when someone opens with "what's here?". It returns every
+pack with live and awaiting-review counts, totals split published/draft, how many packs are EMPTY
+(rather than making the reader count fifteen entries), the review queue by pack and contributor, the
+nine things a partner can do in plain language, and the one thing they cannot: approve.
+
+**IT IS COMPOSED IN THE SHIM** from the existing list_packs and review_status reads, called with the
+CALLER'S OWN token. No new credentials and no new privilege — nothing here is anything that partner
+could not already read; it just saves three round trips and a lot of phrasing. It lives in the shim
+because the shim deploys from the repo on push. If edge-function CI takes over deploys, this belongs
+upstream in mcp.ts, and that is a deliberate trade recorded rather than left silent.
+
+**COMPOSING TOOLS MEANS INHERITING THEIR FAILURE SEMANTICS — see rule 4.35.** Caught by testing the
+DEPLOYED shim, not by reading the code: an unauthenticated call returned HTTP 200 with a cheerful
+"Partial overview" instead of 401. Nothing leaked, but MCP clients start the OAuth flow off a 401
+with WWW-Authenticate. Since overview is now the FIRST call of every session, an expired token would
+have shown a partner an empty CMS in confident detail and never prompted them to sign in. 401/403 are
+now propagated; a genuine upstream outage (503) is still a partial 200, because those are different
+failures and must not be collapsed.
+
+**Partial results are flagged.** A tool whose whole job is "here is where things stand" must never
+answer with a confident zero that actually means the call failed. If either leg fails, the headline
+says "Partial overview", the failing leg is named, whatever did arrive is still returned, and the
+render instruction tells the presenter not to pass partial numbers off as complete.
+
+**Test:** mcp-shim/overview-test.mjs — merge, totals, ordering (packs needing a human sort first,
+empty packs sink), the menu, the invariant, tools/list declaration and position, and every failure
+mode including the 401/403/503 distinction. 22 checks, no live data touched.
+
+### DEPLOY CHECKING: why a downloaded edge function never matches your source
+
+\`supabase functions download\` does NOT return your source. It returns the extracted ESZIP BUNDLE:
+TypeScript transpiled away, formatting re-printed, comments gone, imports resolved and hoisted. On
+mcp the download came back 6,400 bytes SMALLER than the repo file.
+
+This matters because the obvious drift check — diff deployed against repo — is a GUARANTEED FALSE
+POSITIVE. The first dry run reported drift on all five functions, including ones with no reason to
+have drifted. A check that always fires is worse than no check at all.
+
+Normalising both sides (comments, type annotations, generics, non-null assertions, trailing commas,
+all insignificant whitespace) narrowed mcp from 6,400 raw bytes to 190. Every remaining divergence
+inspected was still an artifact: a type annotation remnant, redundant parentheses the bundler drops
+(\`(a*31+b)>>>0\` vs \`a*31+b>>>0\` — identical, since >>> binds looser than +), and a hoisted import.
+
+WHERE THIS LANDS, honestly. The dry run reliably proves the token works, that every function is
+deployed, and gives sizes plus a first-divergence with context for a person to judge. It CANNOT be a
+pass/fail gate, and it was not tuned until it went green — a check tuned until it passes is worth
+nothing. The first-divergence view is not proof of full equality and must not be quoted as such.
+
+THE REAL FIX IS TO STOP NEEDING THE COMPARISON. Once one \`mode: deploy\` runs, deployed == repo is
+true BY CONSTRUCTION and CI keeps it true. The drift question then dies permanently, which is the
+actual point of the workflow.
+
 ### The preview payload is QUESTION-FIRST, on purpose
 
 preview_questions once returned each question with every level nested inside it. Twelve questions x
@@ -4188,12 +4256,16 @@ LIVE AND WORKING
 - Site deploys automatically on push (wrangler deploy, Worker + static assets from ./public).
   The shim deploys automatically on push to mcp-shim/.
 
-NOT AUTOMATED, AND THE MAIN SOURCE OF RISK
-- EDGE FUNCTIONS ARE DEPLOYED BY HAND, by pasting ~70KB of mcp.ts into a tool call. This has already
-  put a 1-line placeholder over the live function once, and has silently drifted repo vs deployed
-  more than once. .github/workflows/deploy-edge-functions.yml is written and ready; it needs ONE
-  repository secret, SUPABASE_ACCESS_TOKEN. Albert has so far chosen not to add it. Adding it is the
-  single highest-value piece of maintenance available.
+EDGE FUNCTIONS — CI IS NOW ARMED, BUT HAS NOT DEPLOYED YET
+- SUPABASE_ACCESS_TOKEN was added 9 Aug 2026. deploy-edge-functions.yml runs, authenticates and can
+  download every deployed function. Verified, not assumed.
+- WHAT HAS NOT HAPPENED: no automated deploy has run. Until one does, the live functions are still
+  whatever was last hand-pasted, and the hand-paste risk is armed but not yet retired. The first
+  \`mode: deploy\` run makes the REPO authoritative and ends this whole class of problem permanently.
+  Suggested order: \`only: pack-describe\` first as a canary (smallest, nothing depends on it), verify
+  over the wire, then the full run.
+- DRIFT, as far as it can be determined: NONE behaviourally. See the dry-run section for why that
+  sentence has a caveat in it and cannot be made unconditional.
 
 TEMPORARY THINGS STILL IN PLACE (remove when convenient)
 - Table pm_tool_log and the toolLog() calls in mcp-shim/index.js — diagnostic logging that records
@@ -5202,6 +5274,36 @@ there were two 4t, two 4u, two 4r, two 4s, two 4v and two 4d, so "see rule 4t" w
    the edge function didn't, so a question with its own letter_position rendered differently
    in-game than in the CMS.) After any engine edit, diff the two by fetching the deployed edge
    function and comparing, or run a parity test with a question that has its own overrides.
+4.36. **A check tuned until it passes is worth nothing — and a check that always fires is worse than
+   no check.** The edge-function dry run compares deployed against repo. Its first version reported
+   drift on all five functions, including ones that had no reason to have drifted, because
+   \`supabase functions download\` returns the extracted ESZIP BUNDLE, not your source: transpiled,
+   re-printed, comments gone, imports hoisted. mcp came back 6,400 bytes SMALLER than the repo file.
+   Normalising both sides narrowed that to 190 bytes, and the remainder was STILL artifacts —
+   redundant parentheses the bundler drops, a type-annotation remnant, a hoisted import.
+   THE DISCIPLINE: at that point the temptation is to keep loosening the normaliser until it goes
+   green. Do not. A comparison tuned until it agrees with you has stopped being evidence. Say what
+   the check can and cannot establish, and then go and remove the NEED for it — here, one deploy
+   from the repo makes deployed == repo true by construction and the question dies permanently.
+   ALSO: never quote a first-divergence as proof of full equality. It is the first difference, not
+   the only one.
+4.35. **When you COMPOSE tools, you inherit their failure semantics — and it is easy to flatten them
+   into success. Auth failure is not a partial result.** The \`overview\` tool merges two existing
+   reads. Unauthenticated, it answered HTTP 200 with a cheerful "Partial overview" showing zeros,
+   because both legs had failed and it treated that as missing data. Nothing leaked, but MCP clients
+   start the OAuth flow off a 401 with WWW-Authenticate — so a partner with an expired token would
+   have been shown an empty CMS, in confident detail, and never prompted to sign in. The tool built
+   to say where things stand would have said everything was gone.
+   Distinguish the failures: 401/403 propagate with the right status and header; a genuine outage
+   stays a partial 200 and says which leg failed. Never let a composed tool report a confident zero
+   that actually means "the call failed".
+   Found by testing the DEPLOYED shim over the wire. Reading the code would not have shown it.
+4.34. **There is no "on connect" event — an orientation must be a DIRECTIVE, not a payload.** Nothing
+   fires when a partner attaches a connector. The only thing a host reads at connection is the
+   \`instructions\` string from initialize, and it is STATIC: any counts written into it are stale the
+   moment someone proposes a question. So instructions must tell the assistant to CALL a tool, and
+   the tool carries the live state. PREPEND to the upstream instructions rather than replacing them —
+   the routing rules that stop "always call X first" from hijacking unrelated requests live there.
 4.33. **Read the specification before diagnosing, and believe a screenshot over a theory.**
    The preview widget was called "blank" for three sessions. It was never blank. It was CLIPPED to
    about one card, and the proof was sitting in a screenshot the whole time: the diagnostic status
@@ -5259,12 +5361,19 @@ there were two 4t, two 4u, two 4r, two 4s, two 4v and two 4d, so "see rule 4t" w
    the deployed copy and the repo copy stop matching even when behaviour is identical. Rules: after
    ANY inline deploy, fetch the deployed copy back and compare; and never treat "it deployed" as "it
    works" — exercise the changed tool over the wire before moving on.
-   **A CI WORKFLOW NOW EXISTS: .github/workflows/deploy-edge-functions.yml.** It stages the flat
+   **CI IS LIVE: .github/workflows/deploy-edge-functions.yml.** It stages the flat
 edge-functions/<slug>.ts into the supabase/functions/<slug>/index.ts layout the CLI wants and deploys
 byte-for-byte, with --no-verify-jwt for the functions that authenticate their own callers (mcp,
-content-api, game-feed, pack-describe) and the JWT gate left on for generate-questions. It is DORMANT
-until a SUPABASE_ACCESS_TOKEN repository secret is added, and fails with a clear error rather than
-half-deploying. Albert has chosen not to add it for now, so deploys remain by hand.
+content-api, game-feed, pack-describe) and the JWT gate left on for generate-questions.
+SUPABASE_ACCESS_TOKEN was added 9 Aug 2026 and is confirmed working. NOTE it is a PERSONAL ACCESS
+TOKEN (account level, starts sbp_, from the account Access Tokens page) — NOT a project API key.
+Those are different credentials and the naming misleads: project keys authenticate requests TO the
+database and cannot deploy anything, and the service_role key must never go near CI because it
+bypasses every RLS policy.
+TWO GUARDS were added before it was ever run for real. The workflow used to list ITS OWN FILE in its
+push paths, so editing the deploy script deployed the live mcp function as a side effect — editing
+CI must never ship code. And \`mode: dry-run\` (the default for manual dispatch) downloads what is
+actually deployed and compares, deploying nothing.
 
 **THE REAL FIX IS CI.** The repo has CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID, which is why the
    site and the mcp-shim Worker deploy automatically and exactly. There is NO SUPABASE_ACCESS_TOKEN,
@@ -5852,7 +5961,22 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    JSON-RPC 2.0 over Streamable HTTP. Handle \`initialize\` (return protocolVersion, capabilities.tools,
    serverInfo, and instructions telling Claude the order to call things), \`notifications/initialized\`
    (202, no body), \`tools/list\` and \`tools/call\`.
-   TEN TOOLS: list_packs (packs + level rules + THE BRIEF so the rules are always in context, each
+   GIVE THE PARTNER AN ARRIVAL. There is no "on connect" event in MCP — nothing fires when someone
+   attaches a connector. The only thing a host reads at connection is the \`instructions\` string from
+   initialize, so build an \`overview\` tool and make instructions a DIRECTIVE TO CALL IT. Never write
+   the counts into instructions: it is a static string and goes stale the moment a question is
+   proposed. overview returns every pack with live/awaiting counts, how many packs are EMPTY, the
+   review queue by pack and contributor, what the partner can do in plain language, and the one thing
+   they cannot (approve). Declare it FIRST in tools/list — a tool listed first is the one reached for
+   when someone opens with "what's here?". Compose it from the existing reads using the CALLER'S own
+   token, so it needs no new privilege. Prepend the directive to the upstream instructions rather
+   than replacing them, or you lose the intent-routing.
+   IF YOU COMPOSE TOOLS, PROPAGATE 401/403 rather than reporting an empty system. A composed tool
+   that swallows an auth failure into a cheerful "everything is zero" will show a signed-out partner
+   an empty CMS and never prompt them to sign in. A genuine outage is a different thing from an auth
+   failure and should stay a partial result.
+   TEN TOOLS in the edge function (the shim adds overview on top, making eleven the partner sees):
+   list_packs (packs + level rules + THE BRIEF so the rules are always in context, each
    pack carrying stats: live_questions / distinct_answer_words / awaiting_review, and INCLUDING draft
    packs with their status), get_pack_content (existing questions + words already taken + a statistics
    summary), check_questions (validate drafts, SAVE NOTHING — this is what lets Claude fix its own
