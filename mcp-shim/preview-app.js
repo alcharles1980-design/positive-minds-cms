@@ -20,9 +20,9 @@ export const PREVIEW_APP_HTML = `<!DOCTYPE html>
 <title>Question preview</title>
 <style>
   *{box-sizing:border-box}
-  html,body{margin:0;padding:0}
+  html,body{margin:0;padding:0;min-height:160px}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
-    background:transparent;color:#191728;padding:4px}
+    background:#F6F5FB;color:#191728;padding:8px;min-height:160px}
   .card{background:#fff;border:1px solid #E4E0F0;border-radius:16px;padding:16px 16px 14px;
     margin-bottom:10px;box-shadow:0 2px 10px rgba(25,23,40,.05)}
   .meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;
@@ -51,10 +51,14 @@ export const PREVIEW_APP_HTML = `<!DOCTYPE html>
   body.dark .opt{background:#131120;border-color:#332F4C;color:#F3F1FB}
   body.dark .lv{background:#131120;border-color:#332F4C;color:#C9C5DC}
 </style></head><body>
-<div id="app"><div class="empty">Waiting for the question…</div></div>
+<div id="status" style="background:#6C4CE0;color:#fff;font:700 12px/1.4 system-ui;padding:8px 10px;border-radius:10px;margin-bottom:8px">PM widget v2 — script not started</div>
+<div id="app"><div class="empty">Waiting for data from the host…</div></div>
 <script>
 (function(){
   var rpcId = 1, initDone = false, DATA = null;
+  function setStatus(t){ var el = document.getElementById('status'); if (el) el.textContent = 'PM widget v2 — ' + t; }
+  setStatus('script running');
+  window.addEventListener('error', function(e){ setStatus('JS ERROR: ' + (e.message || 'unknown')); });
   function post(m){ try { window.parent.postMessage(m, '*'); } catch(e){} }
   function request(method, params){ post({ jsonrpc:'2.0', id: rpcId++, method: method, params: params||{} }); }
   function notify(method, params){ post({ jsonrpc:'2.0', method: method, params: params||{} }); }
@@ -153,6 +157,7 @@ export const PREVIEW_APP_HTML = `<!DOCTYPE html>
     if (!m || m.jsonrpc !== '2.0') return;
     if (m.method === 'ui/notifications/tool-result' || m.method === 'ui/notifications/tool-input'){
       var found = dig(m.params, 0);
+      setStatus(found ? ('data received — ' + found.length + ' question(s)') : 'message received but no previews array found');
       if (found){ DATA = found; render(DATA); }
       return;
     }
@@ -165,14 +170,11 @@ export const PREVIEW_APP_HTML = `<!DOCTYPE html>
     if (m.id != null && m.result && !initDone){ initDone = true; notify('ui/notifications/initialized', {}); }
   });
 
+  setStatus('handshake sent, waiting for host');
   request('ui/initialize', { protocolVersion: '2026-01-26', capabilities: {} });
   // If the host never handshakes, say so rather than spinning forever.
   setTimeout(function(){
-    if (!DATA) {
-      var app = document.getElementById('app');
-      if (app && app.querySelector('.empty')) app.querySelector('.empty').textContent =
-        'Connected, but no question data arrived from the host.';
-    }
+    if (!DATA) setStatus('NO DATA after 4s — host never sent tool-result');
   }, 4000);
 })();
 </script>
