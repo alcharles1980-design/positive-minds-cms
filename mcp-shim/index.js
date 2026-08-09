@@ -26,8 +26,8 @@ const SUPABASE = "https://tytrmjjucqijzcrbwjfm.supabase.co";
 // does not even ask for the widget. Matches a known platform-level gap (anthropics/claude-ai-mcp
 // #471); interactive UI is currently a reviewed, DIRECTORY-connector feature. Left in place because
 // it is spec-correct and costs nothing: if that changes, it lights up on its own.
-// What delivers the interactive card TODAY is the how_to_show_this instruction injected into the
-// tool result below, which makes Claude build the same card as an artifact.
+// What delivers the interactive card TODAY is the rendering instruction carried in the tool's own
+// description and result note in mcp.ts, which makes Claude build the same card as an artifact.
 //
 // What the host does (and what we therefore have to answer):
 //   initialize      → client advertises io.modelcontextprotocol/ui; we must declare `resources`
@@ -41,42 +41,9 @@ const UI_URI = "ui://positive-minds/question-preview";
 const UI_MIME = "text/html;profile=mcp-app";
 const UI_TOOL = "preview_questions";
 
-// Guidance injected at DECISION time (tools/list) rather than only in the tool's result. Claude picks
-// a tool from its description, so if the description does not say "this is the one for 'let's review
-// the pending questions'", that phrasing lands on review_status and the person gets counts instead of
-// the questions. The rendering instruction has to be here too, for the same reason: by the time the
-// result arrives, the choice of how to present it has often already been made.
-const PREVIEW_DESC_EXTRA =
-  " USE THIS whenever the person wants to SEE or PLAY questions rather than read counts. Trigger " +
-  "phrasings include: \"preview\", \"let's preview these\", \"review the pending questions\", \"go " +
-  "through the queue\", \"show me what's waiting\", \"what needs reviewing\", \"play this\", \"let me " +
-  "try it\", \"play the question bank\", \"show me the questions in <pack>\", \"how would this look in " +
-  "the game\", \"what does the child see\". Treat any similar phrasing the same way — the intent is " +
-  "always: show the actual questions, playable.\n" +
-  "WHICH QUESTIONS: with no arguments it returns everything AWAITING REVIEW. Pass pack_slug to limit " +
-  "that to one pack. To play a pack's LIVE, already-approved bank instead (\"play the question bank " +
-  "from Calmness\"), first call get_pack_content for that pack, then pass its existing_questions here " +
-  "as `questions` — turn each `sentence` back into a template by replacing ____ with {blank}, and map " +
-  "`alternate` to `alt_answer`. Say which set you are showing.\n" +
-  "THEN RENDER IT AS A PLAYABLE CARD: build an interactive artifact showing the sentence with the " +
-  "blank exactly as returned, tabs to switch level, and the two words as big tappable buttons that " +
-  "turn green (correct) or red (wrong) when tapped. Never reveal which word is correct before it is " +
-  "tapped, and never reword or reorder anything — the whole point is to see it exactly as a child " +
-  "does. Do not just list them as text.";
+// NOTE: tool descriptions and connection instructions live in mcp.ts, where they belong. The shim
+// deliberately does NOT rewrite them any more.
 
-const STATUS_DESC_EXTRA =
-  " This returns COUNTS and decisions, not the questions themselves. If the person wants to SEE or go " +
-  "through the actual pending questions, use preview_questions instead.";
-
-const INSTRUCTIONS_EXTRA =
-  " PREVIEWING AND PLAYING QUESTIONS: if the person asks to preview, review the pending questions, go " +
-  "through the queue, play a question, or play a pack's question bank — or says anything similar — " +
-  "call preview_questions and render the result as an interactive, PLAYABLE artifact: the sentence " +
-  "with its blank, tabs to switch level, and the two words as tappable buttons that go green or red, " +
-  "with the correct one hidden until tapped. preview_questions with no arguments returns the pending " +
-  "review queue; to play a pack's already-approved bank, call get_pack_content first and pass its " +
-  "existing_questions into preview_questions (replace ____ with {blank}, and `alternate` becomes " +
-  "`alt_answer`). review_status is for counts and progress only — it does not show the questions.";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -327,51 +294,21 @@ export default {
               if (rpc.params && rpc.params.protocolVersion) {
                 payload.result.protocolVersion = rpc.params.protocolVersion;
               }
-              // Connection-level guidance, so the preview/review routing is known from the start.
-              payload.result.instructions = (payload.result.instructions || "") + INSTRUCTIONS_EXTRA;
             }
 
             if (rpc.method === "tools/list" && Array.isArray(payload.result.tools)) {
-              // _meta goes INSIDE the tool object, not on the result. Descriptions are augmented here
-              // so the guidance is present when Claude CHOOSES a tool, not just after it calls one.
-              payload.result.tools = payload.result.tools.map((t) => {
-                if (!t) return t;
-                if (t.name === UI_TOOL) {
-                  return {
-                    ...t,
-                    description: (t.description || "") + PREVIEW_DESC_EXTRA,
-                    _meta: { ui: { resourceUri: UI_URI } },
-                  };
-                }
-                if (t.name === "review_status") {
-                  return { ...t, description: (t.description || "") + STATUS_DESC_EXTRA };
-                }
-                return t;
-              });
+              // _meta goes INSIDE the tool object, not on the result.
+              payload.result.tools = payload.result.tools.map((t) =>
+                t && t.name === UI_TOOL ? { ...t, _meta: { ui: { resourceUri: UI_URI } } } : t);
             }
 
             if (rpc.method === "tools/call" && rpc.params && rpc.params.name === UI_TOOL) {
-              // Hosts render from structuredContent; our function only returns text content.
+              // Hosts render from structuredContent; our function returns text content. The rendering
+              // guidance itself lives in the tool's description and note in mcp.ts, not here.
               const blocks = payload.result.content || [];
               const textBlock = blocks.find((c) => c && c.type === "text");
               if (textBlock) {
-                let data = null;
-                try { data = JSON.parse(textBlock.text); } catch (_) { /* leave as text */ }
-                if (data) {
-                  // THE PART THAT ACTUALLY WORKS TODAY. Claude Web will not render our MCP App widget
-                  // for a custom connector (platform gap — see the header note), but it WILL happily
-                  // build the same thing as an artifact from this data. Asking for it explicitly turns
-                  // that from a lucky accident into reliable behaviour.
-                  data.how_to_show_this =
-                    "Build an interactive artifact so the person can PLAY these, don't just list them. " +
-                    "For each question: show the sentence with the blank exactly as given, tabs to switch " +
-                    "level, and the two words as big tappable buttons. Tapping shows green for the correct " +
-                    "word and red for the other, with a line explaining that if the other word ALSO fits " +
-                    "the blank the question is broken. Do not indicate which is correct before it's tapped, " +
-                    "and don't reorder or reword anything — the point is to see it exactly as a child does.";
-                  textBlock.text = JSON.stringify(data, null, 2);
-                  payload.result.structuredContent = data;
-                }
+                try { payload.result.structuredContent = JSON.parse(textBlock.text); } catch (_) { /* leave as text */ }
               }
               payload.result._meta = { ...(payload.result._meta || {}), ui: { resourceUri: UI_URI } };
             }

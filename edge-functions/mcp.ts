@@ -375,7 +375,9 @@ const TOOLS = [
       'See the state of ALL question submissions from every contributor: what is still waiting for ' +
       'the reviewer, what was approved, and what was rejected (with the reviewer\'s reasons). All ' +
       'partners share the same full visibility. Use this when the person asks about progress or what ' +
-      'is pending, and BEFORE writing more for a pack — the rejection reasons show where the bar is.',
+      'is pending, and BEFORE writing more for a pack — the rejection reasons show where the bar is. ' +
+      'This returns COUNTS and decisions, not the questions themselves. If the person wants to SEE or ' +
+      'go through the actual pending questions, use preview_questions instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -387,15 +389,26 @@ const TOOLS = [
     name: 'preview_questions',
     description:
       'Render questions EXACTLY as a child sees them in the game — the sentence with the masked word ' +
-      'in place, at each level, with the two options. Use it on drafts before proposing, and on the ' +
-      'pending queue so a person can judge tone and meaning rather than just mechanics. Pass ' +
-      '`questions` to preview drafts, or `pack_slug` (or nothing) to preview what is awaiting review.',
+      'in place, at each level, with the two options. USE THIS whenever the person wants to SEE or ' +
+      'PLAY questions rather than read counts. Trigger phrasings include: "preview", "let\'s preview ' +
+      'these", "review the pending questions", "go through the queue", "show me what\'s waiting", ' +
+      '"what needs reviewing", "play this", "let me try it", "play the question bank", "show me the ' +
+      'questions in <pack>", "how would this look in the game", "what does the child see". Treat any ' +
+      'similar phrasing the same way — the intent is always: show the actual questions, playable.\n' +
+      'WHICH QUESTIONS: pass `questions` to preview drafts you have just written. Otherwise set ' +
+      '`source` — "pending" (default) shows what is AWAITING REVIEW, "live" plays a pack\'s ' +
+      'already-approved bank. `pack_slug` narrows either to one pack, and is required for "live".\n' +
+      'THEN RENDER IT AS A PLAYABLE CARD: build an interactive artifact showing the sentence with the ' +
+      'masked word exactly as returned, tabs to switch level, and the two words as big tappable ' +
+      'buttons that turn green (correct) or red (wrong) when tapped. Never reveal which word is ' +
+      'correct before it is tapped, and never reword or reorder anything — the whole point is to see ' +
+      'it exactly as a child does. Do not just list them as text.',
     inputSchema: {
       type: 'object',
       properties: {
         questions: {
           type: 'array',
-          description: 'Drafts to preview. Omit to preview the pending review queue instead.',
+          description: 'Drafts to preview. Omit to preview saved questions instead (see `source`).',
           items: {
             type: 'object',
             properties: {
@@ -406,7 +419,12 @@ const TOOLS = [
             required: ['template', 'answer', 'alt_answer'],
           },
         },
-        pack_slug: { type: 'string', description: 'Limit the queue preview to one pack.' },
+        source: {
+          type: 'string',
+          enum: ['pending', 'live'],
+          description: '"pending" (default) = awaiting review. "live" = a pack\'s approved question bank (needs pack_slug).',
+        },
+        pack_slug: { type: 'string', description: 'Limit to one pack. Required when source is "live".' },
         levels: { type: 'array', items: { type: 'number' }, description: 'Only these levels (default: all).' },
       },
     },
@@ -901,13 +919,38 @@ async function callTool(db: any, partner: string, name: string, args: any) {
       };
     }
 
-    // Otherwise: preview what is awaiting review.
+    // Otherwise: preview saved questions — either the pending queue, or a pack's live bank.
     let packFilter: any = null;
     if (args.pack_slug) {
       const { data: p } = await db.from('pm_packs').select('id,slug,name').eq('slug', args.pack_slug).maybeSingle();
       if (!p) return { error: `No pack with slug "${args.pack_slug}". Call list_packs to see what exists.` };
       packFilter = p;
     }
+
+    const source = args.source === 'live' ? 'live' : 'pending';
+
+    // ---- live: the pack's already-approved question bank ----
+    if (source === 'live') {
+      if (!packFilter) return { error: 'To play a live question bank, say which pack — pass pack_slug.' };
+      const { data: live } = await db.from('pm_questions')
+        .select('id,template,answer,alt_answer')
+        .eq('pack_id', packFilter.id).eq('status', 'active').order('sort_order').limit(40);
+      return {
+        source: `LIVE question bank — pack "${packFilter.name}" (already approved and in the game)`,
+        count: (live || []).length,
+        previews: (live || []).map((r: any) => ({
+          id: r.id,
+          pack: packFilter.name,
+          question: `${(r.answer || '').toUpperCase()} / ${(r.alt_answer || '').toUpperCase()}`,
+          at_each_level: renderOne(r),
+        })),
+        note: (live || []).length
+          ? 'These are LIVE questions children can already see. Render them as playable cards. They cannot be edited or rejected from here — that is done in the CMS.'
+          : 'This pack has no approved questions yet.',
+      };
+    }
+
+    // ---- pending: what is awaiting review ----
     const qq = db.from('pm_review_queue')
       .select('id,pack_id,template,answer,alt_answer,provider,frame_slots,created_at')
       .eq('status', 'pending').order('created_at').limit(40);
@@ -930,8 +973,8 @@ async function callTool(db: any, partner: string, name: string, args: any) {
         has_slot_variations: !!(r.frame_slots && Object.keys(r.frame_slots).length),
       })),
       note: (queued || []).length
-        ? 'Show these to the person as the child would see them. They can reject any with reject_questions (using the id), or fix one with edit_queued_question. APPROVING is not possible here — that is done in the CMS.'
-        : 'Nothing is awaiting review.',
+        ? 'Render these as playable cards. The person can reject any with reject_questions (using the id), or fix one with edit_queued_question. APPROVING is not possible here — that is done in the CMS.'
+        : 'Nothing is awaiting review. If they wanted to play a pack\'s existing questions, call this again with source:"live" and a pack_slug.',
     };
   }
 
@@ -1261,9 +1304,17 @@ Deno.serve(async (req) => {
         'check_questions on your drafts, and only then propose_questions. Nothing you propose goes ' +
         'live — a human reviews every question. You can also create a new pack (create_pack) or edit ' +
         'a pack\'s details (update_pack) when the person wants a theme that does not exist yet; the ' +
-        'pack itself is created immediately, but its questions still go to the review queue. Use ' +
-        'review_status to report what happened to previously proposed questions, and read its ' +
-        'rejection reasons before writing more.',
+        'pack itself is created immediately, but its questions still go to the review queue. You can ' +
+        'fix (edit_queued_question) or reject (reject_questions) items still waiting in the queue; ' +
+        'APPROVING is deliberately not possible here — that happens in the CMS. Use review_status for ' +
+        'counts and progress across all contributors, and read its rejection reasons before writing ' +
+        'more. PREVIEWING AND PLAYING: if the person asks to preview, review the pending questions, ' +
+        'go through the queue, play a question, or play a pack\'s question bank — or anything ' +
+        'similar — call preview_questions and render the result as an interactive PLAYABLE artifact: ' +
+        'the sentence with its blank, tabs to switch level, and the two words as tappable buttons ' +
+        'that go green or red, with the correct one hidden until tapped. Pass source:"live" with a ' +
+        'pack_slug to play a pack\'s approved bank; the default shows what is awaiting review. ' +
+        'review_status is for counts only — it does not show the questions.',
     });
   }
   if (method === 'notifications/initialized') return new Response(null, { status: 202, headers: cors });
