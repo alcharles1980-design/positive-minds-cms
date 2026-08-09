@@ -18,11 +18,18 @@ on:
     branches: [main]
     paths:
       - "edge-functions/**"
-      - ".github/workflows/deploy-edge-functions.yml"
+      # NOT this workflow file. Editing CI must never ship code — the self-trigger meant that
+      # touching the deploy script deployed the live mcp function as a side effect.
   workflow_dispatch:
     inputs:
+      mode:
+        description: "dry-run compares deployed vs repo and changes nothing. deploy overwrites live."
+        required: true
+        default: "dry-run"
+        type: choice
+        options: ["dry-run", "deploy"]
       only:
-        description: "Deploy just one function (slug), or leave blank for all changed ones"
+        description: "Just one function (slug), or leave blank for all"
         required: false
 
 env:
@@ -44,15 +51,68 @@ jobs:
       # edge-functions/<slug>.ts, so lay out what the CLI wants without moving the source.
       - name: Stage functions
         run: |
-          mkdir -p supabase/functions
+          mkdir -p supabase/functions /tmp/repo-funcs
           for f in edge-functions/*.ts; do
             slug="$(basename "$f" .ts)"
             mkdir -p "supabase/functions/$slug"
             cp "$f" "supabase/functions/$slug/index.ts"
+            cp "$f" "/tmp/repo-funcs/$slug.ts"
             echo "staged $slug"
           done
 
+      # DRY RUN. Downloads what is actually deployed and diffs it against the repo, deploying
+      # nothing. This is the only way to answer "is deployed == repo?" — the functions were
+      # hand-pasted for months and drifted (comments condensed in transit), so the first automated
+      # deploy could silently overwrite something that only exists on the server. Run this BEFORE
+      # the first real deploy, and any time you are not sure.
+      - name: Dry run — compare deployed against repo
+        if: github.event.inputs.mode == 'dry-run'
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          if [ -z "$SUPABASE_ACCESS_TOKEN" ]; then
+            echo "::error::SUPABASE_ACCESS_TOKEN is not set — see the header of this workflow."
+            exit 1
+          fi
+          ONLY="${{ github.event.inputs.only }}"
+          mkdir -p /tmp/live-funcs
+          DRIFT=0
+          for f in /tmp/repo-funcs/*.ts; do
+            slug="$(basename "$f" .ts)"
+            if [ -n "$ONLY" ] && [ "$ONLY" != "$slug" ]; then continue; fi
+            echo "::group::$slug"
+            rm -rf "supabase/functions/$slug"
+            if supabase functions download "$slug" --project-ref "$PROJECT_REF" 2>/dev/null; then
+              LIVE="supabase/functions/$slug/index.ts"
+              if [ ! -f "$LIVE" ]; then echo "downloaded but no index.ts found"; echo "::endgroup::"; continue; fi
+              R=$(wc -c < "$f"); L=$(wc -c < "$LIVE")
+              echo "repo: $R bytes   deployed: $L bytes"
+              if diff -q "$f" "$LIVE" >/dev/null; then
+                echo "IDENTICAL"
+              else
+                DRIFT=1
+                echo "DIFFERS — first 60 differing lines:"
+                diff "$LIVE" "$f" | head -60 || true
+                echo "(< = deployed only, > = repo only)"
+              fi
+            else
+              echo "could not download $slug (may not be deployed yet)"
+            fi
+            echo "::endgroup::"
+          done
+          # Restore the repo copies so nothing downstream sees downloaded content.
+          for f in /tmp/repo-funcs/*.ts; do
+            slug="$(basename "$f" .ts)"
+            mkdir -p "supabase/functions/$slug"; cp "$f" "supabase/functions/$slug/index.ts"
+          done
+          if [ "$DRIFT" = "1" ]; then
+            echo "::warning::Deployed and repo differ. Read the diff above BEFORE running mode=deploy — a deploy makes the repo win."
+          else
+            echo "No drift: deployed matches repo."
+          fi
+
       - name: Deploy
+        if: github.event_name == 'push' || github.event.inputs.mode == 'deploy'
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
