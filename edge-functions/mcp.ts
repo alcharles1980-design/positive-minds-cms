@@ -402,7 +402,19 @@ const TOOLS = [
       'masked word exactly as returned, tabs to switch level, and the two words as big tappable ' +
       'buttons that turn green (correct) or red (wrong) when tapped. Never reveal which word is ' +
       'correct before it is tapped, and never reword or reorder anything — the whole point is to see ' +
-      'it exactly as a child does. Do not just list them as text.',
+      'it exactly as a child does. Do not just list them as text.\n' +
+      'MATCH THE CMS DESIGN (Positive Minds house style) so it feels like part of the product:\n' +
+      '  page background #F6F5FB; each question in a white #FFFFFF card, 1px #E4E0F0 border, 16px ' +
+      'radius, generous padding, soft shadow 0 2px 10px rgba(25,23,40,.05).\n' +
+      '  type: system sans (-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui); main text ' +
+      '#191728, secondary #6E6B85; small labels UPPERCASE, 11px, weight 800, letter-spacing .3px.\n' +
+      '  brand purple #6C4CE0 — selected level tab (white text on purple), the masked blank, and ' +
+      'accents; unselected tabs #FBFAFE with #E4E0F0 border and #4A4763 text; pill chips use ' +
+      '#EEE9FD background with #4A32B0 text.\n' +
+      '  the two words: monospace, weight 800, letter-spacing 1px, 12px radius, 2px border. Correct ' +
+      'when tapped = background #DEF5F1, border #0E8C7E, text #0A6B60. Wrong = background #FDECEC, ' +
+      'border #C2352F, text #C2352F. Untapped = white with #E4E0F0 border.\n' +
+      '  keep it calm and uncluttered — this is children\'s therapy content, not a dashboard.',
     inputSchema: {
       type: 'object',
       properties: {
