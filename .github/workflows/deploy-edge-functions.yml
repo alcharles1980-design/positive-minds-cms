@@ -90,12 +90,21 @@ jobs:
           cat > /tmp/norm.py <<'NORM'
           import re, sys
           src = open(sys.argv[1], encoding='utf-8', errors='replace').read()
-          src = re.sub(r'/\*[\s\S]*?\*/', ' ', src)          # block comments
-          src = re.sub(r'(?m)^\s*//[^\n]*', ' ', src)          # whole-line comments
-          src = re.sub(r'(?<![:\w"\x27])//[^\n]*', ' ', src)   # trailing comments (not URLs)
-          src = re.sub(r'!(?=[.\)\],;])', '', src)            # non-null assertions
-          src = re.sub(r':\s*(?:string|number|boolean|any|void|unknown)(?:\[\])?(?=\s*[,;)=}])', '', src)
+          # Comments. Do not eat the // inside a URL literal.
+          src = re.sub(r'/\*[\s\S]*?\*/', ' ', src)
+          src = re.sub(r'(?m)^\s*//[^\n]*', ' ', src)
+          src = re.sub(r'(?<![:\w"\x27])//[^\n]*', ' ', src)
+          # TypeScript that the transpiler removes: generics, annotations, assertions, optionals.
+          for _ in range(3):
+              src = re.sub(r'(?<=[\w\)\]])<[A-Za-z_][\w\s,\.\[\]\|]*>(?=\s*[\(\)\{\[,;=])', '', src)
+          src = re.sub(r'!(?=[\.\)\],;])', '', src)
+          src = re.sub(r'\?(?=\s*:)', '', src)
+          src = re.sub(r':\s*(?:string|number|boolean|any|void|unknown|never|object)(?:\[\])?(?=\s*[,;\)=\}])', '', src)
+          src = re.sub(r'(?m)\bas\s+(?:const|string|number|any)\b', '', src)
+          # Formatting the bundler re-prints: trailing commas, then ALL insignificant whitespace.
+          src = re.sub(r',(?=\s*[\)\]\}])', '', src)
           src = re.sub(r'\s+', ' ', src)
+          src = re.sub(r'\s*([^\w\s])\s*', r'\1', src)   # no space around punctuation
           print(src.strip())
           NORM
           sed -i 's/^          //' /tmp/norm.py
@@ -122,11 +131,15 @@ jobs:
               DRIFT=1
               echo "::warning::$slug DIFFERS after normalisation — real drift"
               # Word-level so a reformat does not drown the actual change.
-              tr ' ' '\n' < /tmp/b.txt > /tmp/bw.txt
-              tr ' ' '\n' < /tmp/a.txt > /tmp/aw.txt
-              diff /tmp/bw.txt /tmp/aw.txt > /tmp/d.txt 2>/dev/null
-              echo "first 80 differing tokens (< deployed only, > repo only):"
-              head -80 /tmp/d.txt
+              python3 - <<'CTX'
+          a=open('/tmp/a.txt',encoding='utf-8').read(); b=open('/tmp/b.txt',encoding='utf-8').read()
+          i=0
+          while i<min(len(a),len(b)) and a[i]==b[i]: i+=1
+          print('first divergence at character', i, 'of', min(len(a),len(b)))
+          print('  deployed: ...'+b[max(0,i-90):i+140].replace(chr(10),' '))
+          print('  repo    : ...'+a[max(0,i-90):i+140].replace(chr(10),' '))
+          CTX
+              sed -i 's/^          //' /dev/null 2>/dev/null || true
             fi
             echo "::endgroup::"
           done
