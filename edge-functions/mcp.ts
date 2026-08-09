@@ -318,6 +318,54 @@ const TOOLS = [
       required: ['pack_slug', 'questions'],
     },
   },
+  {
+    name: 'create_pack',
+    description:
+      'Create a new themed pack (e.g. "Bravery", "Friendship"). The pack is created and published in ' +
+      'the CMS straight away, so you can start proposing questions into it immediately. Only the pack ' +
+      'itself is created — its QUESTIONS still go to the human review queue like any other. Ask the ' +
+      'person what the pack should be about before calling this, and check list_packs first so you ' +
+      'do not duplicate an existing theme.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Display name, e.g. "Bravery Pack"' },
+        description: { type: 'string', description: 'Short blurb shown on the pack card' },
+        emoji: { type: 'string', description: 'A single emoji for the pack (default 💪)' },
+        level: { type: 'number', description: 'Default level for questions in this pack (default 1)' },
+        difficulty: { type: 'string', description: 'basic | intermediate | advanced (default basic)' },
+        purpose: { type: 'string', description: 'What this pack is for — its therapeutic objective' },
+        focus_areas: { type: 'string', description: 'The themes/situations it should cover' },
+        style_approach: { type: 'string', description: 'Tone and style guidance for its questions' },
+        example_objectives: { type: 'string', description: 'Example objectives for the pack' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'update_pack',
+    description:
+      'Edit an existing pack\'s details — name, description, emoji, level, difficulty, or the pack ' +
+      'guidance fields (purpose, focus areas, style, objectives). Use this to sharpen a pack\'s ' +
+      'definition. The slug cannot be changed (the game keys on it). Only fields you supply are ' +
+      'changed; anything you omit is left alone.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pack_slug: { type: 'string', description: 'Which pack to edit' },
+        name: { type: 'string' },
+        description: { type: 'string' },
+        emoji: { type: 'string' },
+        level: { type: 'number' },
+        difficulty: { type: 'string' },
+        purpose: { type: 'string' },
+        focus_areas: { type: 'string' },
+        style_approach: { type: 'string' },
+        example_objectives: { type: 'string' },
+      },
+      required: ['pack_slug'],
+    },
+  },
 ];
 
 // The brief Claude needs to write good content. Returned by list_packs so it is always in context.
@@ -357,7 +405,7 @@ async function callTool(db: any, partner: string, name: string, args: any) {
   if (name === 'list_packs') {
     const { data: packs } = await db.from('pm_packs')
       .select('id,slug,name,emoji,description,level,status')
-      .eq('status', 'published').order('name').limit(200);
+      .in('status', ['published', 'draft']).order('name').limit(200);
     const { data: levels } = await db.from('pm_levels').select('*').order('level').limit(200);
 
     // Per-pack statistics, so the contributor can SEE how full each pack is and where the gaps are
@@ -380,10 +428,10 @@ async function callTool(db: any, partner: string, name: string, args: any) {
 
     return {
       brief: BRIEF,
-      how_to_start: 'Show these packs to the person as a numbered list with their stats, and ask which ONE they want to add to. Then call get_pack_content for that pack before writing anything.',
+      how_to_start: 'Show these packs to the person as a numbered list with their stats, and ask which ONE they want to add to. Then call get_pack_content for that pack before writing anything. If none of the existing packs fit what they want to write about, you can offer to make a new one with create_pack.',
       packs: (packs || []).map((p: any) => ({
         slug: p.slug, name: p.name, emoji: p.emoji,
-        description: p.description, default_level: p.level,
+        description: p.description, default_level: p.level, status: p.status,
         stats: {
           live_questions: liveCount[p.id] || 0,
           distinct_answer_words: wordSets[p.id] ? wordSets[p.id].size : 0,
@@ -516,6 +564,132 @@ async function callTool(db: any, partner: string, name: string, args: any) {
         problems: c.result.flags.map((f: any) => f.detail),
       })),
       note: 'These are now waiting for a human to approve, edit or reject. Nothing is live yet.',
+    };
+  }
+
+  // ---- create_pack ----
+  // Mirrors the CMS PackEditor + savePack convention EXACTLY: same slugify, same defaults,
+  // sort_order = count + 1, and an activity-log entry. Difference from the CMS form: status is
+  // 'published' rather than 'draft', by explicit decision — the pack container goes live in the CMS
+  // immediately so a contributor can write into it, while its QUESTIONS still go to the review queue.
+  if (name === 'create_pack') {
+    const rawName = String(args.name || '').trim();
+    if (!rawName) return { error: 'Give the pack a name.' };
+
+    // Same slugify as core.jsx: lowercase, non-alphanumerics -> '-', trim leading/trailing '-'.
+    const slug = rawName.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    if (!slug) return { error: `"${rawName}" doesn't produce a usable slug — use some letters or numbers in the name.` };
+
+    const { data: clash } = await db.from('pm_packs').select('slug,name').eq('slug', slug).maybeSingle();
+    if (clash) return { error: `A pack with the slug "${slug}" already exists ("${clash.name}"). Pick a different name, or use update_pack to edit that one.` };
+
+    // Validate the level against the real level list, like the CMS's level picker does.
+    const { data: levels } = await db.from('pm_levels').select('level').order('level').limit(200);
+    const validLevels = (levels || []).map((l: any) => l.level);
+    const level = args.level != null ? Number(args.level) : 1;
+    if (validLevels.length && !validLevels.includes(level)) {
+      return { error: `Level ${level} doesn't exist. Available levels: ${validLevels.join(', ')}.` };
+    }
+
+    const difficulty = ['basic', 'intermediate', 'advanced'].includes(String(args.difficulty || '').toLowerCase())
+      ? String(args.difficulty).toLowerCase() : 'basic';
+
+    const { count } = await db.from('pm_packs').select('id', { count: 'exact', head: true });
+
+    const { data: created, error: cErr } = await db.from('pm_packs').insert({
+      slug,
+      name: rawName,
+      emoji: args.emoji || '💪',
+      description: args.description || '',
+      difficulty,
+      status: 'published',           // published in the CMS immediately (decision, 2026-08)
+      level,
+      is_custom: true,               // created outside the CMS form
+      sort_order: (count ?? 0) + 1,
+      purpose: args.purpose || '',
+      focus_areas: args.focus_areas || '',
+      style_approach: args.style_approach || '',
+      example_objectives: args.example_objectives || '',
+    }).select('id,slug,name,emoji,level,difficulty,status').maybeSingle();
+    if (cErr) return { error: String(cErr.message || cErr) };
+
+    // Match the CMS: every pack create is recorded in the activity log, attributed to the partner.
+    try {
+      await db.from('pm_activity').insert({
+        entity: 'pack', entity_id: created?.id, entity_name: rawName,
+        action: 'create', actor: `partner:${partner}`, detail: 'created via Claude connector',
+      });
+    } catch { /* logging must never break the call */ }
+
+    return {
+      created: created,
+      note: `Pack "${rawName}" is created and published in the CMS (slug: ${slug}). You can propose questions into it now — they will still go to the human review queue for approval.`,
+    };
+  }
+
+  // ---- update_pack ----
+  // Only the fields supplied are changed. The slug is deliberately NOT editable: the game and
+  // get_pack_content key on it.
+  if (name === 'update_pack') {
+    const { data: pack } = await db.from('pm_packs')
+      .select('id,slug,name,level').eq('slug', args.pack_slug).maybeSingle();
+    if (!pack) return { error: `No pack with slug "${args.pack_slug}". Call list_packs to see what exists.` };
+
+    const patch: Record<string, unknown> = {};
+    if (args.name != null && String(args.name).trim()) patch.name = String(args.name).trim();
+    if (args.description != null) patch.description = args.description;
+    if (args.emoji != null) patch.emoji = args.emoji;
+    if (args.purpose != null) patch.purpose = args.purpose;
+    if (args.focus_areas != null) patch.focus_areas = args.focus_areas;
+    if (args.style_approach != null) patch.style_approach = args.style_approach;
+    if (args.example_objectives != null) patch.example_objectives = args.example_objectives;
+
+    if (args.difficulty != null) {
+      const d = String(args.difficulty).toLowerCase();
+      if (!['basic', 'intermediate', 'advanced'].includes(d)) return { error: 'difficulty must be basic, intermediate or advanced.' };
+      patch.difficulty = d;
+    }
+
+    let levelWarning: string | null = null;
+    if (args.level != null) {
+      const { data: levels } = await db.from('pm_levels').select('level').order('level').limit(200);
+      const validLevels = (levels || []).map((l: any) => l.level);
+      const lv = Number(args.level);
+      if (validLevels.length && !validLevels.includes(lv)) {
+        return { error: `Level ${lv} doesn't exist. Available levels: ${validLevels.join(', ')}.` };
+      }
+      patch.level = lv;
+      if (lv !== pack.level) {
+        const { count: qCount } = await db.from('pm_questions')
+          .select('id', { count: 'exact', head: true }).eq('pack_id', pack.id).eq('status', 'active');
+        if ((qCount ?? 0) > 0) {
+          levelWarning = `Heads up: this pack already has ${qCount} question(s) written for level ${pack.level}. ` +
+            `Changing the default level to ${lv} does not rewrite them, and some may not fit the new level's word-length rules.`;
+        }
+      }
+    }
+
+    if (!Object.keys(patch).length) return { error: 'Nothing to update — supply at least one field to change.' };
+    patch.updated_at = new Date().toISOString();
+
+    const { data: updated, error: uErr } = await db.from('pm_packs')
+      .update(patch).eq('id', pack.id)
+      .select('id,slug,name,emoji,level,difficulty,status').maybeSingle();
+    if (uErr) return { error: String(uErr.message || uErr) };
+
+    try {
+      await db.from('pm_activity').insert({
+        entity: 'pack', entity_id: pack.id, entity_name: updated?.name || pack.name,
+        action: 'update', actor: `partner:${partner}`,
+        detail: `updated via Claude connector (${Object.keys(patch).filter(k => k !== 'updated_at').join(', ')})`,
+      });
+    } catch { /* ignore */ }
+
+    return {
+      updated,
+      changed_fields: Object.keys(patch).filter(k => k !== 'updated_at'),
+      warning: levelWarning,
+      note: 'Pack details updated. The slug is unchanged — the game keys on it.',
     };
   }
 
@@ -754,7 +928,9 @@ Deno.serve(async (req) => {
         'Write therapeutic word-puzzle content for children. ALWAYS call list_packs first (it ' +
         'returns the brief), then get_pack_content for the pack you are writing for, then ' +
         'check_questions on your drafts, and only then propose_questions. Nothing you propose goes ' +
-        'live — a human reviews every question.',
+        'live — a human reviews every question. You can also create a new pack (create_pack) or edit ' +
+        'a pack\'s details (update_pack) when the person wants a theme that does not exist yet; the ' +
+        'pack itself is created immediately, but its questions still go to the review queue.',
     });
   }
   if (method === 'notifications/initialized') return new Response(null, { status: 202, headers: cors });
