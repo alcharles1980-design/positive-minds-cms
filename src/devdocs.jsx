@@ -721,17 +721,41 @@ for the generation — no API key of ours is involved.
 
 **WHY IT IS SAFE, and this matters more than any permission check:** a partner CANNOT reach a child.
 \`pm_review_approve\` is the ONLY path into live content and it requires a human to press Approve. So
-the worst a partner can do — even a compromised one — is fill the review queue with things you reject.
-That is the entire blast radius. There is deliberately NO tool to publish, delete, or edit a pack.
+the worst a partner can do — even a compromised one — is fill the review queue with things you reject,
+plus create or rename pack containers. That is the entire blast radius. There is deliberately NO tool
+to DELETE a pack, and none to approve or publish a QUESTION.
 
 **The server:** edge function \`mcp\` (verify_jwt=FALSE — partners authenticate with their own token,
-not a Supabase JWT). Speaks JSON-RPC 2.0 over Streamable HTTP. Four tools, deliberately narrow:
+not a Supabase JWT). Speaks JSON-RPC 2.0 over Streamable HTTP. Six tools, deliberately narrow:
 | Tool | Reads | Writes |
 |---|---|---|
-| \`list_packs\` | packs + level rules + the brief | — |
-| \`get_pack_content\` | existing questions, words already used | — |
+| \`list_packs\` | packs (published + draft) w/ per-pack stats, level rules, the brief | — |
+| \`get_pack_content\` | existing questions, words already used, pack statistics | — |
 | \`check_questions\` | — | — (pure validation, saves nothing) |
 | \`propose_questions\` | — | **the review queue ONLY** |
+| \`create_pack\` | — | a new pack row (published immediately) |
+| \`update_pack\` | — | an existing pack's details (never its slug) |
+
+**PACK CREATION (Aug 2026).** \`create_pack\` mirrors the CMS's own PackEditor + \`savePack\` convention
+EXACTLY — same \`slugify\` as core.jsx, \`sort_order = count + 1\`, emoji default 💪, the same pack-detail
+fields (purpose / focus_areas / style_approach / example_objectives), and an activity-log row. Three
+deliberate differences from the CMS form: the slug is collision-checked up front (the form does not
+check), the level is validated against the real \`pm_levels\` list, and \`status\` is **published**
+rather than draft.
+
+Publishing the CONTAINER immediately is safe because the two gates are independent: a pack is only a
+container, and its QUESTIONS still reach it solely through the review queue. A newly created pack is
+simply EMPTY until Albert approves content into it. \`update_pack\` patches only the fields supplied;
+the slug is immutable because the game and \`get_pack_content\` key on it, and changing \`level\` on a
+pack that already has questions returns a WARNING (not a block) since those questions were written to
+the old level's word-length band. Every create/update writes \`pm_activity\` with
+\`actor = 'partner:<name>'\`, so connector-originated changes are identifiable in the CMS.
+
+**PER-PACK STATISTICS.** \`list_packs\` returns \`stats\` for each pack (live_questions,
+distinct_answer_words, awaiting_review) plus a \`how_to_start\` hint, and \`get_pack_content\` returns a
+\`statistics\` summary. This exists so a contributor can SEE how full each pack is and choose where the
+gaps are, instead of guessing. \`list_packs\` includes DRAFT packs as well as published (and returns
+each pack's \`status\`) — otherwise a contributor could not see a pack that was not yet published.
 
 \`check_questions\` is the interesting one: Claude validates its OWN drafts against the real engine
 before proposing, so it catches and fixes the same-length-words bug itself. Verified live — given
@@ -773,10 +797,40 @@ Every one of these returned HTTP 200 while being completely wrong: "it responded
 Tables (all RLS-on, ZERO policies — the browser cannot read any of them): pm_oauth_clients,
 pm_oauth_codes (PKCE-bound, single-use, 10-minute), pm_oauth_tokens (30-day).
 
-**The old shared-secret note, for reference:** a token per partner (\`Authorization: Bearer pmk_...\`). NOT OAuth — with three
-trusted people, OAuth 2.1 with PKCE would be pure ceremony. The token gives us what we actually need:
-we know WHO proposed each question (queued rows are tagged \`partner:sarah\`) and we can revoke one
-partner without touching the others.
+### The Cloudflare discovery shim — REQUIRED, not optional
+
+**THE CONNECTOR URL IS THE SHIM, NOT THE SUPABASE FUNCTION:**
+\`https://positive-minds-mcp.alcharles1980.workers.dev/mcp\`
+
+**The problem it solves.** Claude's custom-connector OAuth discovery probes the ORIGIN ROOT for
+\`/.well-known/oauth-protected-resource\` and \`/.well-known/oauth-authorization-server\` (bare, and in
+the RFC 8414 host-inserted form). A Supabase edge function is served under \`/functions/v1/mcp\` and
+CANNOT serve root \`/.well-known/*\` paths — so every probe 404s, Claude never starts the sign-in flow,
+and the connector reports **"no tools available"** with no sign-in screen ever appearing. Confirmed
+from logs: ZERO well-known requests reached the gateway. This is structural, not a bug in our code —
+a bare Supabase function cannot host a Claude custom connector.
+
+**The fix** (\`mcp-shim/\` in the repo — a Cloudflare Worker on its own origin, deployed by
+\`.github/workflows/deploy-mcp-shim.yml\` using the existing CLOUDFLARE_* repo secrets):
+1. serves both discovery documents at its ROOT (covering bare, \`/mcp\`-suffixed and OIDC forms),
+   advertising its OWN URLs;
+2. proxies \`/mcp\`, \`/mcp/token\`, \`/mcp/register\` to the UNCHANGED Supabase function;
+3. rewrites the 401 \`WWW-Authenticate\` header to point at its own discovery doc;
+4. serves its OWN sign-in page for \`GET /mcp/authorize\`, CMS-themed, and submits it via JS.
+
+**Why the shim serves the sign-in page itself.** Proxying Supabase's login page failed twice: the
+proxied response arrived as \`content-type: text/plain\` (browsers rendered raw HTML source, so there
+was no form to type into), and its native \`<form method="POST">\` submit did NOTHING inside Claude's
+OAuth window — the Connect button appeared dead. The shim now renders its own page and posts via
+\`fetch\` with an \`X-Shim-Ajax\` header, converting Supabase's 302 into \`{ok, redirect}\` JSON that the
+page then navigates to. It shows "Connecting…" and real error text instead of failing silently.
+When transforming a proxied body, DROP \`content-length\`/\`content-encoding\`/\`transfer-encoding\` —
+they become wrong and cause exactly this class of failure.
+
+**THE LESSON.** The original self-test "proved" the whole OAuth flow end-to-end — but it HARD-CODED
+the discovery URLs, so it never exercised the one step a real client performs first. It passed while
+the connector was completely unusable. A test that skips the client's own discovery is not a test of
+the client's path.
 
 **Table \`pm_mcp_tokens\`** — same security posture as pm_ai_config: RLS on, ZERO policies, so the
 browser cannot read it at all. Only sha256 HASHES are stored; the raw token is shown ONCE at creation
@@ -857,6 +911,27 @@ that network-first caches GETs).
   workspace only — it is NOT part of the deployed repo.
 
 ## 12. Recent hardening & changes (most recent first)
+- **Aug 2026 — CONNECTOR MADE ACTUALLY USABLE + pack creation.** Four related changes:
+  1. **The Cloudflare discovery shim** (\`mcp-shim/\`). The connector had NEVER worked from a real
+     Claude client: a Supabase edge function cannot serve root \`/.well-known/*\`, which is where
+     custom-connector OAuth discovery probes, so Claude reported "no tools available" and no sign-in
+     screen ever appeared. A Worker now serves the discovery docs at its own root, proxies the rest to
+     the unchanged Supabase function, and serves its OWN CMS-themed sign-in page (the proxied Supabase
+     page rendered as text/plain and its native form submit did nothing inside Claude's OAuth window).
+     **The connector URL is now the shim**, not the Supabase function. Full OAuth verified end-to-end
+     through it — register, sign-in, token exchange, authenticated tool calls.
+  2. **create_pack / update_pack.** Partners can create a themed pack and edit pack details, following
+     the CMS PackEditor+savePack convention exactly. Packs are created PUBLISHED; questions still go
+     only to the review queue, so a new pack is empty until approved into. No delete tool. Attributed
+     in pm_activity as \`partner:<name>\`.
+  3. **Per-pack statistics** in list_packs/get_pack_content, so a contributor sees how full each pack
+     is; list_packs now includes draft packs and returns status.
+  4. **Strict-dedup alignment.** The BRIEF and tool descriptions used to tell Claude to avoid word
+     reuse and reversed pairs — things the validator no longer flags. Variety is now stated as a
+     PREFERENCE; the only hard rule is the exact-triple duplicate.
+  Also fixed in the same period: the SITE DEPLOY had been failing silently for days because
+  deploy.yml ran \`wrangler pages deploy\` against what is actually a Static-Assets WORKER — switched
+  to \`wrangler deploy\`, which uses the existing wrangler.toml.
 - **NEW: Claude Connector (MCP) — partners write content by talking to Claude.** Three trusted
   partners add this CMS as a custom connector in their OWN Claude account and simply ask for content.
   Their subscription pays for it. New edge fn \`mcp\` (JSON-RPC 2.0, verify_jwt=false), new table
@@ -864,6 +939,8 @@ that network-first caches GETs).
   FOUR TOOLS, deliberately narrow: list_packs, get_pack_content, check_questions (pure validation —
   saves nothing), propose_questions (writes to the REVIEW QUEUE only). No publish. No delete. No pack
   editing.
+  [SUPERSEDED Aug 2026 — see the top entry: there are now SIX tools; create_pack and update_pack were
+  added. The question-side invariant below is UNCHANGED and still holds.]
   THE POINT: a partner cannot reach a child. pm_review_approve is still the only path into live
   content. The worst they can do — even compromised — is fill the queue with things you reject.
   \`check_questions\` means Claude catches its OWN mistakes before proposing. Verified live: given
@@ -1826,11 +1903,25 @@ Cloudflare Worker hosting, GitHub Actions/Cloudflare Git auto-deploy.
 4y. **"It returned 200" is not "it works".** All three base-URL bugs in the OAuth server (http instead
    of https, wrong path, Supabase's INTERNAL hostname) returned a perfectly healthy 200 while telling
    Claude to go somewhere that did not exist. Read what the response SAYS, not just its status code.
-4w. **The MCP connector must never grow a write tool beyond propose_questions.** Partners can read
-   packs and propose to the queue. That is all. The moment you add publish/delete/edit, the blast
-   radius stops being "a queue full of things Albert rejects" and becomes "a partner can reach a
-   child". If a partner needs more, they belong in the CMS, not a chat window. The validator in the
-   MCP server is a FOURTH copy — it must stay byte-identical to the other three.
+4z. **A self-test that hard-codes what the CLIENT discovers is not a test.** The MCP self-test drove
+   the OAuth flow by calling /register, /authorize and /token at URLs it already knew — so it passed,
+   green, repeatedly, while the connector was completely unusable from a real Claude client. The step
+   it skipped (root /.well-known discovery) was the ONLY step that was broken. When a client does
+   discovery, routing or negotiation on its own, the test must start where the CLIENT starts, or it
+   proves nothing about the path that matters. When you cannot drive the real client, INSTRUMENT the
+   server and read what it actually receives: adding request logging to the shim is what finally
+   located this, and each stage of an OAuth flow leaves a row (pm_oauth_clients → codes → tokens),
+   so a count of those tables tells you exactly how far the real client got.
+4w. **The MCP connector must never gain a write path to LIVE QUESTIONS.** The invariant is not "few
+   tools" — it is that pm_review_approve stays the ONLY route a question can take into a pack.
+   propose_questions writes to the queue and nowhere else. Never add a tool that approves, publishes
+   or edits a live question, and never let one write pm_questions directly.
+   REVISED Aug 2026: create_pack and update_pack DO write, and that is acceptable, because a pack is a
+   CONTAINER, not content — a connector-created pack is EMPTY until Albert approves questions into it.
+   The blast radius is still "a queue full of things Albert rejects", plus pack names he can rename.
+   Deliberately still absent: DELETE for packs (destructive — it takes the questions with it), and
+   anything touching a question's live status. If a partner needs those, they belong in the CMS.
+   The validator in the MCP server is a FOURTH copy — it must stay byte-identical to the other three.
 4q. **EVERY content-entry path goes through the review queue.** Not just AI generation — imports
    too. There were two ways in and only one was gated, and the ungated one (Bulk Import) is how
    BRIGHT/GENTLE reached children. Do NOT try to detect whether content "came from AI": you usually
@@ -2290,18 +2381,46 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    JSON-RPC 2.0 over Streamable HTTP. Handle \`initialize\` (return protocolVersion, capabilities.tools,
    serverInfo, and instructions telling Claude the order to call things), \`notifications/initialized\`
    (202, no body), \`tools/list\` and \`tools/call\`.
-   FOUR TOOLS AND NO MORE: list_packs (packs + level rules + THE BRIEF, so the rules are always in
-   context), get_pack_content (existing questions + every answer word already taken), check_questions
-   (validate drafts, SAVE NOTHING — this is what lets Claude fix its own mistakes before proposing),
-   propose_questions (the ONLY write, and it writes to the REVIEW QUEUE).
-   NEVER add publish, delete, or edit-pack. The safety of this whole feature rests on the blast radius
-   being "a queue full of things the reviewer rejects". A write tool beyond the queue destroys that.
-   If a partner needs more, they belong in the CMS.
-   AUTH: a shared-secret token per partner (Authorization: Bearer pmk_...). Do NOT build OAuth for a
-   handful of trusted people — it is ceremony. Store only a sha256 HASH; show the raw token ONCE and
-   never again. Put the token table under the same lockdown as the API keys (RLS on, ZERO policies, so
-   the browser cannot read it). Tag every queued row with \`partner:<name>\` so the reviewer knows whose
-   work they are looking at.
+   SIX TOOLS: list_packs (packs + level rules + THE BRIEF so the rules are always in context, each
+   pack carrying stats: live_questions / distinct_answer_words / awaiting_review, and INCLUDING draft
+   packs with their status), get_pack_content (existing questions + words already taken + a statistics
+   summary), check_questions (validate drafts, SAVE NOTHING — this is what lets Claude fix its own
+   mistakes before proposing), propose_questions (writes to the REVIEW QUEUE ONLY), create_pack and
+   update_pack.
+   THE INVARIANT: pm_review_approve must remain the ONLY route a QUESTION can take into a pack. Never
+   add a tool that approves, publishes or edits a live question, or writes pm_questions directly.
+   Pack tools are allowed because a pack is a CONTAINER, not content: a connector-created pack is
+   EMPTY until the reviewer approves questions into it. NEVER add a pack DELETE tool.
+   create_pack must mirror the CMS's own PackEditor + savePack convention exactly — the SAME slugify
+   (lowercase, non-alphanumerics -> '-', trimmed) derived from the name, sort_order = count + 1, emoji
+   default, and the pack-detail fields (purpose / focus_areas / style_approach / example_objectives).
+   Add what the CMS form lacks: check the slug for collisions up front and validate the level against
+   the real pm_levels rows. Create it as status='published' (the container is live in the CMS at once
+   so the contributor can write into it; questions remain gated). update_pack patches ONLY supplied
+   fields, must NEVER change the slug (the game keys on it), and should WARN rather than block when
+   the level changes on a pack that already has questions. Log both to the activity table with
+   actor='partner:<name>'.
+   AUTH: OAuth 2.1 with PKCE — this is NOT optional and NOT ceremony. Claude's "Add custom connector"
+   screen offers a URL and an OAuth client ID/secret and nothing else; there is no field for a bearer
+   token, so a shared-secret header would never be sent. Implement /.well-known/oauth-protected-resource
+   (RFC 9728), /.well-known/oauth-authorization-server (RFC 8414), POST /register (RFC 7591, dynamic
+   client registration), GET+POST /authorize, POST /token. PKCE S256 mandatory, codes single-use and
+   short-lived, and a 401 MUST carry WWW-Authenticate or the client never starts the flow.
+   The partner's pmk_ token becomes the LOGIN CREDENTIAL on the sign-in page rather than a header.
+   Store only a sha256 HASH; show the raw token ONCE. Put the token table under the same lockdown as
+   the API keys (RLS on, ZERO policies). Tag every queued row \`partner:<name>\`.
+   YOU ALSO NEED A DISCOVERY SHIM, or none of the above works. If the MCP server is hosted on a path
+   prefix (e.g. a Supabase edge function at /functions/v1/mcp), it CANNOT serve the root
+   /.well-known/* documents that Claude's discovery probes — every probe 404s and the connector shows
+   "no tools available" with no sign-in screen. Put a tiny Worker on its own origin that serves both
+   discovery documents at the ROOT (bare, path-suffixed and OIDC forms), proxies everything else to
+   the unchanged server, rewrites the 401 WWW-Authenticate to its own discovery doc, and SERVES ITS
+   OWN SIGN-IN PAGE submitted via fetch (a proxied login page arrives with the wrong content-type and
+   its native form POST does nothing inside the OAuth window). The connector URL is the SHIM's /mcp.
+   When transforming a proxied body, drop content-length/content-encoding/transfer-encoding.
+   TEST IT THE WAY THE CLIENT DOES: a self-test that hard-codes the discovery URLs will pass while the
+   connector is unusable. Start where the client starts, and instrument the server to see what it
+   actually receives.
    The validator in the MCP server is a FOURTH copy — it must stay byte-identical to core.jsx,
    content-api and generate-questions.
 7. **Activity log:** every mutation recorded (who/what/when) via pm_log.

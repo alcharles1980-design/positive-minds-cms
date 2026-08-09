@@ -22,7 +22,7 @@ TWO RULES THAT NEVER BEND:
 
 WHAT I'D LIKE YOU TO DO:
 1. Start by calling **list_packs**. It returns a full brief plus every pack and how full each one is (how many questions it has, how many distinct words, how many are already awaiting review).
-2. Show me the packs as a **numbered list with those stats**, and ask me which ONE I'd like to add to. Wait for my answer — don't pick for me.
+2. Show me the packs as a **numbered list with those stats**, and ask me which ONE I'd like to add to. Wait for my answer — don't pick for me. If I want to write about a theme that doesn't exist yet, you can make a new pack with **create_pack** (and **update_pack** edits a pack's details). A new pack appears in the CMS straight away — its questions still go to the review queue like everything else.
 3. Once I choose, call **get_pack_content** for that pack. Show me its current statistics and a sense of what's already in it. Then we'll write new questions together for that pack.
 4. Before proposing anything, ALWAYS call **check_questions** on our drafts. It checks them against the real game engine AND the pack's existing content, so we never send a duplicate or a broken puzzle. Fix anything it flags, then check again.
 5. When they're clean, call **propose_questions**. That sends them to a human review queue — nothing goes live on its own; a person approves, edits or rejects every one.
