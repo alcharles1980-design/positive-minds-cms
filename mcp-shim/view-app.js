@@ -420,7 +420,7 @@ export const VIEW_HTML = `<!DOCTYPE html>
           b.classList.add(ok ? 'right' : 'wrong');
           verdict.className = 'verdict ' + (ok ? 'ok' : 'no');
           verdict.textContent = ok
-            ? 'Correct \u2014 that is what the child should pick.'
+            ? 'Correct answer \u2014 you got it right! \uD83D\uDE0A'
             : 'Marked wrong. If this word ALSO fits the blank, the question is broken.';
           request('ui/update-model-context', {
             content: [{ type:'text', text:
