@@ -1416,6 +1416,85 @@ that network-first caches GETs).
   run \`npm install\` (no args) so nothing gets pruned. This package.json lives in the build
   workspace only — it is NOT part of the deployed repo.
 
+## 11y. STARTING A NEW SESSION — everything needed to continue development
+
+Written for a fresh assistant with no memory of this project, holding only a GitHub PAT. Follow it
+top to bottom; it assumes nothing.
+
+### 1. Get the code
+The repo is PRIVATE. With a PAT (classic, \`repo\` scope):
+    git clone https://x-access-token:<PAT>@github.com/alcharles1980-design/positive-minds-cms.git
+    cd positive-minds-cms
+    git remote set-url origin https://github.com/alcharles1980-design/positive-minds-cms.git
+That last line matters: cloning with the token embeds it in .git/config. Scrub it, never commit it,
+never echo it into output. Push with the token supplied on the command line instead:
+    git push https://x-access-token:<PAT>@github.com/alcharles1980-design/positive-minds-cms.git main
+
+### 2. Set up
+    npm install
+    node tools/workspace.cjs      # mirrors src/ -> v2/ and edge-functions/ -> the paths scripts expect
+Nothing else. There is no framework, no bundler, no dev server.
+
+### 3. Read, in this order
+  1. This file's section 11z — current state, what is temporary, what is outstanding.
+  2. DOC_CLAUDE_MD's golden rules, 4.1-4.45. EVERY ONE EXISTS BECAUSE SOMETHING BROKE. They are
+     numbered oldest-first, listed newest-first, and none is theoretical.
+  3. DOC_BUILD_PROMPT if you need to understand a subsystem you have not touched.
+
+### 4. The build pipeline — non-negotiable order
+    edit src/*.jsx
+    bump CFG.build in src/core.jsx        (e.g. 2026.08.10-29 -> -30)
+    npm run assemble && npm run build && npm run verify
+\`assemble\` concatenates src/*.jsx into pm_cms.jsx; \`build\` compiles to index.html + public/
+index.html; \`verify\` proves split->assemble is byte-identical and the two HTML files match.
+NEVER hand-edit pm_cms.jsx or index.html — they are generated and will be overwritten.
+
+### 5. The test suites — run all of them before pushing
+    node engine.js                     # 1725 cases, maskWord parity across every copy
+    node runtime.js                    # renders each page, fails on any warning
+    node mcp-shim/widget-test.mjs      # the MCP App view, both payload shapes, in jsdom
+    node mcp-shim/overview-test.mjs    # the overview tool, failure modes, URI behaviour
+    node mcp-shim/logging-test.mjs     # redaction — asserts no secret can reach the log
+Edge function changes: compile-check before deploying, because a syntax error ships silently:
+    npx esbuild edge-functions/mcp.ts --outfile=/tmp/check.js --format=esm --target=es2022
+
+### 6. What deploys where, and how
+Everything deploys from a push to main. There are three workflows:
+  .github/workflows/deploy.yml               -> the SITE Worker (positive-minds-cms)
+  .github/workflows/deploy-mcp-shim.yml      -> the SHIM Worker (positive-minds-mcp)
+  .github/workflows/deploy-edge-functions.yml-> Supabase edge functions, on edge-functions/** only
+Secrets already configured: CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, SUPABASE_ACCESS_TOKEN.
+Edge functions can also be dispatched manually with mode=dry-run (compares deployed vs repo, changes
+nothing) or mode=deploy, optionally only=<slug>.
+Deploys take roughly 60-90 seconds. VERIFY OVER THE WIRE AFTERWARDS — a green Action is not proof
+(rule 4.26). Fetch the site and check CFG.build appears; call the shim and check the behaviour.
+
+### 7. Services and identifiers
+  Supabase project ref  tytrmjjucqijzcrbwjfm
+  Site                  https://positive-minds-cms.alcharles1980.workers.dev
+  Connector (the SHIM)  https://positive-minds-mcp.alcharles1980.workers.dev/mcp
+  Partners connect to the SHIM's /mcp, never the Supabase function — the shim serves the discovery
+  documents at the domain ROOT, which is the only place Claude looks for them.
+
+### 8. How to verify anything
+Read pm_connector_log for connector behaviour — it answers in one query what inference cannot:
+    select to_char(at,'HH24:MI:SS') t, phase, method, path, status, had_auth, country, ua
+    from pm_connector_log where at > now() - interval '30 minutes' order by at;
+For the app, fetch the deployed site and grep for what you changed. For edge functions, call them.
+
+### 9. Things that will bite you
+- Doc text lives inside JS template literals. ESCAPE EVERY BACKTICK or the build breaks.
+- NEVER verify a deploy with a WRITE tool against live data (rule 4.23). A pack description was
+  overwritten and lost that way.
+- The connector is in REAL USE. pm_review_approve is the only route content takes into a pack.
+- The Connectors page badge lies (upstream bug). Test with a tool call, never the badge.
+- On EVERY change, update ALL THREE docs in devdocs.jsx in the SAME pass.
+
+### 10. Before you finish
+Bump CFG.build, run every suite, update all three docs, push, and VERIFY THE DEPLOY OVER THE WIRE.
+If you found something that surprised you, write a numbered rule — that list is the most valuable
+thing in the repo.
+
 ## 11z. WHERE THINGS STAND (read this first when picking the project back up)
 
 LIVE AND WORKING
@@ -2494,6 +2573,16 @@ there were two 4t, two 4u, two 4r, two 4s, two 4v and two 4d, so "see rule 4t" w
    the edge function didn't, so a question with its own letter_position rendered differently
    in-game than in the CMS.) After any engine edit, diff the two by fetching the deployed edge
    function and comparing, or run a parity test with a question that has its own overrides.
+4.46. **A handover is only true if you FOLLOW IT from a clean clone.** The new-session instructions
+   in 11y were written from memory of what works — and every command in them passed on the first
+   run, which proved nothing, because they were passing on the machine that had been building this
+   project all day. Cloning fresh and following the steps literally found that the jsdom tests
+   imported \`/home/claude/node_modules/jsdom/lib/api.js\` by ABSOLUTE PATH. That resolves here by
+   coincidence and would fail on any other machine, so the test suite a new session is told to run
+   would not have run. jsdom was even a declared dependency — the import just never used it.
+   THE RULE: documentation of a process is a claim, and claims get tested. Clone into a new
+   directory, follow your own instructions word for word, and treat every step that only works
+   because of ambient state on your machine as a bug in the code, not in the instructions.
 4.45. **Test the question a CLIENT asks, not the property you just implemented.** The
    content-addressed view URI shipped with four passing checks: the current URI resolves, the hash
    matches the content, a changed view yields a changed URI, the URI reads back. All true, all
@@ -3052,8 +3141,41 @@ is the authoring + publishing layer; a separate game backend consumes the conten
   answer, alt_answer, status [active/inactive], sort_order, notes, level, letter_position,
   letter_grouping, frame_slots jsonb, timestamps). No per-question difficulty or letters_hidden
   columns — the level (+ any pm_question_levels override) fully drives how much is hidden.
+- pm_question_levels(question_id FK, level, per-level override of letters_hidden / letter_position /
+  letter_grouping) — the exception layer over pm_levels, for a question that needs different masking
+  at one level only.
+- pm_levels(level 1..10, letters_hidden, letter_position, letter_grouping, whole_word, label, …) —
+  the level ladder. Editing a row here changes EVERY question at that level immediately, because
+  questions are never pre-rendered.
+- pm_review_queue(id, pack_id, template, answer, alt_answer, status [pending/approved/rejected],
+  provider, validation jsonb, target_level, reason, timestamps) — the ONLY way partner content
+  enters a pack, via pm_review_approve.
 - pm_activity (audit log), pm_export_profiles(spec jsonb, is_builtin), pm_sync_log,
   pm_sync_targets(config jsonb), pm_dev_notes (singleton id=1)
+- AI: pm_ai_config (provider keys, model, temperature — keys written ONLY through
+  pm_ai_set_key/pm_ai_clear_key, never selected back), pm_ai_settings, pm_ai_usage (per-call token
+  and cost accounting, feeding pm_ai_rate_check).
+- CONNECTOR / OAUTH — these are what let partners in, and a rebuild without them has no connector:
+  pm_mcp_tokens(id, partner, token_hash [sha256 hex of the pmk_ token, never the token],
+    active, created_at, created_by, last_used_at, calls_made). RLS on, ZERO policies: only the
+    service role touches it. active is re-read on EVERY request, so revocation is immediate.
+  pm_oauth_clients(client_id, client_name, redirect_uris, created_at) — dynamic registration,
+    RFC 7591. One row per Connect press; expect many.
+  pm_oauth_codes(code, client_id, token_id, code_challenge, redirect_uri, used, expires_at) —
+    single-use PKCE authorization codes.
+  pm_oauth_tokens(access_token PK, token_id FK, client_id, expires_at, refresh_token,
+    refresh_expires_at, last_used_at) — NO unique constraint on token_id, deliberately: one partner
+    token supports many simultaneous sessions.
+  pm_connector_log(at, phase, method, path, query, status, had_auth, client_id, partner, ua,
+    cf_ray, country, session_id, err, ms, note) — insert-only under anon (a policy for INSERT and
+    no read policy), capped by pm_connector_log_prune.
+- The FULL RPC surface is larger than the list below: pm_ai_set_key / pm_ai_clear_key /
+  pm_ai_set_enabled / pm_ai_status / pm_ai_usage_summary / pm_ai_rate_check, pm_content_manifest,
+  pm_review_enqueue / pm_review_approve / pm_review_reject / pm_review_counts,
+  pm_mcp_issue_token / pm_mcp_list_tokens / pm_mcp_revoke_token, pm_oauth_cleanup,
+  pm_connector_log_prune, pm_bump_pack_version, pm_level_delete_cleanup, plus the tombstone and
+  touch triggers. The SECURITY DEFINER ones are exactly those that must act beyond the caller's
+  RLS: the AI key handling, token issuing, the connector log prune, and the tombstone triggers.
 - View pm_pack_overview: packs + active_questions + total_questions + has_pending_changes
   (content_version > released_version). Create it with security_invoker=true so it respects
   the caller's RLS (otherwise anon can read draft packs via the public API).

@@ -4,7 +4,7 @@
 // correctly into a frame nobody ever resized.
 //
 // Run: node mcp-shim/widget-test.mjs
-import { JSDOM } from "/home/claude/node_modules/jsdom/lib/api.js";
+import { JSDOM } from "jsdom";
 import { VIEW_HTML as PREVIEW_APP_HTML } from "./view-app.js";
 import { VIEW_HTML as OVERVIEW_APP_HTML } from "./view-app.js";
 
