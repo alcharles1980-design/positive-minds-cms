@@ -73,7 +73,7 @@ function _extends(){return _extends=Object.assign?Object.assign.bind():function(
 //   - App shell (auth gate, routing via history, command surface)
 // ============================================================
 // ---------- config ----------
-const CFG={build:"2026.08.09-23",// bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+const CFG={build:"2026.08.10-24",// bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
 url:"https://tytrmjjucqijzcrbwjfm.supabase.co",key:"sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",adminEmail:"admin@positiveminds.app",sessionStore:"pm_admin_session_v2",sessionMaxAgeMs:7*24*60*60*1000,// keep users logged in for 7 days
 pageSize:40};// ============================================================
 // Session + Auth
@@ -1319,6 +1319,80 @@ render instruction tells the presenter not to pass partial numbers off as comple
 empty packs sink), the menu, the invariant, tools/list declaration and position, and every failure
 mode including the 401/403/503 distinction. 22 checks, no live data touched.
 
+### THE VIEW: one file, both payloads, and the two level controls
+
+**ONE VIEW, NOT TWO.** There were briefly two ui:// resources — a question preview and an overview
+menu — each linked to its own tool via _meta.ui.resourceUri. CLAUDE WEB DOES NOT HONOUR THAT. It
+loaded the question-preview resource for an \`overview\` call and then sent it nothing, so a partner
+saw an idle widget beside a perfectly good answer. It picks ONE view per connector.
+Proved, not guessed: each view was made to NAME ITS OWN RESOURCE in its status bar, and one
+screenshot settled it (rule 4.21). Reordering resources/list would probably have fixed it and would
+also have destroyed the evidence.
+So mcp-shim/view-app.js is the single view; both URIs serve it and it dispatches on the SHAPE of the
+payload — a \`previews\` array vs \`what_you_can_do\` + \`content_status\` — rather than on which tool
+the host believes it is showing, since the host has already been wrong about exactly that. A test
+asserts the lifecycle code exists EXACTLY ONCE, because a second copy would have been a fourth
+parity problem waiting to happen.
+
+**TILES: ui/message, and what to do when it is refused.** Tapping a capability posts a plain-English
+request into the chat via \`ui/message\`. The spec lists NO host capability for it, so the only way to
+know whether a host supports it is to send one and READ THE REPLY — and this host refuses it. Every
+message now carries an id, its reply is handled, and a 2.5s timeout catches silence.
+THE ORDERING MATTERS: the clipboard copy runs DURING the tap, synchronously, inside the gesture.
+The first version only fell back AFTER the rejection arrived, which meant the first tap did nothing
+visible and the copy needed a second — and a copy fired from an async rejection is not reliable at
+all, because clipboard writes require a user gesture. One tap now always achieves something: the
+tile says either "Sent" or "Copied — paste it below", keeps its label, and shows the phrase to type
+if there is no clipboard.
+
+**TWO LEVEL CONTROLS, on purpose.** The GLOBAL bar sets every question at once — "how does this pack
+read at level 7?" is a property of the sitting, not of each question, and setting it twelve times
+made comparison at a fixed level nearly impossible. The PER-CARD tabs stay, because the other real
+job is checking ONE question ACROSS levels, which is how the same-length bug is actually felt.
+A card moved on its own is marked "own level" and the global bar reports MIXED with nothing
+selected, rather than highlighting a level that is only true for some of them. Question cards carry
+\`.card.q\` and the header \`.card.head\`, so counting cards means counting questions.
+
+**A MERGE HAZARD WORTH KNOWING.** Combining the two views spliced one stylesheet into the other by
+cutting at \`body.dark{...}\` — which silently discarded every dark rule after that line. The visible
+result was white numbers on white tiles: \`.stat\` kept its light background while \`.stat b\`, having
+no colour of its own, inherited the dark-mode text colour. Only the purple stat survived, which made
+it look like a design choice. ANYTHING WITH ITS OWN BACKGROUND NEEDS ITS OWN FOREGROUND.
+
+### CONNECTING: what "Connection issue" actually means, and how to diagnose it
+
+A connector that authenticates and then shows as disconnected is NOT a server fault, and this cost
+most of a session to establish. Written down so nobody re-runs it.
+
+**WHAT THE EVIDENCE LOOKED LIKE.** Six connections in fifteen minutes, every one registering a BRAND
+NEW client, every access token used within seconds of being issued — and the connectors page still
+showing "Connection has expired". Server logs full of 200s.
+
+**HOW IT WAS SETTLED: drive the real page in a real browser.** Playwright + Chromium, mobile profile,
+recording every request and navigation:
+    GET  /mcp/authorize                          200   page renders
+    POST /mcp/authorize                          200   token accepted
+    GET  claude.ai/api/mcp/auth_callback?code=   307
+    GET  claude.ai/settings/connectors?step=end_error&flow_id=ofid_...
+Our side is clean end to end. The code is issued, the browser reaches the callback, and CLAUDE'S OWN
+FLOW ends in \`end_error\`.
+
+**WHAT flow_id MEANS.** It is Claude's state, created when Connect is pressed and consumed at the
+callback. If the flow open when the callback arrives is not the one that started it, it ends in
+end_error. So a second Connect press, or the phone handing the redirect to the Claude app, kills the
+flow the callback belongs to. That is why each attempt registered a fresh client and why RETRYING
+MAKES IT WORSE — the instinct that fixes most things makes this one unrecoverable.
+
+**THE SEQUENCE THAT WORKS:** delete every entry for the connector, close every Claude tab AND the
+app, then one tab, add once, press Connect ONCE, and do not press it again while it is in flight.
+
+**WHAT IS NOT WORTH DOING.** Two remedies were tried and both were wrong. Telling the partner to
+paste the callback URL into the address bar starts ANOTHER transient add rather than completing the
+original — it walks them round the loop. And detecting the hijack from inside the page cannot work:
+when the app takes the foreground the tab is backgrounded, so \`document.hidden\` goes true and any
+guard against false positives suppresses the true one. Both were shipped into the sign-in page and
+both were removed. See rule 4.39.
+
 ### DEPLOY CHECKING: why a downloaded edge function never matches your source
 
 \`supabase functions download\` does NOT return your source. It returns the extracted ESZIP BUNDLE:
@@ -1578,6 +1652,12 @@ that network-first caches GETs).
 
 LIVE AND WORKING
 - Connector is in real use. Questions have been proposed, approved and rejected through it.
+  TOKENS (10 Aug): a shared \`beta\` token was issued for onboarding trials. SHARED IS A TRADE — every
+  submission from it reads "by beta", so contributors cannot be told apart in review and rejection
+  feedback cannot reach the person who wrote the question. Fine to get people through the door,
+  wrong before anyone reviews volume. Switch to per-person tokens (pm_mcp_issue_token) before that.
+  Multiple people CAN use one token simultaneously: pm_oauth_tokens is keyed on access_token and
+  token_id has no unique constraint, so each sign-in adds a session and none evicts another.
   ACCURACY NOTE (9 Aug): three tokens are active, but the traffic is all Albert's. "albert" has
   55 calls and "albert-reconnect" 16, and those two hold the only bound OAuth tokens. "Steve",
   issued 16 Jul, shows calls_made 0, last_used_at null and no OAuth token — on the data, Steve
@@ -1603,6 +1683,9 @@ EDGE FUNCTIONS — CI IS NOW ARMED, BUT HAS NOT DEPLOYED YET
   sentence has a caveat in it and cannot be made unconditional.
 
 TEMPORARY THINGS STILL IN PLACE (remove when convenient)
+- OAuth clutter from 10 Aug troubleshooting: ~10 extra pm_oauth_clients rows (every failed Connect
+  registers a fresh client), several \`beta\` sessions in pm_oauth_tokens, and one client named
+  "diagnostic"/"browser-test" from testing the flow by hand. All harmless, all removable.
 - Table pm_tool_log and the toolLog() calls in mcp-shim/index.js — diagnostic logging that records
   which tool a client actually calls. It is what made the routing bug findable; harmless but noise.
 - (The MCP Apps widget is no longer here. It is ACTIVE and verified rendering — see the widget
@@ -2607,6 +2690,39 @@ there were two 4t, two 4u, two 4r, two 4s, two 4v and two 4d, so "see rule 4t" w
    the edge function didn't, so a question with its own letter_position rendered differently
    in-game than in the CMS.) After any engine edit, diff the two by fetching the deployed edge
    function and comparing, or run a parity test with a question that has its own overrides.
+4.39. **Do not ship a remedy built on an unconfirmed diagnosis. A wrong instruction in the product is
+   worse than none.** When a partner could not connect, I concluded Android was hijacking the OAuth
+   callback and shipped guidance into the SIGN-IN PAGE telling people to paste the callback URL into
+   their address bar. It was wrong twice over: pasting that URL starts another transient add rather
+   than completing the original flow, so it walked people round the loop — and the diagnosis itself
+   was wrong, since the same failure happened with the shim reverted to known-good code.
+   A second attempt tried to DETECT the hijack: navigate, and if the page is still visible 1.8s
+   later, show a fallback. It never fired. When the app takes the foreground the browser tab is
+   backgrounded, so \`document.hidden\` goes true — and the guard added to avoid false positives
+   suppressed the only true positive. You cannot observe an app switch from inside the tab that the
+   switch backgrounds.
+   THE RULE: a theory you have not tested is not a fix, and putting it in front of users multiplies
+   it by everyone who reads it. Confirm the cause first; if you cannot, say what is known and what is
+   not. Both changes were removed and the page went back to what it had when it worked.
+4.38. **"It worked before" is not proof you broke it — and checking the part you think matters is not
+   proof you did not. BISECT.** A connector stopped attaching. I diffed the auth path, found it
+   untouched, and treated that as exoneration — then spent four rounds blaming the phone, the OS
+   link settings and the account plan. The auth path is not the only thing a client needs in order to
+   persist a connector, and I never questioned the parts I HAD changed.
+   The move that settled it in one step: revert the whole component to the last state that
+   demonstrably worked, deploy, and test. It still failed, which proved the cause was elsewhere and
+   let everything be restored at once instead of unpicking ten commits. Had it succeeded, the same
+   revert would have bounded the search to that set.
+   A revert costs minutes and is fully reversible in git. Defending a change costs a session and
+   convinces nobody, least of all the person whose thing is broken.
+4.37. **When a client and a server disagree, get a real client and record what it does.** The
+   connector authenticated and then reported itself disconnected, with clean server logs. Reading
+   code could not settle it. Driving the actual sign-in page in a real Chromium with request and
+   navigation logging settled it in one run: our side returned 200 throughout, the browser reached
+   the callback with a valid code, and CLAUDE'S flow ended at \`step=end_error\`.
+   That is the difference between "the server looks fine" and "the server IS fine and the failure is
+   downstream of it" — and only the second one lets you stop changing the server. Installing a
+   browser to answer it took ten minutes; guessing had already taken hours.
 4.36. **A check tuned until it passes is worth nothing — and a check that always fires is worse than
    no check.** The edge-function dry run compares deployed against repo. Its first version reported
    drift on all five functions, including ones that had no reason to have drifted, because
@@ -3352,7 +3468,21 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    ui/notifications/context-update — it is not a method, and sending it does nothing).
    MAKE THE VIEW STATE ITS OWN STATE. A permanent status line ("handshake sent", "NO HANDSHAKE after
    5s", "12 question(s)") is what turns a silent failure into a diagnosable one, and is the difference
-   between one session and three.
+   between one session and three. Have it NAME THE RESOURCE IT IS — one screenshot then tells you
+   which view the host actually loaded, which you will need (see below).
+   BUILD ONE VIEW, NOT ONE PER TOOL. The host picks ONE view per connector and does NOT honour
+   per-tool _meta.ui.resourceUri: it will load the wrong resource for a tool and then send it
+   nothing. Serve the same HTML from every ui:// URI and dispatch on the SHAPE of the payload that
+   arrives. Two views also means two copies of the lifecycle code, which is a parity problem waiting
+   to happen — assert in a test that the size-changed handling exists exactly once.
+   TILES THAT POST INTO THE CHAT use \`ui/message\`, but the spec defines NO host capability for it and
+   some hosts refuse it. Send it with an id, handle the reply, and time out on silence. Copy the text
+   to the clipboard DURING the tap — synchronously, inside the gesture — not after a rejection
+   arrives, because clipboard writes need a user gesture. One tap must always achieve something.
+   LEVEL CONTROLS: build BOTH. A global bar that sets every question at once answers "how does this
+   pack read at level 7?"; per-card tabs answer "is this one question sound all the way up?", which
+   is how the same-length bug is felt. Show divergence rather than hiding it — mark a card that has
+   been moved on its own, and report MIXED on the global bar instead of a value true for only some.
    THE INVARIANT: pm_review_approve must remain the ONLY route a QUESTION can take into a pack. Never
    add a tool that approves, publishes or edits a live question, or writes pm_questions directly.
    review_status is READ-ONLY and closes the feedback loop that a queue otherwise breaks: a
