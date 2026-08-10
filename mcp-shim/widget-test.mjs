@@ -89,14 +89,49 @@ console.log("\nData arrival");
 window.postMessage({ jsonrpc: "2.0", method: "ui/notifications/tool-result",
   params: { structuredContent: { previews: QS } } }, "*");
 await settle();
-const cards = window.document.querySelectorAll(".card");
-check("renders one card per question", cards.length === 12, cards.length + " cards");
+const cards = window.document.querySelectorAll(".card.q");
+check("renders one card per question", cards.length === 12, cards.length + " question cards");
 check("every card has two options",
   [...cards].every((c) => c.querySelectorAll(".opt").length === 2));
-check("level tabs present", cards[0].querySelectorAll(".lv").length === 10,
-  cards[0].querySelectorAll(".lv").length + " tabs");
+check("a GLOBAL level bar exists",
+  window.document.querySelectorAll("#lvbar .lv").length === 10,
+  window.document.querySelectorAll("#lvbar .lv").length + " global buttons");
+check("and per-card levels are RETAINED alongside it",
+  [...cards].every((c) => c.querySelectorAll(".lv").length === 10));
 check("correct word not revealed before tapping",
   ![...cards[0].querySelectorAll(".opt")].some((b) => b.className.includes("right")));
+
+console.log("\nLevel controls — global override, per-card retained");
+{
+  const qs = () => [...window.document.querySelectorAll(".card.q p.sentence")].map((e) => e.textContent);
+  const gbar = () => [...window.document.querySelectorAll("#lvbar .lv")];
+  const head = () => window.document.querySelector(".card.head").textContent;
+  const atL1 = qs()[0];
+  check("global bar starts on the level the server said it was showing",
+    gbar().find((b) => b.className.includes("on")).textContent === "L1");
+
+  gbar().find((b) => b.textContent === "L7").dispatchEvent(new window.Event("click"));
+  await settle();
+  check("the global bar moves EVERY question", qs().every((t) => t.includes("_______")), "all 12 at L7");
+  check("and marks itself as the selected level",
+    gbar().find((b) => b.className.includes("on")).textContent === "L7");
+
+  const card0 = window.document.querySelectorAll(".card.q")[0];
+  [...card0.querySelectorAll(".lv")].find((b) => b.textContent === "L1")
+    .dispatchEvent(new window.Event("click"));
+  await settle();
+  check("a per-card tab moves ONLY that question",
+    qs()[0] === atL1 && qs()[1].includes("_______"), "Q1 back at L1, Q2 still L7");
+  check("that card says it is on its own level", /own level/.test(card0.textContent));
+  check("the global bar reports MIXED rather than a wrong single value",
+    gbar().every((b) => !b.className.includes("on")) && /mixed/i.test(head()));
+
+  gbar().find((b) => b.textContent === "L4").dispatchEvent(new window.Event("click"));
+  await settle();
+  check("the global bar OVERRIDES a diverged card",
+    qs().every((t) => !t.includes("_______")) && qs()[0] !== atL1);
+  check("and mixed clears", !/mixed/i.test(head()));
+}
 
 console.log("\nHeight reporting (the bug)");
 const sizes = sent.filter((m) => m.method === "ui/notifications/size-changed");

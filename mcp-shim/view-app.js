@@ -276,73 +276,135 @@ export const VIEW_HTML = `<!DOCTYPE html>
   function renderPreviews(previews){
     var app = document.getElementById('app');
     if (!previews || !previews.length){ app.innerHTML = '<div class="empty">No questions to preview.</div>'; return; }
-    app.innerHTML = '';
-    previews.slice(0,40).forEach(function(p, i){
-      // Data shape (question-first, since v14): sentence / options / correct / level_shown, with an
-      // optional at_other_levels of {level, sentence} for the tabs. Older shape used at_each_level;
-      // tolerated here so a stale server cannot blank the card again.
+
+    // TWO LEVELS OF CONTROL, on purpose.
+    // The GLOBAL bar is an override: it sets every question at once, because the usual question is
+    // "how does this pack read at level 7?" — a property of the sitting, not of each question, and
+    // setting it twelve times made comparison at a fixed level almost impossible.
+    // The PER-CARD tabs stay, because the other real job is checking ONE question across levels
+    // (that is how the same-length bug is felt). A card moved on its own diverges from the global
+    // level and says so, and the global bar reports MIXED rather than lying about a single value.
+    var rows = [];
+    previews.slice(0, 40).forEach(function(p, i){
+      // Question-first shape (since v14): sentence / options / correct / level_shown, plus
+      // at_other_levels of {level, sentence}. Older at_each_level tolerated so a stale server
+      // cannot blank the card again.
       var tabs = p.at_other_levels || p.at_each_level || [];
-      var baseSentence = p.sentence || (tabs[0] && (tabs[0].sentence || tabs[0].the_child_sees)) || '';
+      var base = p.sentence || (tabs[0] && (tabs[0].sentence || tabs[0].the_child_sees)) || '';
       var opts = p.options || (tabs[0] && tabs[0].picks_between) || [];
-      var correct = p.correct || opts[0];
-      if (!baseSentence || opts.length < 2) return;
-
-      var card = document.createElement('div'); card.className = 'card';
-      var sel = 0;
-      if (tabs.length && p.level_shown != null){
-        for (var k = 0; k < tabs.length; k++){ if (tabs[k].level === p.level_shown){ sel = k; break; } }
-      }
-
-      function paint(){
-        var t = tabs[sel];
-        var sentence = t ? (t.sentence || t.the_child_sees || baseSentence) : baseSentence;
-        var lvlNum = t ? t.level : p.level_shown;
-        // Stable but non-obvious ordering so the correct word isn't always first.
-        var shown = opts.slice();
-        if ((i + sel) % 2 === 1) shown.reverse();
-
-        card.innerHTML =
-          '<div class="meta">' +
-            '<span class="chip">' + esc(p.n != null ? ('Q' + p.n) : ('Q' + (i + 1))) + '</span>' +
-            (p.pack ? '<span class="chip">' + esc(p.pack) + '</span>' : '') +
-            (p.by ? '<span>by ' + esc(p.by) + '</span>' : '') +
-            (lvlNum != null ? '<span>Level ' + esc(lvlNum) + '</span>' : '') +
-          '</div>' +
-          (tabs.length > 1
-            ? '<div class="levels">' + tabs.map(function(l, j){
-                return '<button class="lv' + (j===sel?' on':'') + '" data-j="' + j + '">L' + esc(l.level) + '</button>';
-              }).join('') + '</div>'
-            : '') +
-          '<p class="sentence">' + esc(sentence).replace(/(_{2,})/g,'<span class="blank">$1</span>') + '</p>' +
-          '<div class="opts">' + shown.map(function(w){
-            return '<button class="opt" data-w="' + esc(w) + '">' + esc(w) + '</button>';
-          }).join('') + '</div>' +
-          '<div class="verdict"></div>';
-
-        card.querySelectorAll('.lv').forEach(function(b){
-          b.onclick = function(){ sel = parseInt(b.getAttribute('data-j'),10); paint(); reportSize(); };
-        });
-        var verdict = card.querySelector('.verdict');
-        card.querySelectorAll('.opt').forEach(function(b){
-          b.onclick = function(){
-            var w = b.getAttribute('data-w');
-            var ok = w === correct;
-            b.classList.add(ok ? 'right' : 'wrong');
-            verdict.className = 'verdict ' + (ok ? 'ok' : 'no');
-            verdict.textContent = ok
-              ? 'Correct \u2014 that is what the child should pick.'
-              : 'Marked wrong. If this word ALSO fits the blank, the question is broken.';
-            request('ui/update-model-context', {
-              content: [{ type:'text', text:
-                'Reviewer tried \"' + w + '\" on Q' + (p.n || (i+1)) + ' \u2014 ' + (ok ? 'correct' : 'marked wrong') + '.' }]
-            });
-            reportSize();
-          };
-        });
-      }
-      paint();
-      app.appendChild(card);
+      if (!base || opts.length < 2) return;
+      var byLevel = {};
+      tabs.forEach(function(t){ if (t && t.level != null) byLevel[t.level] = t.sentence || t.the_child_sees || base; });
+      rows.push({ p: p, i: i, base: base, opts: opts, correct: p.correct || opts[0],
+                  byLevel: byLevel, level: p.level_shown != null ? p.level_shown : null });
     });
+    if (!rows.length){ app.innerHTML = '<div class="empty">No questions to preview.</div>'; return; }
+
+    // Offer every level ANY question can render, so a partial set never hides one.
+    var levels = [];
+    rows.forEach(function(r){
+      Object.keys(r.byLevel).forEach(function(l){ l = +l; if (levels.indexOf(l) === -1) levels.push(l); });
+    });
+    levels.sort(function(a, b){ return a - b; });
+    rows.forEach(function(r){ if (r.level == null || !r.byLevel[r.level]) r.level = levels[0]; });
+
+    function globalLevel(){
+      var first = rows[0].level;
+      for (var i = 1; i < rows.length; i++) if (rows[i].level !== first) return null; // mixed
+      return first;
+    }
+
+    app.innerHTML = '';
+    var head = document.createElement('div'); head.className = 'card head';
+    var list = document.createElement('div');
+    if (levels.length > 1) app.appendChild(head);
+    app.appendChild(list);
+
+    function paintHead(){
+      if (levels.length <= 1) return;
+      var g = globalLevel();
+      head.innerHTML =
+        '<div class="lbl">' + esc(rows[0].p.pack || 'Questions') + '</div>' +
+        '<h1>' + esc(rows.length) + ' question' + (rows.length === 1 ? '' : 's') + '</h1>' +
+        '<p class="lead">' + (g == null
+            ? 'Levels are mixed \u2014 pick one below to put every question on the same level.'
+            : 'Every question shown at level ' + esc(g) + ', the way a child at that level meets them.') +
+        '</p>' +
+        '<div class="lbl" style="margin-top:14px">Set all to level' +
+          (g == null ? ' <span style="color:#6C4CE0">\u2014 mixed</span>' : '') + '</div>' +
+        '<div class="levels" id="lvbar" style="margin-top:7px"></div>';
+      var bar = head.querySelector('#lvbar');
+      levels.forEach(function(l){
+        var b = document.createElement('button');
+        b.className = 'lv' + (l === g ? ' on' : '');
+        b.textContent = 'L' + l;
+        b.onclick = function(){ rows.forEach(function(r){ r.level = l; }); paintHead(); paintAll(); reportSize(); };
+        bar.appendChild(b);
+      });
+    }
+
+    function paintCard(r){
+      var g = globalLevel();
+      var diverged = g == null && rows.length > 1;
+      var sentence = r.byLevel[r.level] || r.base;
+      var shown = r.opts.slice();
+      if ((r.i + (r.level || 0)) % 2 === 1) shown.reverse();
+
+      r.el.innerHTML =
+        '<div class="meta">' +
+          '<span class="chip">' + esc(r.p.n != null ? ('Q' + r.p.n) : ('Q' + (r.i + 1))) + '</span>' +
+          (r.p.by ? '<span>by ' + esc(r.p.by) + '</span>' : '') +
+          '<span>Level ' + esc(r.level) + '</span>' +
+          (diverged ? '<span style="color:#6C4CE0">own level</span>' : '') +
+        '</div>' +
+        (levels.length > 1
+          ? '<div class="levels">' + levels.map(function(l){
+              return '<button class="lv' + (l === r.level ? ' on' : '') + '" data-l="' + l + '">L' + esc(l) + '</button>';
+            }).join('') + '</div>'
+          : '') +
+        '<p class="sentence">' + esc(sentence).replace(/(_{2,})/g, '<span class="blank">$1</span>') + '</p>' +
+        '<div class="opts">' + shown.map(function(w){
+          return '<button class="opt" data-w="' + esc(w) + '">' + esc(w) + '</button>';
+        }).join('') + '</div>' +
+        '<div class="verdict"></div>';
+
+      // Per-card tabs move THIS question only.
+      r.el.querySelectorAll('.lv').forEach(function(b){
+        b.onclick = function(){
+          r.level = parseInt(b.getAttribute('data-l'), 10);
+          paintCard(r); paintHead(); reportSize();
+        };
+      });
+
+      var verdict = r.el.querySelector('.verdict');
+      r.el.querySelectorAll('.opt').forEach(function(b){
+        b.onclick = function(){
+          var w = b.getAttribute('data-w');
+          var ok = w === r.correct;
+          b.classList.add(ok ? 'right' : 'wrong');
+          verdict.className = 'verdict ' + (ok ? 'ok' : 'no');
+          verdict.textContent = ok
+            ? 'Correct \u2014 that is what the child should pick.'
+            : 'Marked wrong. If this word ALSO fits the blank, the question is broken.';
+          request('ui/update-model-context', {
+            content: [{ type:'text', text:
+              'Reviewer tried "' + w + '" on Q' + (r.p.n || (r.i + 1)) + ' at level ' + r.level +
+              ' \u2014 ' + (ok ? 'correct' : 'marked wrong') + '.' }]
+          });
+          reportSize();
+        };
+      });
+    }
+
+    function paintAll(){ rows.forEach(paintCard); }
+
+    rows.forEach(function(r){
+      r.el = document.createElement('div');
+      r.el.className = 'card q';
+      list.appendChild(r.el);
+    });
+    paintHead();
+    paintAll();
   }
 
   window.addEventListener('message', function(e){
