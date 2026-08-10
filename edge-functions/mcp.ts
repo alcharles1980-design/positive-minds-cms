@@ -719,6 +719,15 @@ async function callTool(db: any, partner: string, name: string, args: any) {
     const clean = checked.filter(c => c.result.ok);
     const flagged = checked.filter(c => !c.result.ok);
 
+    // Computed above but previously not RETURNED — which made it worthless. A check that runs and
+    // says nothing is the same as no check (rule 4.40: the observation has to reach a human).
+    const vocab = checked
+      .filter(c => (c.result as any).vocabulary_advice)
+      .map(c => ({
+        question: `"${c.q.template}" — ${c.q.answer} / ${c.q.alt_answer}`,
+        advice: (c.result as any).vocabulary_advice,
+      }));
+
     // check_questions: report only. Nothing is saved.
     if (name === 'check_questions') {
       return {
@@ -728,9 +737,14 @@ async function callTool(db: any, partner: string, name: string, args: any) {
           question: `"${c.q.template}" — ${c.q.answer} / ${c.q.alt_answer}`,
           problems: c.result.flags.map((f: any) => f.detail),
         })),
-        note: flagged.length
+        vocabulary: vocab.length ? vocab : undefined,
+        note: (flagged.length
           ? 'Fix these and check again before proposing.'
-          : 'All good — you can propose these.',
+          : 'Mechanically sound — you can propose these.') +
+          (vocab.length
+            ? ' NOTE the vocabulary points above: they do not block anything, but a pack that keeps ' +
+              'recycling the same words teaches a child less. Prefer a fresh word where you can.'
+            : ''),
       };
     }
 
@@ -747,6 +761,8 @@ async function callTool(db: any, partner: string, name: string, args: any) {
       p_target_level: pack.level ?? null,
     });
     if (error) return { error: String(error.message || error) };
+    // Same advice on propose, since a writer who skips check_questions is exactly the one who
+    // needs it — and the reviewer sees it in the queue either way.
 
     return {
       sent_for_review: res?.queued ?? checked.length,
@@ -756,6 +772,7 @@ async function callTool(db: any, partner: string, name: string, args: any) {
         question: `"${c.q.template}" — ${c.q.answer} / ${c.q.alt_answer}`,
         problems: c.result.flags.map((f: any) => f.detail),
       })),
+      vocabulary: vocab.length ? vocab : undefined,
       note: 'These are now waiting for a human to approve, edit or reject. Nothing is live yet. Call review_status later to see what was approved or rejected.',
     };
   }
