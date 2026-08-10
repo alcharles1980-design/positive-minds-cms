@@ -1015,6 +1015,106 @@ Apps — the documented fallback — Claude phrased the verdict itself and could
 sentence being removed. The wording is now also in preview_questions' render note with an explicit
 "do not improvise them". Rule 4.42 applied BEFORE it bit rather than after.
 
+### VOCABULARY: why a word must not play both roles
+
+**THE DEFECT.** In the Calmness pack, seven of twelve words are the ANSWER to one question and the
+DISTRACTOR in another. QUIET and RELAXED are a straight swap across adjacent questions. A child is
+marked wrong for a word and right for it moments later. Confidence has the same with CALM/PROUD.
+
+**THE DEEPER PROBLEM, which cross-role reuse only makes VISIBLE:** the wrong option is often a
+GENUINELY correct answer to its sentence. "I stay PROUD when things go wrong" reads perfectly well.
+A child who reads carefully is punished for reading carefully. Reuse is the smell; a plausible
+distractor is the disease. THE TEST: read the sentence back with the WRONG word in it. If it still
+makes sense, the question has two right answers and only one of them scores.
+
+**IT WAS A MISSING INPUT, NOT A MISSING RULE.** get_pack_content used to return
+\`answer_words_already_taken\` and NOTHING about distractors — so Claude knew which words were
+answers and picked wrong-options blind, landing on words that are correct two questions along.
+It now also returns \`distractor_words_already_used\` and \`every_word_in_use\`, and the note directs
+writers to move AWAY from that list rather than merely avoid exact duplicates.
+THE BRIEF now argues for vocabulary as a goal in itself: twelve questions built from six words teach
+less than twelve built from twenty-four. Calmness is 12 questions, 23 word-slots, 16 distinct words.
+
+**check_questions and propose_questions return \`vocabulary_advice\`** per question when a draft's
+wrong option is already an answer, its answer is already someone's wrong option, or the answer word
+is simply reused. ADVISORY, NEVER BLOCKING (rule 4.15) — it does not break the engine, so it must
+not stop a proposal, but the writer and the reviewer should both see it.
+FIRST VERSION COMPUTED IT AND DID NOT RETURN IT, which is the same as not having it. Caught only by
+running it over the wire against a real pack.
+
+**The nine live instances are NOT auto-fixed.** That is content judgement.
+
+### THE CONNECTOR LOG: what to read when a connection misbehaves
+
+pm_connector_log records EVERY request, logged in a wrapper around the whole handler — the handler
+has 22 return points and several (discovery, CORS preflight, the sign-in page, a thrown handler)
+answer before any per-branch logging could run. That left the single most important question
+unanswerable: when a client appears to do nothing, DID IT EVEN ASK US?
+
+Per request: \`phase\` (discovery/register/authorize/token/mcp), method, redacted query, status,
+\`had_auth\`, ua, \`cf_ray\`, \`country\` (which distinguishes Anthropic's cloud from a browser — the
+two user agents in an OAuth flow come from different places), \`session_id\`, a truncated \`err\` body
+on >=400, and \`ms\`. The per-branch log survives only where it knows the JSON-RPC METHOD, which the
+wrapper cannot see without consuming the body.
+
+**NEVER LOG A SECRET.** token, code, code_verifier, client_secret, access_token, refresh_token,
+password and authorization become \`<redacted:N chars>\` — present, so absence is distinguishable
+from omission, never valued. mcp-shim/logging-test.mjs asserts this with a real-shaped pmk token, an
+auth code and a PKCE verifier. A log that quietly accumulates credentials is a breach waiting to
+happen regardless of who can read the table.
+
+**A HEALTHY CONNECT LOOKS LIKE THIS** (10 Aug 22:36, read straight off the table):
+    python-httpx  POST /mcp                                401   <- correct, triggers OAuth
+    python-httpx  GET  /.well-known/oauth-protected-resource     200
+    python-httpx  GET  /.well-known/oauth-authorization-server/mcp  200
+    python-httpx  POST /mcp/register                       201
+    browser       GET  /mcp/authorize                      200   <- sign-in page
+    browser       POST /mcp/authorize                      200   <- token accepted
+    python-httpx  POST /mcp/token                          200   <- exchange
+    Claude-User   POST /mcp  x8, had_auth=true             200/202
+\`Claude-User\` rows at 200 with had_auth true mean the connector IS working, whatever any badge says.
+
+### THE "CONNECTION HAS EXPIRED" BADGE IS AN UPSTREAM BUG — do not chase it
+
+The Connectors page can show "Connection issue — Connection has expired" while the connector works
+perfectly in chat. THIS IS NOT OUR SERVER. Established from the log above: a complete OAuth flow and
+eight authenticated sessions, zero errors, and no polling of any kind afterwards — nothing we serve
+feeds that badge.
+
+It is a documented, open, unfixed bug in Anthropic's claude.ai proxy: anthropics/claude-ai-mcp#228,
+with #155 (token never attached), #188 (unreachable after the Connections->Customize migration) and
+#207 (token issued but never used). First-party connectors are unaffected; it is specific to custom
+connectors via mcp-proxy.anthropic.com.
+
+**OUR DATA CONTRADICTS THEIR STATED TRIGGER, which is worth reporting.** #228 says the badge appears
+once the access token expires (~1 hour). Ours does not expire until 2036 and the badge appeared
+within minutes. So expiry is not the cause; the proxy marks the connection stale for some other
+reason.
+
+**DO NOT "FIX" THIS.** Four separate remedies were attempted in one night — a copy-the-URL panel, a
+hijack detector, a full shim revert — and every one was wrong because the premise was. Test the
+connector by opening a chat and calling a tool. Never by reading the badge (rule 4.41).
+
+### TOKEN LIFETIMES ARE EFFECTIVELY INDEFINITE, and that is deliberate
+
+ACCESS_TTL and REFRESH_TTL are both ~10 years. The usual advice — short access tokens, frequent
+refresh — assumes the client REFRESHES. The claude.ai proxy does not, ever (#228, and our own log:
+one /token hit at connect, zero refresh grants). So a short expiry is not a security boundary here.
+It is a SCHEDULED OUTAGE: the day it lapses the connector dies and nobody remembers why. Everyone in
+those issue threads with 1-hour tokens re-authenticates DAILY.
+
+**REVOCATION IS THE CONTROL, and it is stronger than the expiry ever was.** authenticate() re-reads
+pm_mcp_tokens.active on EVERY request, so this kills every session for a partner on their next call,
+mid-session, immediately:
+    update pm_mcp_tokens set active = false where partner = '<name>';
+
+**RESIDUAL RISK, stated not buried:** a leaked access token stays valid until someone revokes the
+partner token. That was already true for 30 days; it is now true indefinitely. Mitigations are
+revocation (instant) and pm_connector_log (every use recorded).
+
+Ten years rather than a NULL expiry because the auth path checks expires_at unconditionally, and
+adding a null branch to the hot path of AUTHENTICATION is a new way to get authentication wrong.
+
 ### CONNECTING: the four defects, and why the diagnosis took all night
 
 An earlier version of this section blamed Claude's own OAuth flow, citing \`step=end_error\` and a
@@ -1367,8 +1467,20 @@ EDGE FUNCTIONS — the state before 10 Aug
   sentence has a caveat in it and cannot be made unconditional.
 
 TEMPORARY THINGS STILL IN PLACE (remove when convenient)
-- pm_connector_log fills with every connector request (capped at 2000 rows, self-pruning). Keep it —
-  it is the thing that finally made a connection failure readable. See the CONNECTING section.
+- pm_connector_log records every connector request (capped at 2000 rows, self-pruning). KEEP IT. It
+  is the thing that made connection failures readable, and it settled in one query what four hours
+  of theorising could not. See THE CONNECTOR LOG section for how to read it.
+- THE "CONNECTION HAS EXPIRED" BADGE IS AN UPSTREAM BUG (anthropics/claude-ai-mcp#228). The
+  connector works; the badge lies. Do not chase it — four separate remedies were attempted in one
+  night and every one was wrong because the premise was. Test with a tool call in a chat.
+- TOKENS DO NOT EXPIRE in any practical sense (~10 years, and all 31 existing sessions were extended
+  to Aug 2036 on 10 Aug). Deliberate: the proxy never refreshes, so a short expiry is a scheduled
+  outage rather than a boundary. Revocation is the control — pm_mcp_tokens.active is re-read on
+  every request. See rule 4.44 before shortening this.
+- CROSS-ROLE WORD REUSE: still nine live instances (7 Calmness, 2 Confidence). Detection now exists
+  as ADVICE on new drafts (vocabulary_advice) and the inputs were fixed so it should stop recurring,
+  but the existing content has NOT been corrected — that is content judgement. Confidence's
+  CALM/PROUD swap is the clearest and worth fixing first.
 - OAuth clutter from 10 Aug troubleshooting: ~20 extra pm_oauth_clients rows (every Connect
   registers a fresh client) and 27 \`beta\` sessions in pm_oauth_tokens, plus a few clients named
   diagnostic/browser-test/textcheck from testing the flow by hand.
@@ -2382,6 +2494,28 @@ there were two 4t, two 4u, two 4r, two 4s, two 4v and two 4d, so "see rule 4t" w
    the edge function didn't, so a question with its own letter_position rendered differently
    in-game than in the CMS.) After any engine edit, diff the two by fetching the deployed edge
    function and comparing, or run a parity test with a question that has its own overrides.
+4.45. **Test the question a CLIENT asks, not the property you just implemented.** The
+   content-addressed view URI shipped with four passing checks: the current URI resolves, the hash
+   matches the content, a changed view yields a changed URI, the URI reads back. All true, all
+   beside the point. Not one asked the question a real client asks — "I am holding YESTERDAY'S URI,
+   does it still work?" — and the answer was no, so every deploy served a red "Failed to load the
+   MCP app" to anyone with a cached tool list.
+   The tests were written from inside the change, asserting the thing I had just built rather than
+   the thing that had to remain true. Before calling a feature tested, write down what the CLIENT
+   holds, does and remembers across time — stale references, old sessions, cached lists — and test
+   from there. A suite that only exercises the happy path of the code you just wrote will pass
+   forever and catch nothing.
+4.44. **A short token expiry is only a security boundary if something REFRESHES it. Otherwise it is
+   a scheduled outage.** The claude.ai proxy never calls /token again after the initial exchange
+   (anthropics/claude-ai-mcp#228, and our own log agrees exactly). With a 1-hour token that means
+   re-authenticating daily, which is what everyone in those threads suffers; with our 30-day token
+   it meant a dead connector on a date already in the diary and no memory of why.
+   So lifetimes here are ~10 years, and the control moved to REVOCATION — which is stronger anyway,
+   because authenticate() re-reads pm_mcp_tokens.active on EVERY request and active=false takes
+   effect on the next call, mid-session. Expiry could never do that.
+   THE GENERAL FORM: work out which half of a protocol the other party actually performs before
+   relying on it. A boundary the counterparty never enforces is not a boundary; it is a timer.
+   And state the residual risk rather than burying it — a leaked token now lives until revoked.
 4.43. **If a client may cache your artefact, put its identity in the URI — and remember a rendered
    widget never re-fetches.** A wording change was deployed, verified live by fetching the resource
    over the wire, and STILL wrong on screen. Not a deploy failure: SEP-1865 lets hosts prefetch and
@@ -2391,6 +2525,12 @@ there were two 4t, two 4u, two 4r, two 4s, two 4v and two 4d, so "see rule 4t" w
    FIX: content-address it — ui://.../view-<hash of the content>. Change a character, get a new URI,
    which the host cannot mistake for what it holds. Nothing to remember to bump; anything requiring a
    human to bump a version will eventually not be bumped.
+   AND KEEP SERVING THE OLD ADDRESSES. Content-addressing invalidates the host's cache of the
+   RESOURCE — but the host also caches TOOLS/LIST, which is where it reads the URI from, so it will
+   keep asking for the hash it saw THERE. Serving only the current hash turned every shim deploy
+   into "Failed to load the MCP app" for anyone holding a stale tool list. Any past URI must resolve,
+   and to the CURRENT content: an old address should not pin old content, it should simply keep
+   working. Fixing a cache while breaking old references is not a fix.
    AND THE PART THAT IS NOT A CACHE AT ALL: an already-rendered widget keeps the HTML it was born
    with, forever. Scrollback shows the build from that moment and cannot be updated. When checking
    whether a view change landed, ask for a NEW one — and have the view NAME ITS OWN BUILD so a
@@ -3208,6 +3348,15 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    Hash the view itself so nobody has to remember to bump anything. Keep serving any older URI so a
    live session does not break. And know that an already-rendered widget NEVER re-fetches: scrollback
    is not a current view.
+   LOG EVERY REQUEST IN A WRAPPER around the whole handler, not per-branch: discovery probes, CORS
+   preflight and error paths answer early, and those are exactly the requests you need when a client
+   appears to do nothing. Record the phase, method, status, whether credentials were present, the
+   user agent and the country (which tells the vendor's cloud from a browser). REDACT tokens, codes
+   and verifiers to <redacted:N chars> and TEST that with real-shaped secrets — a log that
+   accumulates credentials is a breach regardless of who can read it.
+   TOKEN LIFETIMES: find out whether the client actually refreshes before choosing one. If it does
+   not, a short expiry is a scheduled outage, not a boundary — make lifetimes long and make
+   REVOCATION the control, re-checked on every request.
    MAKE THE VIEW STATE ITS OWN STATE. A permanent status line ("handshake sent", "NO HANDSHAKE after
    5s", "12 question(s)") is what turns a silent failure into a diagnosable one, and is the difference
    between one session and three. Have it NAME THE RESOURCE IT IS — one screenshot then tells you
