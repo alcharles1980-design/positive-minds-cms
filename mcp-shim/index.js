@@ -124,9 +124,10 @@ function loginPage(p) {
   <div class="note"><b>Everything you write goes to a review queue for approval first</b> — nothing you send goes live on its own.</div>
   <div id="hijack" style="display:none;margin-top:18px;padding:14px 15px;border-radius:12px;
        background:#FFF6E5;border:1px solid #E0A93B;font-size:13.5px;line-height:1.6;color:#5A4210">
-    <b>Did the Claude app open instead?</b><br>
-    Your sign-in worked — but your phone sent the last step to the Claude app, which cannot finish it.
-    Copy the link below and paste it into your browser's address bar to complete the connection.
+    <b>If the Claude app opened instead of finishing here \u2014 read this.</b><br>
+    Your sign-in worked. But phones often hand the last step to the Claude app, which cannot complete
+    it, so the connection never finishes. If that happened, copy the link below and paste it into
+    your browser\u2019s address bar. Pasted links are not diverted, so it will complete properly.
     <input id="hjurl" readonly style="width:100%;margin-top:10px;padding:9px 10px;border-radius:9px;
       border:1px solid #E0A93B;background:#fff;font-size:12px;font-family:ui-monospace,Menlo,monospace">
     <button id="hjcopy" type="button" style="margin-top:9px;width:100%;padding:11px;border-radius:9px;
@@ -162,27 +163,34 @@ function loginPage(p) {
       showErr('Something went wrong — please try again.');
     }
   }
-  // If the redirect is hijacked (Android hands claude.ai links to the Claude app), THIS PAGE IS
-  // STILL HERE a moment later. That is the tell, and it lets us offer a way out rather than leaving
-  // someone staring at a chat window wondering why nothing connected.
+  // THE CALLBACK GETS HIJACKED ON ANDROID and there is nothing we can do to stop it: App Links hand
+  // every claude.ai link to the Claude app, which cannot complete an OAuth callback, so the browser
+  // tab holding the flow never receives the code.
+  // DO NOT try to DETECT it. The first attempt did, and failed for a reason worth remembering: when
+  // the app takes the foreground the browser tab is backgrounded, so document.hidden goes true — and
+  // the guard added to avoid false positives suppressed the one true positive. Any detection here
+  // races an app switch we cannot observe.
+  // So: render the escape hatch FIRST, then navigate. If the redirect works the page is gone and
+  // nobody ever sees it. If it is hijacked, the panel is already sitting there when they switch back
+  // to the browser. No timers, no visibility checks, nothing to get wrong.
+  // A pasted address-bar URL is not intercepted — only link navigations are — so copying the URL is
+  // a genuine way through without changing any phone setting.
   function finish(url){
-    var t = setTimeout(function(){ hijacked(url); }, 1800);
-    window.addEventListener('pagehide', function(){ clearTimeout(t); });
-    window.location.href = url;
-  }
-  function hijacked(url){
-    if (document.hidden) return;   // we did navigate; the tab is just backgrounded
     var box = document.getElementById('hijack');
-    if (!box) return;
-    box.style.display = 'block';
-    var f = document.getElementById('hjurl');
-    if (f) f.value = url;
-    var c = document.getElementById('hjcopy');
-    if (c) c.onclick = function(){
-      try { f.select(); f.setSelectionRange(0, url.length); document.execCommand('copy');
-            c.textContent = 'Copied \u2014 now paste it in the address bar'; }
-      catch (e) { c.textContent = 'Select the text above and copy it'; }
-    };
+    if (box){
+      box.style.display = 'block';
+      var f = document.getElementById('hjurl');
+      if (f) f.value = url;
+      var c = document.getElementById('hjcopy');
+      if (c) c.onclick = function(){
+        try {
+          f.focus(); f.select(); f.setSelectionRange(0, url.length);
+          document.execCommand('copy');
+          c.textContent = 'Copied \u2014 now paste it in your browser address bar';
+        } catch (e) { c.textContent = 'Press and hold the link above to copy it'; }
+      };
+    }
+    window.location.href = url;
   }
 
   btn.addEventListener('click', connect);
