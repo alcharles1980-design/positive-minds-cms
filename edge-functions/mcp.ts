@@ -521,12 +521,27 @@ TWO RULES THAT ARE NOT NEGOTIABLE:
 
    This is the single most important rule. It has broken real content before.
 
-ALSO: warm, simple, first-person sentences ("I am...", "I feel..."). Fresh words and sentences make a
-better, more varied pack, so PREFER variety. But the ONE hard rule about repetition is: never
-reproduce an existing question EXACTLY — same sentence AND the same two words (right + wrong). Reusing
-a word, or an existing sentence with a different pair, is fine. Try not to lean on the same wrong
-option over and over, though — a predictable distractor teaches the child "it's never that one"
-instead of reading the blank.`;
+ALSO: warm, simple, first-person sentences ("I am...", "I feel...").
+
+VOCABULARY — REACH WIDE. Every question is a chance for a child to meet a word they do not have yet.
+A pack of twelve questions built from six words teaches less than one built from twenty-four, so
+before reusing anything, look for a word the pack has not used at all. get_pack_content returns
+\`every_word_in_use\` for exactly this: treat it as the list to move AWAY from.
+
+Two things to avoid, both of which teach the wrong lesson:
+  • A WORD IN BOTH ROLES. If a word is the ANSWER in one question, do not make it the wrong option
+    in another (or the reverse). The child is marked wrong for a word and right for it moments
+    later. Worse, the wrong option is often GENUINELY correct in its sentence — "I stay PROUD when
+    things go wrong" reads perfectly well — so a child who reads carefully is punished for it.
+  • THE SAME WRONG OPTION REPEATEDLY. A predictable distractor teaches "it is never that one"
+    instead of teaching the child to read the blank.
+
+CHOOSE THE WRONG WORD ON PURPOSE. It should be positive, clearly a different length, and NOT a
+sensible answer to that particular sentence. Read the sentence back with the wrong word in it: if it
+still makes sense, the question has two right answers and only one of them scores.
+
+The ONE hard rule about repetition remains: never reproduce an existing question EXACTLY — same
+sentence AND the same two words. Reusing a sentence with a genuinely different pair is allowed.`;
 
 // ============================================================
 async function callTool(db: any, partner: string, name: string, args: any) {
@@ -593,10 +608,22 @@ async function callTool(db: any, partner: string, name: string, args: any) {
       .select('answer,alt_answer,status')
       .eq('pack_id', pack.id).in('status', ['pending', 'rejected']).limit(1000);
 
-    const usedWords = [...new Set([
+    const answerWords = [...new Set([
       ...(qs || []).map((q: any) => (q.answer || '').toUpperCase()),
       ...(queued || []).map((q: any) => (q.answer || '').toUpperCase()),
     ].filter(Boolean))];
+
+    // DISTRACTORS WERE NEVER SURFACED, and that is why words ended up playing both roles. Claude was
+    // told which words are already ANSWERS and nothing about the wrong options, so it would pick a
+    // distractor that is the correct answer two questions along. A child is then marked wrong for a
+    // word and right for it moments later.
+    const distractorWords = [...new Set([
+      ...(qs || []).map((q: any) => (q.alt_answer || '').toUpperCase()),
+      ...(queued || []).map((q: any) => (q.alt_answer || '').toUpperCase()),
+    ].filter(Boolean))];
+
+    const usedWords = answerWords;
+    const everyWordInUse = [...new Set([...answerWords, ...distractorWords])].sort();
 
     const rejectedWords = [...new Set((queued || [])
       .filter((q: any) => q.status === 'rejected')
@@ -616,9 +643,19 @@ async function callTool(db: any, partner: string, name: string, args: any) {
         sentence: (q.template || '').replace(/\{blank\}/g, '____'),
         answer: q.answer, alternate: q.alt_answer,
       })),
-      answer_words_already_taken: usedWords,
+      answer_words_already_taken: answerWords,
+      distractor_words_already_used: distractorWords,
+      every_word_in_use: everyWordInUse,
       previously_rejected: rejectedWords,
-      note: 'Fresh words and sentences make a better, more varied pack — so PREFER them. But the only HARD rule is: do not reproduce an existing question exactly (same sentence AND the same right/wrong pair). Reusing a word, or an existing sentence with a different pair, is allowed. Run check_questions to be sure before you propose.',
+      note: 'REACH FOR WORDS THAT ARE NOT IN every_word_in_use — either list. A pack is better for ' +
+        'having a WIDE vocabulary, and a child meets more language that way. Two specific things to ' +
+        'avoid: (1) using a word that is already an ANSWER as your wrong option, or a word already ' +
+        'used as a wrong option as your answer — the child is marked wrong for a word and right for ' +
+        'it a moment later, which teaches nothing but confusion; (2) leaning on the same wrong option ' +
+        'repeatedly, which teaches "it is never that one" instead of reading the blank. ' +
+        'Both words must still be POSITIVE and DIFFERENT LENGTHS. The only HARD rule remains: never ' +
+        'reproduce an existing question exactly (same sentence AND the same right/wrong pair). ' +
+        'Run check_questions before you propose.',
     };
   }
 
@@ -644,10 +681,37 @@ async function callTool(db: any, partner: string, name: string, args: any) {
       ...(queuedQs || []).map((q: any) => ({ ...q, source: q.status })),
     ];
 
+    // VOCABULARY ADVICE — advisory, never blocking (rule 4.15: only defects that make a question
+    // WRONG FOR A CHILD are hard). Cross-role reuse does not break the engine, so it must not stop
+    // a proposal; it is a strong smell that the pack is recycling six words, and the reviewer and
+    // the writer both deserve to see it.
+    const answersInPack = new Set(existing.map((q: any) => (q.answer || '').toUpperCase()).filter(Boolean));
+    const altsInPack = new Set(existing.map((q: any) => (q.alt_answer || '').toUpperCase()).filter(Boolean));
+
     // Validate cumulatively, so a word repeated WITHIN this batch is caught too.
     const seen = [...existing];
     const checked = list.map((q: any) => {
       const result = validateQuestion(q, levels || [], { targetLevel: pack.level ?? 1, existing: seen });
+
+      const ans = (q.answer || '').toUpperCase();
+      const alt = (q.alt_answer || '').toUpperCase();
+      const advice: string[] = [];
+      if (alt && answersInPack.has(alt)) {
+        advice.push(`"${alt}" is already the ANSWER to another question in this pack. Using it as the ` +
+          `wrong option means a child is marked right for it once and wrong for it here. Pick a ` +
+          `different wrong word.`);
+      }
+      if (ans && altsInPack.has(ans)) {
+        advice.push(`"${ans}" is already used as a WRONG option elsewhere in this pack. Making it the ` +
+          `answer here contradicts that. Pick a different answer word, or change the other question.`);
+      }
+      if (ans && answersInPack.has(ans)) {
+        advice.push(`"${ans}" is already an answer in this pack — allowed, but a fresh word would ` +
+          `widen the vocabulary a child meets.`);
+      }
+      if (advice.length) (result as any).vocabulary_advice = advice;
+
+      answersInPack.add(ans); altsInPack.add(alt);
       seen.push({ template: q.template, answer: q.answer, alt_answer: q.alt_answer, source: 'batch' });
       return { q, result };
     });
