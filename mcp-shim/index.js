@@ -35,7 +35,7 @@ const SUPABASE = "https://tytrmjjucqijzcrbwjfm.supabase.co";
 //   resources/list  → declare the ui:// resource
 //   resources/read  → return the HTML with mimeType text/html;profile=mcp-app
 //   tools/call      → return content AND structuredContent
-import { PREVIEW_APP_HTML } from "./preview-app.js";
+import { VIEW_HTML } from "./view-app.js";
 
 // TEMPORARY diagnostic: which tool is the client actually calling? Remove once resolved.
 const TOOL_LOG_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5dHJtamp1Y3FpanpjcmJ3amZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMwOTMyNDgsImV4cCI6MjA5ODY2OTI0OH0.KlFsPm7M015tflKE-jDjIstD_ZoCaz0jROUAoksJxOs";
@@ -50,6 +50,8 @@ function toolLog(ctx, entry) {
 }
 
 const UI_URI = "ui://positive-minds/question-preview";
+const OVERVIEW_TOOL = "overview";
+const OVERVIEW_URI = "ui://positive-minds/overview";
 const UI_MIME = "text/html;profile=mcp-app";
 const UI_TOOL = "preview_questions";
 
@@ -144,7 +146,7 @@ function loginPage(p) {
       });
       var d = await r.json();
       if (d && d.ok && d.redirect){ window.location.href = d.redirect; return; }
-      showErr((d && d.error) || 'That token was not recognised, or access has been revoked.');
+      showErr((d && d.error) || 'That sign-in could not be completed. Check the token, or ask for a fresh one.');
     } catch (e) {
       showErr('Something went wrong — please try again.');
     }
@@ -214,8 +216,12 @@ export default {
         if (loc) return jsonRes({ ok: true, redirect: loc });
         return jsonRes({ ok: false, error: "The sign-in server did not return a destination. Please try again." });
       }
-      // 200 back from Supabase = it re-rendered the login page with an error (bad/expired token).
-      return jsonRes({ ok: false, error: "That token was not recognised, or access has been revoked. Check it and try again, or issue a fresh one." });
+      // A 200 here means Supabase re-rendered the login page instead of redirecting. USUALLY a bad
+      // token — but not always: an unknown client_id or a mismatched redirect_uri lands here too.
+      // The old wording blamed the token unconditionally, and there is a 400 in the logs that would
+      // have told a partner their perfectly valid token was rejected, sending them to ask for a
+      // replacement they did not need. Say what is actually known.
+      return jsonRes({ ok: false, error: "That sign-in could not be completed. Most often the token is wrong or has been revoked \u2014 check it, or ask for a fresh one. If the token is definitely right, remove the connector in Claude and add it again." });
     }
 
     // ---- 3. Proxy everything else to the Supabase edge function ----
@@ -242,6 +248,168 @@ export default {
           { headers: { ...CORS, "Content-Type": "application/json" } },
         );
 
+        // ---- overview — the orientation a partner gets when they arrive -----------------------
+        // Composed IN THE SHIM from two existing read tools, called with the CALLER'S OWN token.
+        // No new credentials, no new privilege, nothing this partner could not already read; it
+        // just saves them three round trips and a lot of phrasing. The shim can do this because it
+        // deploys from the repo on push — mcp.ts is a hand-paste (rule 4.30) and this needed to be
+        // changeable. If edge-function CI ever lands, this belongs upstream in mcp.ts.
+        if (rpc.method === "tools/call" && rpc.params && rpc.params.name === OVERVIEW_TOOL) {
+          const callUpstream = async (toolName) => {
+            const h = new Headers(fwdHeaders);
+            h.set("Content-Type", "application/json");
+            const r = await fetch(SUPABASE + "/functions/v1/mcp", {
+              method: "POST",
+              headers: h,
+              body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: toolName, arguments: {} } }),
+            });
+            if (!r.ok) return { __error: "HTTP " + r.status, __status: r.status };
+            const j = await r.json().catch(() => null);
+            if (!j || j.error) return { __error: (j && j.error && j.error.message) || "no result" };
+            const blocks = (j.result && j.result.content) || [];
+            const t = blocks.find((c) => c && c.type === "text");
+            if (!t) return { __error: "no text block" };
+            try { return JSON.parse(t.text); } catch (_) { return { __error: "unparseable" }; }
+          };
+
+          // One at a time is fine here — two small reads, and it keeps the failure attributable.
+          const packsRes = await callUpstream("list_packs");
+          const statusRes = await callUpstream("review_status");
+
+          // AUTH FAILURE IS NOT A PARTIAL RESULT. Every other tool answers an unauthenticated call
+          // with 401 + WWW-Authenticate, and that is what makes an MCP client start the OAuth flow.
+          // Composing two reads would otherwise turn a 401 into a cheerful 200 "everything is empty"
+          // — and since overview is now the FIRST call of a session, an expired token would show a
+          // partner an empty CMS and never prompt them to sign in. Propagate the 401 instead.
+          if (packsRes.__status === 401 || statusRes.__status === 401 ||
+              packsRes.__status === 403 || statusRes.__status === 403) {
+            const status = packsRes.__status || statusRes.__status;
+            return new Response(
+              JSON.stringify({ jsonrpc: "2.0", id: rpc.id ?? null,
+                error: { code: -32001, message: "Not authorised — sign in to the connector again." } }),
+              { status, headers: { ...CORS, "Content-Type": "application/json",
+                "WWW-Authenticate": `Bearer resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource"` } },
+            );
+          }
+
+          // If either leg fails, SAY SO rather than quietly reporting zeros. A confident "0 questions
+          // awaiting review" that actually means "the call failed" is the worst possible output for
+          // a tool whose entire job is to tell someone where things stand (rule 4.22).
+          const problems = [];
+          if (packsRes.__error) problems.push("pack list unavailable (" + packsRes.__error + ")");
+          if (statusRes.__error) problems.push("review queue unavailable (" + statusRes.__error + ")");
+
+          const packs = Array.isArray(packsRes.packs) ? packsRes.packs : [];
+          const totals = statusRes.totals_all_contributors || {};
+          const byPack = statusRes.by_pack || {};
+
+          const shaped = packs.map((p) => {
+            const st = p.stats || {};
+            return {
+              slug: p.slug,
+              name: p.name,
+              emoji: p.emoji,
+              status: p.status,
+              description: p.description || null,
+              live_questions: st.live_questions || 0,
+              awaiting_review: st.awaiting_review || 0,
+              distinct_answer_words: st.distinct_answer_words || 0,
+            };
+          });
+          // Packs a person can actually act on come first: things waiting, then things with content,
+          // then the empty ones. Alphabetical order buries the 12 pending questions in the middle.
+          const rank = (p) => (p.awaiting_review > 0 ? 0 : p.live_questions > 0 ? 1 : 2);
+          shaped.sort((a, b) => rank(a) - rank(b) || b.awaiting_review - a.awaiting_review ||
+                                b.live_questions - a.live_questions || a.name.localeCompare(b.name));
+
+          const withLive = shaped.filter((p) => p.live_questions > 0).length;
+          const liveTotal = shaped.reduce((n, p) => n + p.live_questions, 0);
+          const awaitingTotal = shaped.reduce((n, p) => n + p.awaiting_review, 0);
+
+          const payload = {
+            headline: problems.length
+              ? "Partial overview — " + problems.join("; ")
+              : awaitingTotal + " question(s) waiting for a human, " + liveTotal +
+                " live across " + withLive + " pack(s).",
+            problems: problems.length ? problems : undefined,
+            content_status: {
+              packs_total: shaped.length,
+              published: shaped.filter((p) => p.status === "published").length,
+              draft: shaped.filter((p) => p.status !== "published").length,
+              packs_with_live_questions: withLive,
+              packs_empty: shaped.filter((p) => p.live_questions === 0 && p.awaiting_review === 0).length,
+              live_questions_total: liveTotal,
+              awaiting_review_total: awaitingTotal,
+              approved_all_time: totals.approved,
+              rejected_all_time: totals.rejected,
+            },
+            packs: shaped,
+            review_queue: {
+              total_awaiting: awaitingTotal,
+              by_pack: byPack,
+              by_contributor: statusRes.by_contributor,
+              your_own: statusRes.your_own,
+              visibility: statusRes.visibility,
+            },
+            // `say` is what a menu BUTTON sends into the chat, so it has to read like something a
+            // person would actually type. `how` is the tool chain, for the assistant's benefit only —
+            // never show tool names to a partner.
+            what_you_can_do: [
+              { do: "Review what is waiting", icon: "\u23F3",
+                how: "preview_questions (source: pending)",
+                say: "Show me the questions waiting for review so I can play them." },
+              { do: "Play a pack as a child sees it", icon: "\u25B6",
+                how: "preview_questions (source: live, pack_slug)",
+                say: "Let me play the live questions in one of the packs." },
+              { do: "Write new questions", icon: "\u270D",
+                how: "get_pack_content, then check_questions, then propose_questions",
+                say: "I would like to write some new questions for a pack." },
+              { do: "Test drafts without saving", icon: "\u2713",
+                how: "check_questions",
+                say: "I have some draft questions I want checked against the engine before proposing them." },
+              { do: "Fix something in the queue", icon: "\u270E",
+                how: "edit_queued_question",
+                say: "I want to fix a question that is already waiting for review." },
+              { do: "Take something out of the queue", icon: "\u2716",
+                how: "reject_questions",
+                say: "I want to remove a question from the review queue and give a reason." },
+              { do: "See progress and rejections", icon: "\u25F4",
+                how: "review_status",
+                say: "How is the review queue doing, and what has been rejected and why?" },
+              { do: "Start a new pack", icon: "\u2726",
+                how: "create_pack",
+                say: "I would like to start a new themed pack." },
+              { do: "Sharpen a pack's definition", icon: "\u2699",
+                how: "update_pack",
+                say: "I want to refine the purpose, focus or style of an existing pack." },
+            ],
+            what_you_cannot_do: "Approve. Nothing written here reaches a child until a human approves it in the CMS — " +
+              "pm_review_approve is the only route a question takes into a pack, and it is not exposed as a tool.",
+            how_to_show_this: "Give the person a SHORT orientation, not this JSON. In this order:\n" +
+              "1. The headline.\n" +
+              "2. A bulleted list of the packs that have something in them (live or awaiting) with their " +
+              "counts, then one line saying how many of the rest are empty — do not list all fifteen.\n" +
+              "3. A NUMBERED LIST of EVERY item in what_you_can_do, using its \"do\" text. This list is " +
+              "REQUIRED and must be complete — do not summarise it, do not fold it into a sentence, and do " +
+              "not offer two or three options as prose. Never show tool names — the \"how\" field is for " +
+              "you, not for them.\n" +
+              "   PRINT IT EVEN IF A VISUAL CARD IS ALSO SHOWN. A card may be rendered above your reply " +
+              "with the same options on it. That is NOT a reason to leave the list out, and the two are " +
+              "not in conflict: the card does not appear in every client, does not survive being scrolled " +
+              "past or exported, and cannot be read back later. The text list is the durable copy. If you " +
+              "find yourself deciding the list would be redundant, print it anyway.\n" +
+              "4. what_you_cannot_do, once, plainly, so nobody assumes their questions are live.\n" +
+              "5. Close by asking which number they want.\n" +
+              "If problems is present, say so up front and do not present partial numbers as complete.",
+          };
+
+          return rpcRes({
+            content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+            structuredContent: payload,
+            _meta: { ui: { resourceUri: OVERVIEW_URI } },
+          });
+        }
+
         // resources/list — declare the UI resource. The Supabase function knows nothing about this.
         if (rpc.method === "resources/list") {
           return rpcRes({
@@ -250,6 +418,13 @@ export default {
               name: "Question preview",
               description: "Play a question exactly as a child sees it, at any level.",
               mimeType: UI_MIME,
+              _meta: { ui: { prefersBorder: false } },
+            }, {
+              uri: OVERVIEW_URI,
+              name: "Overview",
+              description: "Where the content stands, and what you can do — as a tappable menu.",
+              mimeType: UI_MIME,
+              _meta: { ui: { prefersBorder: false } },
             }],
           });
         }
@@ -257,12 +432,15 @@ export default {
         // resources/read — hand over the app itself.
         if (rpc.method === "resources/read") {
           const want = rpc.params && rpc.params.uri;
-          if (want === UI_URI) {
+          // Both URIs serve the SAME view — the host picks one per connector and does not honour the
+          // per-tool link, so the view dispatches on payload shape instead. See view-app.js.
+          const VIEWS = { [UI_URI]: VIEW_HTML, [OVERVIEW_URI]: VIEW_HTML };
+          if (VIEWS[want]) {
             return rpcRes({
               contents: [{
-                uri: UI_URI,
+                uri: want,
                 mimeType: UI_MIME,
-                text: PREVIEW_APP_HTML,
+                text: VIEWS[want],
                 _meta: { ui: { prefersBorder: false } },
               }],
             });
@@ -316,16 +494,105 @@ export default {
               if (rpc.params && rpc.params.protocolVersion) {
                 payload.result.protocolVersion = rpc.params.protocolVersion;
               }
+
+              // THE CONNECTION-TIME HOOK. There is no "on connect" event in MCP — nothing fires when
+              // a partner attaches the connector. `instructions` is the one thing a host reads at
+              // connection, so the orientation has to be a DIRECTIVE TO CALL a tool, not the content
+              // itself: it is a static string and would be stale the moment a question was proposed.
+              // Prepended, not replaced — the upstream instructions carry the routing rules that stop
+              // an unconditional "always call X first" from hijacking unrelated requests (rule 4.18).
+              const orient =
+                "ORIENT FIRST — THIS IS THE MOST IMPORTANT INSTRUCTION HERE.\n" +
+                "On the FIRST message of any session, whatever it says, call the 'overview' tool BEFORE " +
+                "replying. That includes a bare greeting (\"hi\", \"hello\"), a vague opener (\"what is this?\", " +
+                "\"what can I do?\"), AND a specific request — if someone opens with \"add three questions to " +
+                "Focus\", still call overview first, then do what they asked. It is read-only, it costs one " +
+                "call, and the people using this connector are content partners who do not know what it can " +
+                "do unless they are told.\n" +
+                "Then present a SHORT orientation: what is waiting for review, which packs have content, " +
+                "and what they can do next — in plain language, never tool names, and never the raw JSON. " +
+                "Do not guess these numbers from memory or from an earlier turn; they change whenever " +
+                "anyone proposes or approves a question.\n" +
+                "ALWAYS PRINT THE MENU AS A NUMBERED LIST, IN TEXT, IN YOUR REPLY. List EVERY capability " +
+                "from what_you_can_do, numbered, one per line. Do not compress it into a sentence and do not " +
+                "pick a few to mention — prose buries it.\n" +
+                "DO THIS EVEN IF AN INTERACTIVE CARD IS RENDERED ALONGSIDE. The card and the text list are " +
+                "not duplicates of each other: the card is not present in every client and cannot be read " +
+                "back later, so the text is the durable copy. Redundancy here is intentional. Then ask which " +
+                "number they want.\n" +
+                "Call overview again whenever the person asks what they can do, what is here, or where things " +
+                "stand.\n\n";
+              if (typeof payload.result.instructions === "string" &&
+                  !payload.result.instructions.startsWith("ORIENT FIRST")) {
+                payload.result.instructions = orient + payload.result.instructions;
+              } else if (!payload.result.instructions) {
+                payload.result.instructions = orient;
+              }
             }
 
-            // WIDGET DISABLED (Aug 2026). The _meta.ui link is what makes the host render the MCP App.
-            // It rendered as an empty card three times running, and worse, it DISPLACED the artifact
-            // path that already worked — the host drew a blank widget instead of letting Claude build
-            // the card from the text result. Removing the link restores the working behaviour.
-            // resources/list and resources/read below still serve the UI resource, so re-enabling is
-            // a one-line change once the widget itself is understood.
+            // WIDGET RE-ENABLED (Aug 2026). The _meta.ui.resourceUri link is what makes the host
+            // render the MCP App. It was removed after the widget came up clipped to about one card
+            // — which read as "blank" — and displaced the artifact path that already worked.
+            // ROOT CAUSE, found from the spec, not from guessing: the view never sent
+            // ui/notifications/size-changed. When a host uses flexible dimensions the VIEW owns its
+            // height and MUST report it; our CSS min-height was irrelevant because the iframe is
+            // sized from outside. preview-app.js now handshakes properly, reads containerDimensions
+            // and reports its height via ResizeObserver. See mcp-shim/widget-test.mjs.
+            // THE FALLBACK STAYS REACHABLE (rule 4.24): the text content block below still carries
+            // the full JSON, so a host without MCP Apps — or with a broken widget — still gets the
+            // playable artifact. The widget's status bar makes its own failure loud rather than
+            // silent. Nested _meta.ui is the current form; flat _meta["ui/resourceUri"] is
+            // deprecated in the spec and deliberately not sent.
             if (rpc.method === "tools/list" && Array.isArray(payload.result.tools)) {
-              // (no _meta.ui injection — see above)
+              for (const t of payload.result.tools) {
+                if (t && t.name === UI_TOOL) {
+                  t._meta = { ...(t._meta || {}), ui: { resourceUri: UI_URI, visibility: ["model", "app"] } };
+                }
+              }
+              // Declare overview FIRST. Position is not decorative — a tool listed first is the one
+              // reached for when someone opens with "what's here?", which is exactly the intent.
+              if (!payload.result.tools.some((t) => t && t.name === OVERVIEW_TOOL)) {
+                payload.result.tools.unshift({
+                  name: OVERVIEW_TOOL,
+                  description:
+                    "START HERE. Where the content stands right now and what you can do with it: every pack " +
+                    "with its live and awaiting-review counts, the size and shape of the review queue, and the " +
+                    "list of actions available to you. Call this FIRST in a session, before answering anything " +
+                    "about packs, questions or progress, and present the result as a short orientation rather " +
+                    "than raw data. Read-only — it changes nothing.",
+                  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+                  annotations: { readOnlyHint: true, title: "Overview" },
+                  _meta: { ui: { resourceUri: OVERVIEW_URI, visibility: ["model", "app"] } },
+                });
+              }
+            }
+
+            // DISCOVERY FALLBACK. `instructions` is ADVISORY — the host reads it at connection, but
+            // nothing fires until the person speaks and nothing guarantees the model acts on it. A
+            // partner who opens with a specific request ("add three questions to Focus") may never
+            // see the orientation at all, and then has no idea what else is possible.
+            // So every tool result carries a compact menu. It is stateless (the shim has no session
+            // store), it costs a few hundred bytes, and it makes the capability list impossible to
+            // miss whatever the partner happens to do first. The full picture still lives in
+            // `overview`; this is the pointer to it.
+            if (rpc.method === "tools/call" && payload.result && rpc.params &&
+                rpc.params.name !== OVERVIEW_TOOL) {
+              payload.result.also_available = {
+                note: "If the person has not yet been shown the full menu in this conversation, print " +
+                      "this as a NUMBERED LIST after answering what they asked. They cannot see a menu " +
+                      "anywhere else. Plain language only, never tool names.",
+                you_can_also: [
+                  "See or play the questions waiting for review",
+                  "Play a pack's live questions as a child sees them",
+                  "Write new questions for a pack",
+                  "Test drafts against the real engine without saving",
+                  "Fix or remove a question already in the queue",
+                  "Check progress and see why things were rejected",
+                  "Start a new pack, or sharpen an existing one's definition",
+                ],
+                full_picture: "Call the 'overview' tool for live counts and the complete menu.",
+                cannot: "Nothing reaches a child until a human approves it in the CMS.",
+              };
             }
 
             if (rpc.method === "tools/call" && rpc.params && rpc.params.name === UI_TOOL) {
@@ -336,7 +603,7 @@ export default {
               if (textBlock) {
                 try { payload.result.structuredContent = JSON.parse(textBlock.text); } catch (_) { /* leave as text */ }
               }
-              // No _meta.ui here either — see the note above.
+              payload.result._meta = { ...(payload.result._meta || {}), ui: { resourceUri: UI_URI } };
             }
           }
 
