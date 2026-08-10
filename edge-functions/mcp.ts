@@ -1196,7 +1196,15 @@ Deno.serve(async (req) => {
       client_id: clientId,
       client_name: reg.client_name || 'MCP client',
       redirect_uris: redirectUris,
-      grant_types: ['authorization_code'],
+      // MUST include refresh_token. This response tells the client what it is ALLOWED to do, and a
+      // client that is told authorization_code only will never attempt a refresh — no matter what
+      // the server metadata advertises or what the token endpoint actually returns.
+      // That is exactly how the connector broke: the token endpoint issued refresh tokens, the
+      // metadata advertised the grant, and this line quietly said no. Claude concluded the
+      // connection could not be renewed and showed "Connection has expired" on every attempt.
+      // The refresh grant is implemented below and is not gated on this list, so this was purely a
+      // false advertisement — the most expensive kind of wrong, because everything else looks right.
+      grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
       token_endpoint_auth_method: 'none',   // public client — PKCE is what protects it
     }, 201);
