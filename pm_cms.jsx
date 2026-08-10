@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.08.10-25", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.08.10-26", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -4352,9 +4352,17 @@ EDGE FUNCTIONS — CI IS LIVE AND HAS DEPLOYED. deployed == repo is now true by 
 - First real deploy 10 Aug, and it immediately fixed a production defect: the mcp function had been
   running without refresh-token support for weeks because the code was in the repo and the
   hand-paste never happened. That is exactly the failure the workflow existed to prevent.
-- KNOWN BUG IN THE WORKFLOW: \`only: <slug>\` did NOT hold — a run with only:pack-describe deployed
-  all five functions. Harmless that time and it is what fixed the connector, but a "just this one"
-  deploy is currently not that. Fix the filter before relying on it.
+- \`only: <slug>\` WORKS. An earlier note here claimed it did not, on the evidence of five functions
+  showing fresh timestamps right after an only:pack-describe dispatch. Wrong: a PUSH-triggered run
+  forty seconds earlier had deployed everything, which is correct behaviour — push deploys all
+  changed functions and sets no filter. The canary log reads ONLY="pack-describe" and
+  "Deployed Functions: pack-describe", exactly as intended.
+  Two runs seconds apart, and the effect was attributed to the wrong one. When timestamps cluster,
+  check WHICH run produced them before writing down a bug (rule 4.40 — read the instrument).
+- WHAT ACTUALLY DEPLOYED THE REFRESH-TOKEN FIX: commit a1ca5a8, "OAuth: issue refresh tokens and
+  support the refresh_token grant", which had been sitting in the repo UNDEPLOYED from an earlier
+  session. The first push through the new CI shipped it automatically. The hand-paste gap closed
+  itself the moment CI existed, which is a better argument for the workflow than any written here.
 (historical note below)
 EDGE FUNCTIONS — the state before 10 Aug
 - SUPABASE_ACCESS_TOKEN was added 9 Aug 2026. deploy-edge-functions.yml runs, authenticates and can
