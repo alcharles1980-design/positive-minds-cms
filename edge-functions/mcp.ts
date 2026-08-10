@@ -1167,7 +1167,7 @@ Deno.serve(async (req) => {
       token_endpoint: `${BASE}/token`,
       registration_endpoint: `${BASE}/register`,
       response_types_supported: ['code'],
-      grant_types_supported: ['authorization_code'],
+      grant_types_supported: ['authorization_code', 'refresh_token'],
       code_challenge_methods_supported: ['S256'],   // OAuth 2.1 requires PKCE
       token_endpoint_auth_methods_supported: ['none'],
       scopes_supported: ['mcp:tools'],
@@ -1289,6 +1289,60 @@ Deno.serve(async (req) => {
     }
 
     const grant = params.get('grant_type');
+
+    // ---- refresh_token grant --------------------------------------------------------------
+    // Anthropic's connector docs: "Claude supports token expiry and refresh — servers should
+    // support this functionality." Ours did not, so a connection had no way to stay alive and
+    // Claude had nothing to call when its access token aged out; the only route back was a full
+    // manual reconnect. PKCE is deliberately NOT required here — RFC 7636 applies it to the
+    // authorization code exchange, not to refresh.
+    if (grant === 'refresh_token') {
+      const rt = params.get('refresh_token') || '';
+      if (!rt) return json({ error: 'invalid_request', error_description: 'refresh_token required' }, 400);
+
+      const { data: old } = await db.from('pm_oauth_tokens')
+        .select('access_token, token_id, client_id, refresh_expires_at')
+        .eq('refresh_token', rt).maybeSingle();
+      if (!old) return json({ error: 'invalid_grant', error_description: 'Unknown refresh token' }, 400);
+      if (old.refresh_expires_at && new Date(old.refresh_expires_at) < new Date()) {
+        return json({ error: 'invalid_grant', error_description: 'Refresh token expired' }, 400);
+      }
+      // The client must be the one the token was issued to.
+      const cid = params.get('client_id') || '';
+      if (cid && old.client_id && cid !== old.client_id) {
+        return json({ error: 'invalid_grant', error_description: 'client_id mismatch' }, 400);
+      }
+      // The partner may have been revoked since — a refresh must not resurrect access.
+      const { data: p } = await db.from('pm_mcp_tokens')
+        .select('active').eq('id', old.token_id).maybeSingle();
+      if (!p || !p.active) return json({ error: 'invalid_grant', error_description: 'Access revoked' }, 400);
+
+      const newAccess = randomToken('at_');
+      const newRefresh = randomToken('rt_');
+      const ttl = 60 * 60 * 24 * 30;
+      const rttl = 60 * 60 * 24 * 90;
+      await db.from('pm_oauth_tokens').insert({
+        access_token: newAccess,
+        token_id: old.token_id,
+        client_id: old.client_id,
+        expires_at: new Date(Date.now() + ttl * 1000).toISOString(),
+        refresh_token: newRefresh,
+        refresh_expires_at: new Date(Date.now() + rttl * 1000).toISOString(),
+      });
+      // ROTATE: retire the old pair so a leaked refresh token cannot be replayed. Done AFTER the
+      // new row exists, so a failure here leaves the caller with working credentials rather than
+      // none.
+      await db.from('pm_oauth_tokens').delete().eq('access_token', old.access_token);
+
+      return json({
+        access_token: newAccess,
+        token_type: 'Bearer',
+        expires_in: ttl,
+        refresh_token: newRefresh,
+        scope: 'mcp:tools',
+      });
+    }
+
     if (grant !== 'authorization_code') {
       return json({ error: 'unsupported_grant_type' }, 400);
     }
@@ -1315,18 +1369,23 @@ Deno.serve(async (req) => {
     await db.from('pm_oauth_codes').update({ used: true }).eq('code', code);
 
     const accessToken = randomToken('at_');
-    const expiresIn = 60 * 60 * 24 * 30;   // 30 days
+    const refreshToken = randomToken('rt_');
+    const expiresIn = 60 * 60 * 24 * 30;        // access: 30 days
+    const refreshExpiresIn = 60 * 60 * 24 * 90; // refresh: 90 days
     await db.from('pm_oauth_tokens').insert({
       access_token: accessToken,
       token_id: row.token_id,
       client_id: row.client_id,
       expires_at: new Date(Date.now() + expiresIn * 1000).toISOString(),
+      refresh_token: refreshToken,
+      refresh_expires_at: new Date(Date.now() + refreshExpiresIn * 1000).toISOString(),
     });
 
     return json({
       access_token: accessToken,
       token_type: 'Bearer',
       expires_in: expiresIn,
+      refresh_token: refreshToken,
       scope: 'mcp:tools',
     });
   }
