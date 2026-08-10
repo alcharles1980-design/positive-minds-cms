@@ -73,7 +73,7 @@ function _extends(){return _extends=Object.assign?Object.assign.bind():function(
 //   - App shell (auth gate, routing via history, command surface)
 // ============================================================
 // ---------- config ----------
-const CFG={build:"2026.08.10-24",// bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+const CFG={build:"2026.08.10-25",// bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
 url:"https://tytrmjjucqijzcrbwjfm.supabase.co",key:"sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",adminEmail:"admin@positiveminds.app",sessionStore:"pm_admin_session_v2",sessionMaxAgeMs:7*24*60*60*1000,// keep users logged in for 7 days
 pageSize:40};// ============================================================
 // Session + Auth
@@ -1359,39 +1359,51 @@ result was white numbers on white tiles: \`.stat\` kept its light background whi
 no colour of its own, inherited the dark-mode text colour. Only the purple stat survived, which made
 it look like a design choice. ANYTHING WITH ITS OWN BACKGROUND NEEDS ITS OWN FOREGROUND.
 
-### CONNECTING: what "Connection issue" actually means, and how to diagnose it
+### CONNECTING: the four defects, and why the diagnosis took all night
 
-A connector that authenticates and then shows as disconnected is NOT a server fault, and this cost
-most of a session to establish. Written down so nobody re-runs it.
+An earlier version of this section blamed Claude's own OAuth flow, citing \`step=end_error\` and a
+\`flow_id\` collision. THAT WAS WRONG — the end_error came from driving the flow in a headless browser
+with no Claude session, which naturally fails. It is corrected here because the wrong version was
+confidently written and would have sent the next person nowhere.
 
-**WHAT THE EVIDENCE LOOKED LIKE.** Six connections in fifteen minutes, every one registering a BRAND
-NEW client, every access token used within seconds of being issued — and the connectors page still
-showing "Connection has expired". Server logs full of 200s.
+**THE REPORTED SYMPTOM:** the connector authenticates and the Connectors page then shows
+"Connection has expired. You can reconnect to re-authenticate." Server logs full of 200s.
 
-**HOW IT WAS SETTLED: drive the real page in a real browser.** Playwright + Chromium, mobile profile,
-recording every request and navigation:
-    GET  /mcp/authorize                          200   page renders
-    POST /mcp/authorize                          200   token accepted
-    GET  claude.ai/api/mcp/auth_callback?code=   307
-    GET  claude.ai/settings/connectors?step=end_error&flow_id=ofid_...
-Our side is clean end to end. The code is issued, the browser reaches the callback, and CLAUDE'S OWN
-FLOW ends in \`end_error\`.
+**FOUR REAL DEFECTS, all found, all fixed. None of them alone was "the" cause:**
+1. The mcp FUNCTION issued no refresh_token. The code was in the repo and the DB columns existed;
+   the hand-paste deploy had simply never happened. Fixed by the first CI deploy.
+2. The SHIM kept its OWN hand-written copy of the OAuth metadata, advertising
+   grant_types_supported ["authorization_code"] while the function advertised both. Clients read the
+   shim's, because it is the one at the domain root. Fixed by DERIVING it from the function.
+3. \`/register\` returned grant_types ["authorization_code"] hardcoded, ignoring what the client
+   asked for. The registration response is what tells a client what it is ALLOWED to do, so this
+   alone stops any refresh regardless of the other two.
+4. \`initialize\` answered 200 to anyone, on the reasoning that "the handshake precedes the token".
+   Backwards for a protected resource: the 401 with WWW-Authenticate IS the handshake.
 
-**WHAT flow_id MEANS.** It is Claude's state, created when Connect is pressed and consumed at the
-callback. If the flow open when the callback arrives is not the one that started it, it ends in
-end_error. So a second Connect press, or the phone handing the redirect to the Claude app, kills the
-flow the callback belongs to. That is why each attempt registered a fresh client and why RETRYING
-MAKES IT WORSE — the instinct that fixes most things makes this one unrecoverable.
+**AND THEN THE ACTUAL ANSWER: the connector was working.** Once pm_connector_log existed, one query
+settled it. Two user agents tell the whole story — \`python-httpx\` is Anthropic's backend running
+the OAuth flow, \`Claude-User\` is the live MCP session:
+    03:31:36  Claude-User   initialize 200 auth=true    <- already connected, BEFORE the attempt
+    03:31:37  Claude-User   tools/list 200 auth=true
+    03:31:40  python-httpx  initialize 401 auth=false   <- OAuth begins
+    03:31:41  python-httpx  register   201
+    03:31:58  python-httpx  token      200
+    03:31:59  Claude-User   initialize 200 auth=true
+    03:32:00  Claude-User   tools/list 200 auth=true
+Three complete authenticated sessions, all 11 tools listed. The Settings card was showing a status
+that did not match what its own backend was doing. THE CARD WAS NOT EVIDENCE. See rule 4.41.
 
-**THE SEQUENCE THAT WORKS:** delete every entry for the connector, close every Claude tab AND the
-app, then one tab, add once, press Connect ONCE, and do not press it again while it is in flight.
+**HOW TO DIAGNOSE THIS NEXT TIME — one query, not four hours:**
+    select to_char(at,'HH24:MI:SS') t, path, rpc_method, status, had_auth, ua
+    from pm_connector_log where at > now() - interval '20 minutes' order by at;
+\`Claude-User\` rows returning 200 with had_auth true means the connector IS working, whatever any
+badge says. Test it by opening a chat and using a tool, never by reading the Connectors page.
 
-**WHAT IS NOT WORTH DOING.** Two remedies were tried and both were wrong. Telling the partner to
-paste the callback URL into the address bar starts ANOTHER transient add rather than completing the
-original — it walks them round the loop. And detecting the hijack from inside the page cannot work:
-when the app takes the foreground the tab is backgrounded, so \`document.hidden\` goes true and any
-guard against false positives suppresses the true one. Both were shipped into the sign-in page and
-both were removed. See rule 4.39.
+**pm_connector_log** is written from the shim, INSERT-ONLY under the anon key — it can write a line
+and never read one back, so it cannot enumerate clients, partners or tokens. Capped at 2000 rows by
+pm_connector_log_prune (this project has blown a storage quota once). Fire-and-forget with errors
+swallowed: an observer must never be able to break the thing it observes.
 
 ### DEPLOY CHECKING: why a downloaded edge function never matches your source
 
@@ -1671,7 +1683,15 @@ LIVE AND WORKING
 - Site deploys automatically on push (wrangler deploy, Worker + static assets from ./public).
   The shim deploys automatically on push to mcp-shim/.
 
-EDGE FUNCTIONS — CI IS NOW ARMED, BUT HAS NOT DEPLOYED YET
+EDGE FUNCTIONS — CI IS LIVE AND HAS DEPLOYED. deployed == repo is now true by construction.
+- First real deploy 10 Aug, and it immediately fixed a production defect: the mcp function had been
+  running without refresh-token support for weeks because the code was in the repo and the
+  hand-paste never happened. That is exactly the failure the workflow existed to prevent.
+- KNOWN BUG IN THE WORKFLOW: \`only: <slug>\` did NOT hold — a run with only:pack-describe deployed
+  all five functions. Harmless that time and it is what fixed the connector, but a "just this one"
+  deploy is currently not that. Fix the filter before relying on it.
+(historical note below)
+EDGE FUNCTIONS — the state before 10 Aug
 - SUPABASE_ACCESS_TOKEN was added 9 Aug 2026. deploy-edge-functions.yml runs, authenticates and can
   download every deployed function. Verified, not assumed.
 - WHAT HAS NOT HAPPENED: no automated deploy has run. Until one does, the live functions are still
@@ -1683,6 +1703,8 @@ EDGE FUNCTIONS — CI IS NOW ARMED, BUT HAS NOT DEPLOYED YET
   sentence has a caveat in it and cannot be made unconditional.
 
 TEMPORARY THINGS STILL IN PLACE (remove when convenient)
+- pm_connector_log fills with every connector request (capped at 2000 rows, self-pruning). Keep it —
+  it is the thing that finally made a connection failure readable. See the CONNECTING section.
 - OAuth clutter from 10 Aug troubleshooting: ~10 extra pm_oauth_clients rows (every failed Connect
   registers a fresh client), several \`beta\` sessions in pm_oauth_tokens, and one client named
   "diagnostic"/"browser-test" from testing the flow by hand. All harmless, all removable.
@@ -2690,6 +2712,35 @@ there were two 4t, two 4u, two 4r, two 4s, two 4v and two 4d, so "see rule 4t" w
    the edge function didn't, so a question with its own letter_position rendered differently
    in-game than in the CMS.) After any engine edit, diff the two by fetching the deployed edge
    function and comparing, or run a parity test with a question that has its own overrides.
+4.42. **A capability implemented ONCE but advertised in several places fails silently if ANY of the
+   advertisements says no.** Refresh tokens were broken in three independent ways at once: the
+   function did not issue them (undeployed), the shim's hand-copied metadata did not advertise the
+   grant, and /register returned a hardcoded grant list ignoring what the client asked for. Fixing
+   each one changed nothing visible, because any single "no" is enough for a client to never try.
+   The implementation was correct and reachable throughout — it was purely a false advertisement,
+   which is the most expensive kind of wrong, because everything you inspect looks right.
+   WHEN A CAPABILITY IS DECLARED, ENUMERATE EVERY PLACE THAT DECLARES IT and check them together:
+   server metadata, per-client registration response, the runtime behaviour, and any proxy that
+   fronts them. If two of them are hand-maintained copies, that is the bug waiting to happen —
+   derive, do not duplicate (the shim now fetches the function's metadata instead of restating it).
+4.41. **A status badge is not the system. Test the capability, not the indicator.** The Connectors
+   page said "Connection has expired" for hours while the connector was working: three complete
+   authenticated MCP sessions, all 11 tools listed, one of them BEFORE the reconnect that was
+   supposedly needed. I took a screenshot of a status card as evidence of the connection state and
+   went looking for a failure that was, by then, partly imaginary.
+   Ask what the thing is FOR and test that: open a chat and call a tool. A green light proves the
+   light works. Applies to our own UI too — the Health page once showed "(untitled)" on every row
+   while the data was fine (rule 4.14), which is the same error seen from the other side.
+4.40. **Build the instrument before the theories.** Four hours went into Android link handling, plan
+   limits, stale OAuth flows and a headless-browser end_error — all of it inference from status codes
+   and screenshots. Then a small log table (rpc method, status, had_auth, user agent) answered it in
+   ONE query, and would have answered it at any point that night.
+   Supabase's function logs give a URL and a status: "POST 200 /mcp" four times is a handshake you
+   have to guess at. The missing fields were cheap to add and decisive once present.
+   THE RULE: when a second round of diagnosis begins, stop theorising and add the missing
+   observation. If you cannot see which method was called, whether credentials were present, or who
+   called it, you are not debugging — you are guessing with extra steps. Instrument first; it is
+   almost always faster than the third theory, let alone the fifth.
 4.39. **Do not ship a remedy built on an unconfirmed diagnosis. A wrong instruction in the product is
    worse than none.** When a partner could not connect, I concluded Android was hijacking the OAuth
    callback and shipped guidance into the SIGN-IN PAGE telling people to paste the callback URL into
