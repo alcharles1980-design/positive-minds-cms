@@ -269,44 +269,70 @@ check("a partial overview says so on the face of it",
   /could not be loaded/.test(w3.document.body.textContent) &&
   w3.document.querySelectorAll(".warn").length === 1);
 
-console.log("\nDead-button protection");
+console.log("\nTiles — one tap must always achieve something");
 {
   const sentX = [];
   const wX = mountOverview(sentX).window;
+  wX.document.execCommand = () => true;              // clipboard available
   await settle();
   wX.postMessage({ jsonrpc: "2.0", method: "ui/notifications/tool-result",
     params: { structuredContent: OVERVIEW } }, "*");
   await settle();
   const btn = wX.document.querySelectorAll(".act")[0];
+  const labelBefore = btn.querySelector("span:not(.ic):not(.note)").textContent;
   btn.dispatchEvent(new wX.Event("click"));
   await settle();
+
   const req = sentX.find((m) => m.method === "ui/message");
   check("ui/message is sent WITH an id, so the reply can be read", !!(req && req.id != null));
+  check("the tile confirms on the FIRST tap, before any reply",
+    /Copied/.test(btn.textContent), btn.querySelector(".note").textContent);
+  check("the tile keeps its label — no layout collapse",
+    btn.querySelector("span:not(.ic):not(.note)").textContent === labelBefore, labelBefore);
 
-  // Host rejects it — the button must not sit there looking like it worked.
   wX.postMessage({ jsonrpc: "2.0", id: req.id,
     error: { code: -32601, message: "Method not found" } }, "*");
   await settle();
-  check("a rejected message turns the tile into something usable",
-    /Tap to copy/.test(btn.textContent), btn.textContent.trim().slice(0, 44));
-  check("and shows the exact phrase to paste",
-    btn.textContent.includes(OVERVIEW.what_you_can_do[0].say));
-  check("the status line names the reason",
-    /not delivered/.test(wX.document.getElementById("status").textContent),
-    wX.document.getElementById("status").textContent);
+  check("a rejection leaves the copy instruction standing",
+    /Copied/.test(btn.textContent) &&
+    btn.querySelector("span:not(.ic):not(.note)").textContent === labelBefore);
+  check("the status line explains the host, not the partner",
+    /does not accept ui\/message/.test(wX.document.getElementById("status").textContent),
+    wX.document.getElementById("status").textContent.slice(0, 72));
 }
 {
-  // Silence is the worse case: no reply at all. It must still not leave a dead button.
+  // If the host DOES accept it, say so and do not tell anyone to paste anything.
   const sentY = [];
   const wY = mountOverview(sentY).window;
+  wY.document.execCommand = () => true;
   await settle();
   wY.postMessage({ jsonrpc: "2.0", method: "ui/notifications/tool-result",
     params: { structuredContent: OVERVIEW } }, "*");
   await settle();
   const b2 = wY.document.querySelectorAll(".act")[1];
   b2.dispatchEvent(new wY.Event("click"));
-  await new Promise((r) => setTimeout(r, 2800));
-  check("silence from the host also falls back to copy", /Tap to copy/.test(b2.textContent));
+  await settle();
+  const req2 = sentY.find((m) => m.method === "ui/message");
+  wY.postMessage({ jsonrpc: "2.0", id: req2.id, result: {} }, "*");
+  await settle();
+  check("a working host shows Sent", /Sent/.test(b2.querySelector(".note").textContent),
+    b2.querySelector(".note").textContent);
+}
+{
+  // No clipboard AND no host support: the phrase itself must still be readable to retype.
+  const sentZ = [];
+  const wZ = mountOverview(sentZ).window;
+  wZ.document.execCommand = () => false;
+  await settle();
+  wZ.postMessage({ jsonrpc: "2.0", method: "ui/notifications/tool-result",
+    params: { structuredContent: OVERVIEW } }, "*");
+  await settle();
+  const b3 = wZ.document.querySelectorAll(".act")[0];
+  b3.dispatchEvent(new wZ.Event("click"));
+  await new Promise((r) => setTimeout(r, 2300));
+  check("with no clipboard, the tile shows the phrase to type",
+    b3.querySelector(".note").textContent === OVERVIEW.what_you_can_do[0].say,
+    b3.querySelector(".note").textContent.slice(0, 48));
 }
 
 console.log("\nOne view, both payloads");

@@ -55,6 +55,24 @@ export const VIEW_HTML = `<!DOCTYPE html>
   body.dark .card{background:#1C1930;border-color:#332F4C}
   body.dark .opt{background:#131120;border-color:#332F4C;color:#F3F1FB}
   body.dark .lv{background:#131120;border-color:#332F4C;color:#C9C5DC}
+  /* These were lost when the two views were merged: the overview's dark rules sat AFTER
+     body.dark{...} in the original file and the splice cut them off. Visible symptom: white numbers
+     on white tiles, because .stat b had no colour of its own and inherited the dark-mode text
+     colour while .stat kept its light background. Anything with its own background needs its own
+     foreground. */
+  body.dark .stat{background:#131120;border-color:#332F4C}
+  body.dark .stat b{color:#F3F1FB}
+  body.dark .stat span{color:#A9A4C4}
+  body.dark .act{background:#131120;border-color:#332F4C;color:#F3F1FB}
+  body.dark .act:hover{background:#1C1930;border-color:#8A6EF0}
+  body.dark .pack{border-top-color:#2A2640}
+  body.dark .pk-desc{color:#A9A4C4}
+  body.dark .more{color:#A9A4C4}
+  body.dark .cannot{background:#131120;border-color:#332F4C;color:#C9C5DC}
+  body.dark .cannot b{color:#F3F1FB}
+  body.dark .lead{color:#A9A4C4}
+  body.dark .lbl{color:#A9A4C4}
+  body.dark .sentence{color:#F3F1FB}
 
   html,body{margin:0;padding:0}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
@@ -66,7 +84,7 @@ export const VIEW_HTML = `<!DOCTYPE html>
   .lead{margin:0;color:#6E6B85;font-size:13.5px;line-height:1.6}
   .stats{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
   .stat{flex:1 1 88px;background:#FBFAFE;border:1px solid #E4E0F0;border-radius:11px;padding:9px 11px}
-  .stat b{display:block;font-size:19px;font-weight:800;line-height:1.25}
+  .stat b{display:block;font-size:19px;font-weight:800;line-height:1.25;color:#191728}
   .stat span{font-size:10.5px;font-weight:700;color:#6E6B85;text-transform:uppercase;letter-spacing:.3px}
   .stat.hot b{color:#6C4CE0}
   .packs{margin-top:4px}
@@ -86,6 +104,10 @@ export const VIEW_HTML = `<!DOCTYPE html>
   .act:hover{border-color:#8A6EF0;background:#FBFAFE}
   .act:active{background:#EEE9FD}
   .act .ic{font-size:15px;color:#6C4CE0;width:18px;text-align:center;flex:0 0 18px}
+  .act{flex-wrap:wrap}
+  .act .note{flex:1 1 100%;font-size:11px;font-weight:700;color:#4A32B0;margin-top:6px;
+    padding-left:27px;line-height:1.4;letter-spacing:.2px}
+  .act .note.quote{font-style:italic;font-weight:600}
   .cannot{margin-top:13px;padding:11px 13px;border-radius:11px;background:#FBFAFE;
     border:1px solid #E4E0F0;font-size:12px;color:#4A4763;line-height:1.55}
   .cannot b{color:#191728}
@@ -163,28 +185,38 @@ export const VIEW_HTML = `<!DOCTYPE html>
     return null;
   }
 
-  // When ui/message does not work, a tile must still be useful. Show the exact phrase and copy it,
-  // so the partner can paste it rather than be left with a button that does nothing.
-  function fallbackToCopy(btn, text, why){
-    btn.setAttribute('data-state', 'fallback');
-    btn.style.borderColor = '#C2352F';
-    btn.innerHTML = '';
-    var t = document.createElement('span');
-    t.style.cssText = 'font-size:11.5px;font-weight:700;line-height:1.4;display:block';
-    t.textContent = 'Tap to copy, then paste below:';
-    var q = document.createElement('span');
-    q.style.cssText = 'font-size:12px;font-weight:600;color:#4A32B0;line-height:1.4;display:block;margin-top:3px';
-    q.textContent = '\u201C' + text + '\u201D';
-    btn.appendChild(t); btn.appendChild(q);
-    btn.onclick = function(){
-      try {
-        var ta = document.createElement('textarea');
-        ta.value = text; document.body.appendChild(ta); ta.select();
-        document.execCommand('copy'); document.body.removeChild(ta);
-        t.textContent = 'Copied \u2014 paste it below.';
-      } catch(e){ t.textContent = 'Select and copy this:'; }
-    };
-    setStatus('ui/message not delivered (' + why + ') \u2014 tiles fall back to copy');
+  // ONE TAP MUST ALWAYS ACHIEVE SOMETHING.
+  // ui/message is the nice path — it drops the request straight into the chat — but the spec lists
+  // no host capability for it, and this host rejects it. The previous version only fell back AFTER
+  // the rejection arrived, which meant the first tap did nothing visible and the copy needed a
+  // second tap. Worse, clipboard writes need a user gesture, so a copy triggered from an async
+  // rejection is not guaranteed to work at all.
+  // So: copy DURING the tap (synchronously, inside the gesture), and try ui/message at the same
+  // time. If the message lands, say so. If it does not, the text is already on the clipboard and
+  // the tile just says to paste it. The tile keeps its label either way — rewriting a button into a
+  // block of instructions is what collapsed the layout.
+  function copyNow(text){
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;top:-1000px;opacity:0';
+      document.body.appendChild(ta);
+      ta.select(); ta.setSelectionRange(0, text.length);
+      var ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch(e){ return false; }
+  }
+
+  function tileNote(btn, text, cls){
+    var n = btn.querySelector('.note');
+    if (!n){
+      n = document.createElement('span');
+      n.className = 'note';
+      btn.appendChild(n);
+    }
+    n.className = 'note' + (cls ? ' ' + cls : '');
+    n.textContent = text;
     reportSize();
   }
 
@@ -253,20 +285,24 @@ export const VIEW_HTML = `<!DOCTYPE html>
       b.className = 'act';
       b.innerHTML = '<span class="ic">' + esc(a.icon || '\\u2192') + '</span><span>' + esc(a.do) + '</span>';
       b.onclick = function(){
-        // ui/message is a REQUEST in the spec, not a notification. It puts a message in the chat as
-        // if the partner had typed it. IT MAY NOT BE SUPPORTED: the spec lists no host capability
-        // for it, so the only way to know is to send one and READ THE REPLY. Firing and forgetting
-        // is how you end up with a button that looks like it worked and did nothing.
-        var id = rpcId++;
-        msgIds[id] = { btn: b, text: a.say || a.do };
-        post({ jsonrpc:'2.0', id: id, method:'ui/message',
-               params:{ role:'user', content:{ type:'text', text: a.say || a.do } } });
+        var text = a.say || a.do;
+        // Copy FIRST, inside the gesture, while the browser still permits it.
+        var copied = copyNow(text);
         b.style.borderColor = '#6C4CE0';
         b.style.background = '#EEE9FD';
         b.setAttribute('data-state', 'sent');
+        tileNote(b, copied ? 'Copied \u2014 paste it below' : 'Sending\u2026');
+
+        var id = rpcId++;
+        msgIds[id] = { btn: b, text: text, copied: copied };
+        post({ jsonrpc:'2.0', id: id, method:'ui/message',
+               params:{ role:'user', content:{ type:'text', text: text } } });
         setTimeout(function(){
-          if (b.getAttribute('data-state') === 'sent') fallbackToCopy(b, a.say || a.do, 'no reply from host');
-        }, 2500);
+          if (b.getAttribute('data-state') === 'sent'){
+            b.setAttribute('data-state', 'copy');
+            tileNote(b, copied ? 'Copied \u2014 paste it below' : text, copied ? '' : 'quote');
+          }
+        }, 2000);
       };
       menu.appendChild(b);
     });
@@ -416,8 +452,15 @@ export const VIEW_HTML = `<!DOCTYPE html>
     // The reply to a ui/message we sent. This is the only way to learn whether the host supports it.
     if (m.id != null && msgIds[m.id]){
       var rec = msgIds[m.id]; delete msgIds[m.id];
-      if (m.error){ fallbackToCopy(rec.btn, rec.text, m.error.message || ('error ' + m.error.code)); }
-      else { rec.btn.setAttribute('data-state', 'ok'); setStatus('sent to chat'); }
+      if (m.error){
+        rec.btn.setAttribute('data-state', 'copy');
+        tileNote(rec.btn, rec.copied ? 'Copied \u2014 paste it below' : rec.text, rec.copied ? '' : 'quote');
+        setStatus('this host does not accept ui/message (' + (m.error.message || m.error.code) + ') \u2014 tiles copy instead');
+      } else {
+        rec.btn.setAttribute('data-state', 'ok');
+        tileNote(rec.btn, 'Sent');
+        setStatus('sent to chat');
+      }
       return;
     }
 
