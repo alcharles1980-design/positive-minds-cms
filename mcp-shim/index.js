@@ -125,9 +125,10 @@ function loginPage(p) {
   <div id="hijack" style="display:none;margin-top:18px;padding:14px 15px;border-radius:12px;
        background:#FFF6E5;border:1px solid #E0A93B;font-size:13.5px;line-height:1.6;color:#5A4210">
     <b>If the Claude app opened instead of finishing here \u2014 read this.</b><br>
-    Your sign-in worked. But phones often hand the last step to the Claude app, which cannot complete
-    it, so the connection never finishes. If that happened, copy the link below and paste it into
-    your browser\u2019s address bar. Pasted links are not diverted, so it will complete properly.
+    Your sign-in worked. Phones often hand the last step to the Claude app, which cannot complete it.
+    <b>Do the setup on a computer instead</b> \u2014 it takes a minute and it will then work on your
+    phone too. Pasting the link below into a browser sometimes finishes it, but on some phones it
+    just starts the whole process again, so the computer is the reliable route.
     <input id="hjurl" readonly style="width:100%;margin-top:10px;padding:9px 10px;border-radius:9px;
       border:1px solid #E0A93B;background:#fff;font-size:12px;font-family:ui-monospace,Menlo,monospace">
     <button id="hjcopy" type="button" style="margin-top:9px;width:100%;padding:11px;border-radius:9px;
