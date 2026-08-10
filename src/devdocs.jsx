@@ -848,7 +848,8 @@ any session whose tools/list predates the widget being enabled.
 resource as text/html;profile=mcp-app via resources/list + resources/read, and injects
 _meta.ui.resourceUri INSIDE the preview_questions tool object in tools/list (nested form; the flat
 _meta["ui/resourceUri"] is deprecated in the spec and deliberately not sent). The view itself is
-mcp-shim/preview-app.js, raw JSON-RPC over postMessage, no SDK, because the Worker has no bundler.
+mcp-shim/view-app.js, raw JSON-RPC over postMessage, no SDK, because the Worker has no bundler.
+(preview-app.js and overview-app.js were merged into it — see THE VIEW below.)
 
 THE BUG THAT MADE IT LOOK IMPOSSIBLE, and it is worth knowing exactly what it was. For three
 iterations the widget was described as rendering BLANK, and the file recorded a platform gap as the
@@ -973,6 +974,47 @@ result was white numbers on white tiles: \`.stat\` kept its light background whi
 no colour of its own, inherited the dark-mode text colour. Only the purple stat survived, which made
 it look like a design choice. ANYTHING WITH ITS OWN BACKGROUND NEEDS ITS OWN FOREGROUND.
 
+### THE VIEW URI IS CONTENT-ADDRESSED — and why it has to be
+
+**A HOST WILL SERVE YOU YESTERDAY'S WIDGET.** SEP-1865 explicitly allows hosts to prefetch and cache
+a ui:// resource, and they key that cache on the URI. There is NO message in the protocol for "that
+resource changed". So with a fixed URI, a view can be redeployed, verified live over the wire, and
+the person still sees the old one — which is exactly what happened with a wording change: deployed,
+confirmed by fetching resources/read, and still wrong on screen for three rounds.
+
+**THE FIX:** \`UI_URI = "ui://positive-minds/view-" + djb2(VIEW_HTML)\`. Change one character of the
+view and the URI changes, which a host cannot mistake for something it already holds. Nothing to
+remember to bump — and that matters, because the failure is SILENT and looks exactly like a deploy
+not working. djb2 rather than crypto.subtle because the URI is built synchronously.
+The old fixed URIs stay SERVABLE (a session holding one keeps working) but are no longer advertised.
+
+**ONLY ONE RESOURCE IS ADVERTISED.** Two entries for the same file only invited the host to pick the
+"wrong" one, which it did.
+
+**A WIDGET NEVER RE-FETCHES.** An already-rendered widget keeps the HTML it was born with, for the
+life of that message. Scrolling back to an earlier preview shows the version from that moment,
+permanently — which is not a cache bug and cannot be fixed. When checking whether a view change
+landed, ask for a NEW preview; the status line at the top of the card names the build.
+
+### THE VERDICT WORDING LIVES IN TWO PLACES, deliberately
+
+Tapping a word says, exactly:
+  correct → "Correct answer — you got it right! 😊"
+  wrong   → "Nearly right — you're getting better every time you try 🙂 Try again…"
+NEVER "wrong", "incorrect", or anything describing the child in the third person. This view exists so
+a person can FEEL what a child feels, and a child using this game is never told they failed.
+
+**THE REVIEWER CHECK SURVIVES, DEMOTED.** The old wrong-answer line ("Marked wrong. If this word ALSO
+fits the blank, the question is broken.") was doing two jobs — it was also the prompt that turns a
+reviewer's surprise into the same-length bug being caught, the one defect that has broken real
+content. Replacing it purely for tone would have removed the check. It now appears under a wrong
+answer only, in the small grey hint style, never in the child-facing verdict.
+
+**BOTH RENDERERS CARRY THE STRINGS.** They used to live only in the view, so on a host without MCP
+Apps — the documented fallback — Claude phrased the verdict itself and could reproduce the exact
+sentence being removed. The wording is now also in preview_questions' render note with an explicit
+"do not improvise them". Rule 4.42 applied BEFORE it bit rather than after.
+
 ### CONNECTING: the four defects, and why the diagnosis took all night
 
 An earlier version of this section blamed Claude's own OAuth flow, citing \`step=end_error\` and a
@@ -1091,7 +1133,7 @@ and it is left here in corrected form because the way it went wrong is the usefu
 \`initialize\` declares \`resources\` and ECHOES the client's protocolVersion (the mcp function
 hardcodes an older one, and a silent downgrade can stop a host offering UI at all);
 \`_meta.ui.resourceUri\` is injected INSIDE the preview_questions tool object, not on the result;
-\`resources/list\` and \`resources/read\` serve \`ui://positive-minds/question-preview\` as
+\`resources/list\` and \`resources/read\` serve a CONTENT-ADDRESSED \`ui://positive-minds/view-<hash>\` as
 \`text/html;profile=mcp-app\`; and tools/call returns structuredContent. All verified over the wire.
 
 **THE FALSE CONCLUSION, and how it survived five attempts.** This file used to state that Claude Web
@@ -2340,6 +2382,19 @@ there were two 4t, two 4u, two 4r, two 4s, two 4v and two 4d, so "see rule 4t" w
    the edge function didn't, so a question with its own letter_position rendered differently
    in-game than in the CMS.) After any engine edit, diff the two by fetching the deployed edge
    function and comparing, or run a parity test with a question that has its own overrides.
+4.43. **If a client may cache your artefact, put its identity in the URI — and remember a rendered
+   widget never re-fetches.** A wording change was deployed, verified live by fetching the resource
+   over the wire, and STILL wrong on screen. Not a deploy failure: SEP-1865 lets hosts prefetch and
+   cache a ui:// resource keyed on its URI, and the protocol has no "that resource changed" message.
+   With a fixed URI you cannot invalidate anything, and the failure is SILENT — it looks precisely
+   like the deploy not working, which is where three rounds went.
+   FIX: content-address it — ui://.../view-<hash of the content>. Change a character, get a new URI,
+   which the host cannot mistake for what it holds. Nothing to remember to bump; anything requiring a
+   human to bump a version will eventually not be bumped.
+   AND THE PART THAT IS NOT A CACHE AT ALL: an already-rendered widget keeps the HTML it was born
+   with, forever. Scrollback shows the build from that moment and cannot be updated. When checking
+   whether a view change landed, ask for a NEW one — and have the view NAME ITS OWN BUILD so a
+   screenshot settles it (rule 4.21).
 4.42. **A capability implemented ONCE but advertised in several places fails silently if ANY of the
    advertisements says no.** Refresh tokens were broken in three independent ways at once: the
    function did not issue them (undeployed), the shim's hand-copied metadata did not advertise the
@@ -3147,6 +3202,12 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    ui/notifications/initialized only on the MATCHING request id, because the host must not send
    anything before it; use the ui/update-model-context REQUEST for reviewer interactions (there is no
    ui/notifications/context-update — it is not a method, and sending it does nothing).
+   CONTENT-ADDRESS THE ui:// URI: ui://<app>/view-<hash of the HTML>. Hosts cache a ui:// resource
+   keyed on its URI and the protocol has no way to say "that changed", so a FIXED URI means a
+   redeployed view can keep rendering the old one — silently, looking exactly like a failed deploy.
+   Hash the view itself so nobody has to remember to bump anything. Keep serving any older URI so a
+   live session does not break. And know that an already-rendered widget NEVER re-fetches: scrollback
+   is not a current view.
    MAKE THE VIEW STATE ITS OWN STATE. A permanent status line ("handshake sent", "NO HANDSHAKE after
    5s", "12 question(s)") is what turns a silent failure into a diagnosable one, and is the difference
    between one session and three. Have it NAME THE RESOURCE IT IS — one screenshot then tells you
