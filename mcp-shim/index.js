@@ -72,9 +72,26 @@ function logged(ctx, res, entry) {
   return res;
 }
 
-const UI_URI = "ui://positive-minds/question-preview";
+// CONTENT-ADDRESSED VIEW URI — this is a cache fix, not decoration.
+// Hosts MAY prefetch and cache a ui:// resource (SEP-1865 says so explicitly), and they key that
+// cache on the URI. With a FIXED URI a host will happily keep serving a view from hours ago: a
+// wording change was deployed, verified live over the wire, and the user still saw the old text.
+// Nothing in the protocol lets a server say "that resource changed".
+// So the URI now carries a hash of the view itself. Change one character of the view and the URI
+// changes, which the host cannot mistake for the thing it already has. Nothing to remember to bump.
+function viewHash(str) {
+  // djb2 — no crypto needed, and crypto.subtle is async which this is not.
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = (((h << 5) + h) ^ str.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+const VIEW_VERSION = viewHash(VIEW_HTML);
+const UI_URI = "ui://positive-minds/view-" + VIEW_VERSION;
+// The old fixed URIs stay SERVABLE so a session holding one keeps working; they are simply no
+// longer advertised, so nothing new binds to them.
+const LEGACY_URIS = ["ui://positive-minds/question-preview", "ui://positive-minds/overview"];
 const OVERVIEW_TOOL = "overview";
-const OVERVIEW_URI = "ui://positive-minds/overview";
+const OVERVIEW_URI = UI_URI;
 const UI_MIME = "text/html;profile=mcp-app";
 const UI_TOOL = "preview_questions";
 
@@ -468,16 +485,12 @@ export default {
         // resources/list — declare the UI resource. The Supabase function knows nothing about this.
         if (rpc.method === "resources/list") {
           return rpcRes({
+            // ONE resource now: the single view renders whichever payload arrives, so advertising
+            // it twice only invited the host to pick the "wrong" one (which it did).
             resources: [{
               uri: UI_URI,
-              name: "Question preview",
-              description: "Play a question exactly as a child sees it, at any level.",
-              mimeType: UI_MIME,
-              _meta: { ui: { prefersBorder: false } },
-            }, {
-              uri: OVERVIEW_URI,
-              name: "Overview",
-              description: "Where the content stands, and what you can do — as a tappable menu.",
+              name: "Positive Minds",
+              description: "Play questions as a child sees them, or see where the content stands.",
               mimeType: UI_MIME,
               _meta: { ui: { prefersBorder: false } },
             }],
@@ -489,13 +502,14 @@ export default {
           const want = rpc.params && rpc.params.uri;
           // Both URIs serve the SAME view — the host picks one per connector and does not honour the
           // per-tool link, so the view dispatches on payload shape instead. See view-app.js.
-          const VIEWS = { [UI_URI]: VIEW_HTML, [OVERVIEW_URI]: VIEW_HTML };
-          if (VIEWS[want]) {
+          // Serve the current URI and every legacy one — an in-flight session must not break
+          // just because the view changed underneath it.
+          if (want === UI_URI || LEGACY_URIS.indexOf(want) !== -1) {
             return rpcRes({
               contents: [{
                 uri: want,
                 mimeType: UI_MIME,
-                text: VIEWS[want],
+                text: VIEW_HTML,
                 _meta: { ui: { prefersBorder: false } },
               }],
             });

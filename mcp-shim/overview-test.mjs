@@ -146,6 +146,42 @@ r2 = await callTool("preview_questions");
 check("preview results carry it too, and keep their widget link",
   !!r2.also_available && !!r2._meta.ui.resourceUri);
 
+console.log("\nView URI is content-addressed (host cache busting)");
+{
+  const listRes = await worker.fetch(new Request("https://shim.example/mcp", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "resources/list" }),
+  }), {}, { waitUntil() {} });
+  const res = (await listRes.json()).result.resources;
+  check("exactly ONE view is advertised", res.length === 1, res.length + " resources");
+  const uri = res[0].uri;
+  check("its URI carries a content hash", /^ui:\/\/positive-minds\/view-[a-z0-9]+$/.test(uri), uri);
+
+  // The point of the hash: change the view, get a different URI, so a cached copy cannot be reused.
+  const { VIEW_HTML } = await import("./view-app.js");
+  const djb2 = (str) => { let h = 5381;
+    for (let i = 0; i < str.length; i++) h = (((h << 5) + h) ^ str.charCodeAt(i)) >>> 0;
+    return h.toString(36); };
+  check("the hash is OF the view actually served", uri.endsWith(djb2(VIEW_HTML)));
+  check("a different view would produce a different URI", djb2(VIEW_HTML) !== djb2(VIEW_HTML + " "));
+
+  const readCur = await worker.fetch(new Request("https://shim.example/mcp", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 10, method: "resources/read", params: { uri } }),
+  }), {}, { waitUntil() {} });
+  check("the advertised URI is readable", !!(await readCur.json()).result?.contents?.[0]?.text);
+
+  // An in-flight session holding an old URI must not break when the view changes.
+  for (const legacy of ["ui://positive-minds/question-preview", "ui://positive-minds/overview"]) {
+    const r = await worker.fetch(new Request("https://shim.example/mcp", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 11, method: "resources/read", params: { uri: legacy } }),
+    }), {}, { waitUntil() {} });
+    check("legacy URI still served: " + legacy.split("/").pop(),
+      !!(await r.json()).result?.contents?.[0]?.text);
+  }
+}
+
 console.log("\nDeclaration");
 globalThis.fetch = async () => Response.json({
   jsonrpc: "2.0", id: 1,
