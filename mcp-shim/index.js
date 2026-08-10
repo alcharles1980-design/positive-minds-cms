@@ -37,7 +37,14 @@ const SUPABASE = "https://tytrmjjucqijzcrbwjfm.supabase.co";
 //   tools/call      → return content AND structuredContent
 import { VIEW_HTML } from "./view-app.js";
 
-// TEMPORARY diagnostic: which tool is the client actually calling? Remove once resolved.
+// CONNECTOR LOG. Added after a connection failure that took hours to diagnose because every piece
+// of evidence had to be inferred: Supabase's function logs show a status and a URL, but not WHICH
+// JSON-RPC method was called, whether a token was present, or which client sent it. Reconstructing
+// a handshake from "POST 200 /mcp" four times in a row is guesswork.
+// This records what a person actually needs to read a failure: the rpc method, the status we
+// returned, whether the request carried credentials, and the client. INSERT-ONLY from the shim's
+// anon key — it can write a line and can never read one back. Capped at 2000 rows.
+// It never blocks or breaks a request: fire and forget, errors swallowed.
 const TOOL_LOG_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR5dHJtamp1Y3FpanpjcmJ3amZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMwOTMyNDgsImV4cCI6MjA5ODY2OTI0OH0.KlFsPm7M015tflKE-jDjIstD_ZoCaz0jROUAoksJxOs";
 function toolLog(ctx, entry) {
   try {
@@ -47,6 +54,22 @@ function toolLog(ctx, entry) {
       body: JSON.stringify(entry),
     }).catch(() => {}));
   } catch (_) { /* never break the request */ }
+}
+
+function connLog(ctx, entry) {
+  try {
+    ctx.waitUntil(fetch(SUPABASE + "/rest/v1/pm_connector_log", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", apikey: TOOL_LOG_KEY, Authorization: "Bearer " + TOOL_LOG_KEY, Prefer: "return=minimal" },
+      body: JSON.stringify(entry),
+    }).catch(() => {}));
+  } catch (_) { /* a diagnostic must never be able to break the thing it observes */ }
+}
+
+// Wrap a Response so the status that was ACTUALLY returned gets logged — not the one we intended.
+function logged(ctx, res, entry) {
+  try { connLog(ctx, { ...entry, status: res.status }); } catch (_) {}
+  return res;
 }
 
 const UI_URI = "ui://positive-minds/question-preview";
@@ -264,6 +287,15 @@ export default {
     if (method === "POST" && (path === "/mcp" || path === "/functions/v1/mcp")) {
       let rpc = null;
       try { rpc = JSON.parse(new TextDecoder().decode(reqBody)); } catch (_) { /* not JSON — pass through */ }
+
+      // One place, so every branch below logs the same facts.
+      const logBase = {
+        path,
+        rpc_method: (rpc && rpc.method) || null,
+        had_auth: !!request.headers.get("authorization"),
+        client_id: (rpc && rpc.params && rpc.params.client_id) || null,
+        ua: (request.headers.get("user-agent") || "").slice(0, 120),
+      };
 
       if (rpc && rpc.jsonrpc === "2.0") {
         const rpcRes = (result) => new Response(
@@ -630,7 +662,7 @@ export default {
             }
           }
 
-          return new Response(JSON.stringify(payload), { status: up.status, headers: outH });
+          return logged(ctx, new Response(JSON.stringify(payload), { status: up.status, headers: outH }), logBase);
         }
       }
     }
@@ -646,6 +678,19 @@ export default {
     }
     for (const [k, v] of Object.entries(CORS)) outHeaders.set(k, v);
 
-    return new Response(upstream.body, { status: upstream.status, headers: outHeaders });
+    // Log the fall-through path too — an unauthenticated probe that never reaches the branches
+    // above is exactly the request that was invisible before.
+    const res = new Response(upstream.body, { status: upstream.status, headers: outHeaders });
+    if (path === "/mcp" || path.startsWith("/mcp/")) {
+      connLog(ctx, {
+        path,
+        rpc_method: null,
+        status: upstream.status,
+        had_auth: !!request.headers.get("authorization"),
+        ua: (request.headers.get("user-agent") || "").slice(0, 120),
+        note: method + " (proxied)",
+      });
+    }
+    return res;
   },
 };

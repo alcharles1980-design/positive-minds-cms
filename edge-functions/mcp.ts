@@ -1411,7 +1411,26 @@ Deno.serve(async (req) => {
   const rpcErr = (code: number, message: string) => json({ jsonrpc: '2.0', id: id ?? null, error: { code, message } });
   const rpcOk = (result: unknown) => json({ jsonrpc: '2.0', id: id ?? null, result });
 
-  // initialize + notifications need no auth (the handshake precedes the token).
+  // AUTH FIRST, INCLUDING FOR initialize.
+  // This used to answer initialize with 200 for anyone, on the reasoning that "the handshake
+  // precedes the token". That is backwards for a PROTECTED resource: the 401 with WWW-Authenticate
+  // IS the handshake — it is how a client learns it must run the OAuth flow, and the spec expects
+  // the client to retry initialize once it holds a token. Answering 200 unauthenticated means the
+  // very first probe succeeds, so the client can conclude the server needs no credentials and then
+  // meet a 401 on the first real call.
+  // notifications/initialized stays open: it is fire-and-forget, carries no data, and a 401 on a
+  // notification has nowhere to go.
+  const who = await authenticate(db, req);
+  if (!who && method !== 'notifications/initialized') {
+    // CRITICAL: the WWW-Authenticate header is how Claude discovers it needs to run the OAuth flow.
+    // Without it, the connector just fails and never offers to sign in.
+    return json(
+      { jsonrpc: '2.0', id: id ?? null, error: { code: -32001, message: 'Unauthorized' } },
+      401,
+      { 'WWW-Authenticate': `Bearer resource_metadata="${BASE}/.well-known/oauth-protected-resource"` },
+    );
+  }
+
   if (method === 'initialize') {
     return rpcOk({
       protocolVersion: '2025-06-18',
@@ -1439,18 +1458,6 @@ Deno.serve(async (req) => {
     });
   }
   if (method === 'notifications/initialized') return new Response(null, { status: 202, headers: cors });
-
-  // Everything else needs a valid OAuth access token.
-  const who = await authenticate(db, req);
-  if (!who) {
-    // CRITICAL: the WWW-Authenticate header is how Claude discovers it needs to run the OAuth flow.
-    // Without it, the connector just fails and never offers to sign in.
-    return json(
-      { jsonrpc: '2.0', id: id ?? null, error: { code: -32001, message: 'Unauthorized' } },
-      401,
-      { 'WWW-Authenticate': `Bearer resource_metadata="${BASE}/.well-known/oauth-protected-resource"` },
-    );
-  }
 
   if (method === 'tools/list') return rpcOk({ tools: TOOLS });
 
