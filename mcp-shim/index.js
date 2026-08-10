@@ -180,12 +180,35 @@ export default {
         path === "/mcp/.well-known/oauth-authorization-server" ||
         path === "/.well-known/openid-configuration" ||
         path === "/.well-known/openid-configuration/mcp") {
+      // A SECOND COPY OF THIS DOCUMENT IS HOW THE CONNECTOR BROKE. The mcp function advertises
+      // grant_types_supported ['authorization_code','refresh_token']; this hand-written copy said
+      // ['authorization_code'] only. Clients read THIS one (it is the one at the domain root), so
+      // Claude was told the connection could never be refreshed — and reported exactly that:
+      // "Connection has expired." The token endpoint was issuing refresh tokens the whole time;
+      // nothing ever asked for one.
+      // The fix is not to correct the copy. It is to STOP KEEPING A COPY: fetch the function's own
+      // metadata and rewrite only the URLs, so the two can never disagree again. Falls back to a
+      // literal if the fetch fails, because discovery going down would break every new connection.
+      try {
+        const upstreamMeta = await fetch(SUPABASE + "/functions/v1/mcp/.well-known/oauth-authorization-server");
+        if (upstreamMeta.ok) {
+          const m = await upstreamMeta.json();
+          return jsonRes({
+            ...m,
+            issuer: PUBLIC_MCP,
+            authorization_endpoint: PUBLIC_MCP + "/authorize",
+            token_endpoint: PUBLIC_MCP + "/token",
+            registration_endpoint: PUBLIC_MCP + "/register",
+          });
+        }
+      } catch (_) { /* fall through to the literal below */ }
       return jsonRes({
         issuer: PUBLIC_MCP,
         authorization_endpoint: PUBLIC_MCP + "/authorize",
         token_endpoint: PUBLIC_MCP + "/token",
         registration_endpoint: PUBLIC_MCP + "/register",
-        response_types_supported: ["code"], grant_types_supported: ["authorization_code"],
+        response_types_supported: ["code"],
+        grant_types_supported: ["authorization_code", "refresh_token"],
         code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"],
         scopes_supported: ["mcp:tools"],
       });
