@@ -73,7 +73,7 @@ function _extends(){return _extends=Object.assign?Object.assign.bind():function(
 //   - App shell (auth gate, routing via history, command surface)
 // ============================================================
 // ---------- config ----------
-const CFG={build:"2026.08.10-30",// bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+const CFG={build:"2026.08.10-31",// bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
 url:"https://tytrmjjucqijzcrbwjfm.supabase.co",key:"sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",adminEmail:"admin@positiveminds.app",sessionStore:"pm_admin_session_v2",sessionMaxAgeMs:7*24*60*60*1000,// keep users logged in for 7 days
 pageSize:40};// ============================================================
 // Session + Auth
@@ -1821,6 +1821,20 @@ never echo it into output. Push with the token supplied on the command line inst
     node tools/workspace.cjs      # mirrors src/ -> v2/ and edge-functions/ -> the paths scripts expect
 Nothing else. There is no framework, no bundler, no dev server.
 
+THE LAYOUT, so nothing is a surprise:
+  src/*.jsx              21 modules, the whole CMS. shell/core/primitives are the spine; views1,
+                         views2, editors, levels, generator, aireview, aisettings, publish1,
+                         publish2, realtime, features, engine, firebase, firebase2 are pages and
+                         subsystems; connector.jsx is partner tokens; sysarch.jsx is the partner
+                         setup guide shown in the app; devdocs.jsx is THIS document; devnotes.jsx
+                         is the viewer over it plus a scratchpad backed by pm_dev_notes.
+  tools/                 workspace.cjs (mirror), split.cjs (pm_cms.jsx -> src/), assemble.cjs
+                         (src/ -> pm_cms.jsx), build.cjs (-> index.html), verify.cjs (proves the
+                         round trip is byte-identical)
+  mcp-shim/index.js      the Cloudflare Worker partners connect to; view-app.js is the MCP App UI
+  edge-functions/*.ts    mcp, content-api, game-feed, pack-describe, generate-questions
+  engine.js runtime.js read.js inspect.js interact.js visual.js   the six test harnesses
+
 ### 3. Read, in this order
   1. This file's section 11z — current state, what is temporary, what is outstanding.
   2. DOC_CLAUDE_MD's golden rules, 4.1-4.45. EVERY ONE EXISTS BECAUSE SOMETHING BROKE. They are
@@ -1835,12 +1849,17 @@ Nothing else. There is no framework, no bundler, no dev server.
 index.html; \`verify\` proves split->assemble is byte-identical and the two HTML files match.
 NEVER hand-edit pm_cms.jsx or index.html — they are generated and will be overwritten.
 
-### 5. The test suites — run all of them before pushing
-    node engine.js                     # 1725 cases, maskWord parity across every copy
-    node runtime.js                    # renders each page, fails on any warning
+### 5. The test suites — run ALL of them before pushing
+    npm test        # runs SIX suites: engine, runtime, interact, inspect, visual, read
+There are six, not two. engine.js and runtime.js are the ones people remember; read.js, inspect.js,
+interact.js and visual.js exist, do real work, and are easy to skip for a whole session without
+noticing (rule 4.47). Then, after any change under mcp-shim/, run these three by hand — npm test
+does NOT cover them:
     node mcp-shim/widget-test.mjs      # the MCP App view, both payload shapes, in jsdom
     node mcp-shim/overview-test.mjs    # the overview tool, failure modes, URI behaviour
     node mcp-shim/logging-test.mjs     # redaction — asserts no secret can reach the log
+KNOW THE BASELINE: test:visual reports ~153 MINOR defects and 0 serious. That is steady state (touch
+targets under 40px in a desktop-density UI), not a regression. Watch the SERIOUS count.
 Edge function changes: compile-check before deploying, because a syntax error ships silently:
     npx esbuild edge-functions/mcp.ts --outfile=/tmp/check.js --format=esm --target=es2022
 
@@ -1849,6 +1868,9 @@ Everything deploys from a push to main. There are three workflows:
   .github/workflows/deploy.yml               -> the SITE Worker (positive-minds-cms)
   .github/workflows/deploy-mcp-shim.yml      -> the SHIM Worker (positive-minds-mcp)
   .github/workflows/deploy-edge-functions.yml-> Supabase edge functions, on edge-functions/** only
+  .github/workflows/mcp-selftest.yml         -> exercises the connector end to end against the
+                                                DEPLOYED shim; run it after touching auth or the
+                                                shim, since it tests the thing users actually hit
 Secrets already configured: CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, SUPABASE_ACCESS_TOKEN.
 Edge functions can also be dispatched manually with mode=dry-run (compares deployed vs repo, changes
 nothing) or mode=deploy, optionally only=<slug>.
@@ -2957,6 +2979,18 @@ there were two 4t, two 4u, two 4r, two 4s, two 4v and two 4d, so "see rule 4t" w
    the edge function didn't, so a question with its own letter_position rendered differently
    in-game than in the CMS.) After any engine edit, diff the two by fetching the deployed edge
    function and comparing, or run a parity test with a question that has its own overrides.
+4.47. **Run the whole test target, not the commands you happen to remember.** This project has SIX
+   test suites wired into \`npm test\` — engine, runtime, read, inspect, interact, visual — plus three
+   more under mcp-shim/. I learned \`node engine.js\` and \`node runtime.js\` early and ran only those
+   for an entire session, across dozens of commits, without once opening package.json. read.js,
+   inspect.js, interact.js and visual.js were sitting there doing real work: inspect checks computed
+   styles in a real DOM, interact CLICKS 42 buttons and changes 52 inputs, visual renders 27
+   page/device combinations. None of them ran.
+   Nothing broke, which is luck, not vindication.
+   THE RULE: read package.json scripts before you decide what "the tests" are, prefer the aggregate
+   target over remembered incantations, and WRITE DOWN THE HEALTHY BASELINE for any suite that
+   reports non-zero by design — test:visual always shows ~153 minor touch-target advisories, and a
+   suite whose normal output looks like failure will be quietly ignored by the next person too.
 4.46. **A handover is only true if you FOLLOW IT from a clean clone.** The new-session instructions
    in 11y were written from memory of what works — and every command in them passed on the first
    run, which proved nothing, because they were passing on the machine that had been building this
@@ -3454,6 +3488,34 @@ actually deployed and compares, deploying nothing.
 - Keep responses/docs truthful to the actual schema (query pg_proc / pg_tables to confirm).
 
 ## Testing capabilities
+
+### THE TEST SUITES — there are SIX, and \`npm test\` runs them all
+Run \`npm test\`. Do not run the two you remember (rule 4.47).
+  npm run test:engine    engine.js    1725 cases — maskWord parity across EVERY copy of it
+  npm run test:runtime   runtime.js   renders each page headless, fails on any warning or crash
+  npm run test:read      read.js      reads each page as a human would: the words, in order
+  npm run test:inspect   inspect.js   real DOM + real stylesheet, inspects COMPUTED styles
+  npm run test:interact  interact.js  actually CLICKS things — 42 buttons, 52 inputs
+  npm run test:visual    visual.js    layout across 27 page/device combinations
+Plus three the npm target does NOT cover, run them by hand after touching mcp-shim/:
+  node mcp-shim/widget-test.mjs     the MCP App view, both payload shapes, in jsdom
+  node mcp-shim/overview-test.mjs   the overview tool, its failure modes, the view URI rules
+  node mcp-shim/logging-test.mjs    redaction — asserts no secret can reach pm_connector_log
+
+### What a HEALTHY run looks like, so you can tell a regression from the baseline
+  engine    "1725 cases across 3 implementations — ALL IDENTICAL"
+  runtime   "No runtime warnings or errors."
+  inspect   "No defects found."
+  interact  "42 buttons clicked, 52 inputs changed. Nothing broke."
+  visual    ~153 MINOR defects, 0 serious — every one a control under the 40px comfortable touch
+            target. That is the STEADY STATE for a desktop-density admin UI, not a regression.
+            Watch the SERIOUS count; if it is not 0, something actually broke.
+  visual also writes browsable HTML to /home/claude/bt/visual/ — open it rather than guessing.
+
+### Edge functions: compile before you deploy
+A syntax error in edge-functions/*.ts ships silently and the function 500s in production:
+  npx esbuild edge-functions/mcp.ts --outfile=/tmp/check.js --format=esm --target=es2022
+
 This environment cannot reach *.supabase.co / *.workers.dev / *.pages.dev / Firebase hosts
 directly from bash. Work around it:
 - **DB / SQL:** use the Supabase tools (execute_sql, apply_migration, etc.).
