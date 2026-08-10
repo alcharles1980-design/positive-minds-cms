@@ -494,9 +494,18 @@ export default {
           const want = rpc.params && rpc.params.uri;
           // Both URIs serve the SAME view — the host picks one per connector and does not honour the
           // per-tool link, so the view dispatches on payload shape instead. See view-app.js.
-          // Serve the current URI and every legacy one — an in-flight session must not break
-          // just because the view changed underneath it.
-          if (want === UI_URI || LEGACY_URIS.indexOf(want) !== -1) {
+          // SERVE ANY VERSION OF THE VIEW, not just the current hash.
+          // Content-addressing invalidates a host's cache, which is the point — but the host also
+          // caches tools/list, so it will keep asking for the hash it saw THERE, which may be an
+          // older one. Serving only the current hash turns every shim deploy into "Failed to load
+          // the MCP app" for anyone holding a stale tool list. Content-addressing without serving
+          // the old addresses is just breakage with extra steps.
+          // Any ui://positive-minds/view-* resolves, and always to the CURRENT html — an old URI
+          // should not pin old content, it should simply keep working.
+          const isViewUri = want === UI_URI ||
+            (typeof want === "string" && want.indexOf("ui://positive-minds/view-") === 0) ||
+            LEGACY_URIS.indexOf(want) !== -1;
+          if (isViewUri) {
             return rpcRes({
               contents: [{
                 uri: want,

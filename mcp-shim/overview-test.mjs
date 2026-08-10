@@ -171,6 +171,30 @@ console.log("\nView URI is content-addressed (host cache busting)");
   }), {}, { waitUntil() {} });
   check("the advertised URI is readable", !!(await readCur.json()).result?.contents?.[0]?.text);
 
+  // A STALE HASH must still resolve. The host caches tools/list, so after a shim deploy it keeps
+  // asking for the hash it saw there — and serving only the current one produced "Failed to load
+  // the MCP app" in production.
+  for (const stale of ["ui://positive-minds/view-oxes5j", "ui://positive-minds/view-deadbeef"]) {
+    const r = await worker.fetch(new Request("https://shim.example/mcp", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 12, method: "resources/read", params: { uri: stale } }),
+    }), {}, { waitUntil() {} });
+    const body = (await r.json()).result?.contents?.[0];
+    check("a stale view hash still resolves: " + stale.split("-").pop(),
+      !!body?.text && body.text === (await import("./view-app.js")).VIEW_HTML,
+      body ? "served current html" : "NOT FOUND");
+  }
+
+  // Something that is not a view at all must still 404, or the check means nothing.
+  {
+    const r = await worker.fetch(new Request("https://shim.example/mcp", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 13, method: "resources/read", params: { uri: "ui://somewhere/else" } }),
+    }), {}, { waitUntil() {} });
+    const j = await r.json();
+    check("an unrelated ui:// URI is still refused", !!j.error, JSON.stringify(j.error || j.result).slice(0, 50));
+  }
+
   // An in-flight session holding an old URI must not break when the view changes.
   for (const legacy of ["ui://positive-minds/question-preview", "ui://positive-minds/overview"]) {
     const r = await worker.fetch(new Request("https://shim.example/mcp", {
