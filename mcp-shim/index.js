@@ -122,6 +122,17 @@ function loginPage(p) {
   <input id="tk" type="password" placeholder="pmk_…" autocomplete="off" autocapitalize="off" spellcheck="false" autofocus>
   <button id="btn" type="button">Connect</button>
   <div class="note"><b>Everything you write goes to a review queue for approval first</b> — nothing you send goes live on its own.</div>
+  <div id="hijack" style="display:none;margin-top:18px;padding:14px 15px;border-radius:12px;
+       background:#FFF6E5;border:1px solid #E0A93B;font-size:13.5px;line-height:1.6;color:#5A4210">
+    <b>Did the Claude app open instead?</b><br>
+    Your sign-in worked — but your phone sent the last step to the Claude app, which cannot finish it.
+    Copy the link below and paste it into your browser's address bar to complete the connection.
+    <input id="hjurl" readonly style="width:100%;margin-top:10px;padding:9px 10px;border-radius:9px;
+      border:1px solid #E0A93B;background:#fff;font-size:12px;font-family:ui-monospace,Menlo,monospace">
+    <button id="hjcopy" type="button" style="margin-top:9px;width:100%;padding:11px;border-radius:9px;
+      border:0;background:#5A4210;color:#fff;font-size:14px;font-weight:800;cursor:pointer;
+      font-family:inherit">Copy the link</button>
+  </div>
 </div>
 <script>
   var P = ${data};
@@ -145,12 +156,35 @@ function loginPage(p) {
         body: params.toString(),
       });
       var d = await r.json();
-      if (d && d.ok && d.redirect){ window.location.href = d.redirect; return; }
-      showErr((d && d.error) || 'That token was not recognised, or access has been revoked.');
+      if (d && d.ok && d.redirect){ finish(d.redirect); return; }
+      showErr((d && d.error) || 'That sign-in could not be completed. Check the token, or ask for a fresh one.');
     } catch (e) {
       showErr('Something went wrong — please try again.');
     }
   }
+  // If the redirect is hijacked (Android hands claude.ai links to the Claude app), THIS PAGE IS
+  // STILL HERE a moment later. That is the tell, and it lets us offer a way out rather than leaving
+  // someone staring at a chat window wondering why nothing connected.
+  function finish(url){
+    var t = setTimeout(function(){ hijacked(url); }, 1800);
+    window.addEventListener('pagehide', function(){ clearTimeout(t); });
+    window.location.href = url;
+  }
+  function hijacked(url){
+    if (document.hidden) return;   // we did navigate; the tab is just backgrounded
+    var box = document.getElementById('hijack');
+    if (!box) return;
+    box.style.display = 'block';
+    var f = document.getElementById('hjurl');
+    if (f) f.value = url;
+    var c = document.getElementById('hjcopy');
+    if (c) c.onclick = function(){
+      try { f.select(); f.setSelectionRange(0, url.length); document.execCommand('copy');
+            c.textContent = 'Copied \u2014 now paste it in the address bar'; }
+      catch (e) { c.textContent = 'Select the text above and copy it'; }
+    };
+  }
+
   btn.addEventListener('click', connect);
   tk.addEventListener('keydown', function(e){ if (e.key === 'Enter') connect(); });
 </script>
