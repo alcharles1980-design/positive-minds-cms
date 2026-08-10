@@ -419,9 +419,22 @@ export const VIEW_HTML = `<!DOCTYPE html>
           var ok = w === r.correct;
           b.classList.add(ok ? 'right' : 'wrong');
           verdict.className = 'verdict ' + (ok ? 'ok' : 'no');
+          // The verdict is written for the CHILD, because the point of this view is to feel what a
+          // child feels. Never "wrong" — nearly, and try again.
           verdict.textContent = ok
             ? 'Correct answer \u2014 you got it right! \uD83D\uDE0A'
-            : 'Marked wrong. If this word ALSO fits the blank, the question is broken.';
+            : 'Nearly right \u2014 you\u2019re getting better every time you try \uD83D\uDE42 Try again\u2026';
+          // The REVIEWER still needs the check that this line used to carry: a wrong-marked word
+          // that also fits the blank means the question has two right answers. Kept, but demoted to
+          // a quiet second line so it never speaks to the child. Removing it entirely would lose the
+          // one prompt that turns a reviewer's surprise into the same-length bug being caught, which
+          // is the reason this view exists.
+          if (!ok) {
+            var note = document.createElement('div');
+            note.className = 'hint';
+            note.textContent = 'Reviewer check: if this word ALSO fits the blank, the question is broken.';
+            verdict.appendChild(note);
+          }
           request('ui/update-model-context', {
             content: [{ type:'text', text:
               'Reviewer tried "' + w + '" on Q' + (r.p.n || (r.i + 1)) + ' at level ' + r.level +

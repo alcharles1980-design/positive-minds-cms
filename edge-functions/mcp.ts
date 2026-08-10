@@ -414,6 +414,15 @@ const TOOLS = [
       'word is correct before it is tapped, and never reword or reorder anything.\n' +
       'DO NOT produce a summary of the levels, a table of level rules, or one section per level. The ' +
       'unit is the QUESTION — if there are twelve questions the person should see twelve cards.\n' +
+      'USE THESE EXACT WORDS WHEN A WORD IS TAPPED. Do not improvise them — the tone is decided ' +
+      'content, not a detail, and this card is how someone feels what a child feels:\n' +
+      '  correct → "Correct answer — you got it right! 😊"\n' +
+      '  wrong   → "Nearly right — you\'re getting better every time you try 🙂 Try again…"\n' +
+      'NEVER say "wrong", "incorrect" or "that is what the child should pick". A child using this ' +
+      'game is never told they failed, and a reviewer playing it should meet the same tone.\n' +
+      'Under a wrong answer ONLY, add a small quiet line for the reviewer: "Reviewer check: if this ' +
+      'word ALSO fits the blank, the question is broken." That is the check that catches two-correct- ' +
+      'answer questions, so keep it — but visually secondary, and never in the child-facing verdict.\n' +
       'MATCH THE CMS DESIGN (Positive Minds house style) so it feels like part of the product:\n' +
       '  page background #F6F5FB; each question in a white #FFFFFF card, 1px #E4E0F0 border, 16px ' +
       'radius, generous padding, soft shadow 0 2px 10px rgba(25,23,40,.05).\n' +
