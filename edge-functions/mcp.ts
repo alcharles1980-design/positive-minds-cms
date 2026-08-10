@@ -170,6 +170,32 @@ function randomToken(prefix: string): string {
 }
 
 // Verify the ACCESS TOKEN Claude sends on every MCP call. Returns which partner it belongs to.
+// TOKEN LIFETIMES — effectively indefinite, deliberately.
+//
+// WHY NOT A SHORT ACCESS TOKEN, which is the usual advice: the claude.ai proxy NEVER REFRESHES.
+// Documented and open as anthropics/claude-ai-mcp#228 (plus #155, #188, #207) — the proxy
+// reconnects its transport, reports success, and never calls /token or /authorize again. Our own
+// logs agree exactly: one /token hit at connect, zero refresh grants, ever.
+// So a short expiry is not a security boundary here. It is a SCHEDULED OUTAGE — the day it lapses
+// the connector dies and nobody remembers why. A 1-hour token would break this connector daily,
+// which is precisely what everyone in those issue threads is suffering.
+//
+// WHAT ACTUALLY PROTECTS US IS REVOCATION, NOT EXPIRY. authenticate() re-reads
+// pm_mcp_tokens.active on EVERY request, so setting active=false kills every session for that
+// partner on their very next call — mid-session, no waiting for a token to lapse. That control is
+// immediate and total, which is more than a 30-day expiry ever gave us.
+//
+// THE RESIDUAL RISK, stated plainly: a leaked access token stays valid until someone revokes the
+// partner token. That was already true for 30 days; this makes it true indefinitely. The mitigation
+// is revocation plus pm_connector_log, which records every use. If a token is ever suspected, run
+//     update pm_mcp_tokens set active = false where partner = '<name>';
+// and it stops working immediately.
+//
+// Ten years rather than a null expiry: the auth path checks expires_at unconditionally, and adding
+// a null branch to the hot path of authentication is a new way to get authentication wrong.
+const ACCESS_TTL  = 60 * 60 * 24 * 365 * 10;  // ~10 years, i.e. indefinite in practice
+const REFRESH_TTL = 60 * 60 * 24 * 365 * 10;  // kept in step; the proxy never uses it anyway
+
 async function authenticate(db: any, req: Request) {
   const auth = req.headers.get('authorization') || '';
   const token = auth.replace(/^Bearer\s+/i, '').trim();
@@ -1417,8 +1443,8 @@ Deno.serve(async (req) => {
 
       const newAccess = randomToken('at_');
       const newRefresh = randomToken('rt_');
-      const ttl = 60 * 60 * 24 * 30;
-      const rttl = 60 * 60 * 24 * 90;
+      const ttl = ACCESS_TTL;
+      const rttl = REFRESH_TTL;
       await db.from('pm_oauth_tokens').insert({
         access_token: newAccess,
         token_id: old.token_id,
@@ -1468,8 +1494,8 @@ Deno.serve(async (req) => {
 
     const accessToken = randomToken('at_');
     const refreshToken = randomToken('rt_');
-    const expiresIn = 60 * 60 * 24 * 30;        // access: 30 days
-    const refreshExpiresIn = 60 * 60 * 24 * 90; // refresh: 90 days
+    const expiresIn = ACCESS_TTL;
+    const refreshExpiresIn = REFRESH_TTL;
     await db.from('pm_oauth_tokens').insert({
       access_token: accessToken,
       token_id: row.token_id,
