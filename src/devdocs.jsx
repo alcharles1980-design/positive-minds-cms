@@ -1327,11 +1327,15 @@ EDGE FUNCTIONS — the state before 10 Aug
 TEMPORARY THINGS STILL IN PLACE (remove when convenient)
 - pm_connector_log fills with every connector request (capped at 2000 rows, self-pruning). Keep it —
   it is the thing that finally made a connection failure readable. See the CONNECTING section.
-- OAuth clutter from 10 Aug troubleshooting: ~10 extra pm_oauth_clients rows (every failed Connect
-  registers a fresh client), several \`beta\` sessions in pm_oauth_tokens, and one client named
-  "diagnostic"/"browser-test" from testing the flow by hand. All harmless, all removable.
-- Table pm_tool_log and the toolLog() calls in mcp-shim/index.js — diagnostic logging that records
-  which tool a client actually calls. It is what made the routing bug findable; harmless but noise.
+- OAuth clutter from 10 Aug troubleshooting: ~20 extra pm_oauth_clients rows (every Connect
+  registers a fresh client) and 27 \`beta\` sessions in pm_oauth_tokens, plus a few clients named
+  diagnostic/browser-test/textcheck from testing the flow by hand.
+  DELIBERATELY LEFT: deleting a client cascades to its tokens, and \`beta\`'s live sessions are spread
+  across these clients — tidying would cut working connections for no gain. Harmless where it is.
+- TOKENS ALL LEFT ACTIVE by decision (10 Aug): albert (55 calls), albert-reconnect (47), beta (131,
+  in daily use), Steve (0, never connected). Nothing is revoked.
+- (pm_tool_log and toolLog() are GONE — dropped 10 Aug, superseded by pm_connector_log, which
+  records strictly more and prunes itself.)
 - (The MCP Apps widget is no longer here. It is ACTIVE and verified rendering — see the widget
   section. It is not temporary and must not be removed.)
 
