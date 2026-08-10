@@ -189,8 +189,84 @@ function loginPage(p) {
 </body></html>`;
 }
 
+// ---------------------------------------------------------------------------------------------
+// REQUEST LOGGING WRAPPER.
+// The handler has 22 return points, several of which (discovery, CORS preflight, the sign-in page)
+// answer BEFORE any per-branch logging ran. That left the single most important question
+// unanswerable: when a client appears to do nothing, did it even ASK us for the discovery document?
+// So every request is logged here, around the whole handler, and nothing can slip out unlogged.
+//
+// NEVER LOG A SECRET. Tokens, codes, verifiers and client secrets are stripped by redact() below.
+// This table is insert-only under the anon key, but a log that quietly accumulates credentials is a
+// breach waiting to happen regardless of who can read it.
+const SECRET_PARAMS = ["token", "code", "code_verifier", "client_secret", "access_token",
+                       "refresh_token", "password", "authorization"];
+
+function redact(params) {
+  const out = [];
+  for (const [k, v] of params) {
+    if (SECRET_PARAMS.indexOf(k.toLowerCase()) !== -1) {
+      out.push(k + "=<redacted:" + String(v).length + " chars>");
+    } else {
+      out.push(k + "=" + String(v).slice(0, 60));
+    }
+  }
+  return out.join("&").slice(0, 400);
+}
+
+function phaseOf(path) {
+  if (path.indexOf("/.well-known/") !== -1) return "discovery";
+  if (path.endsWith("/register")) return "register";
+  if (path.endsWith("/authorize")) return "authorize";
+  if (path.endsWith("/token")) return "token";
+  if (path === "/mcp" || path.startsWith("/mcp/")) return "mcp";
+  return "other";
+}
+
 export default {
   async fetch(request, env, ctx) {
+    const started = Date.now();
+    const url0 = new URL(request.url);
+    let res;
+    try {
+      res = await handleRequest(request, env, ctx);
+    } catch (e) {
+      // A thrown handler used to produce a bare 500 with nothing recorded anywhere.
+      connLog(ctx, {
+        phase: phaseOf(url0.pathname), path: url0.pathname, method: request.method,
+        status: 500, err: String((e && e.stack) || e).slice(0, 400),
+        ua: (request.headers.get("user-agent") || "").slice(0, 120),
+        cf_ray: request.headers.get("cf-ray"), country: request.headers.get("cf-ipcountry"),
+        ms: Date.now() - started,
+      });
+      throw e;
+    }
+    try {
+      // Read the error body from a CLONE — consuming the real one would empty the response.
+      let err = null;
+      if (res.status >= 400) {
+        try { err = (await res.clone().text()).slice(0, 400); } catch (_) {}
+      }
+      connLog(ctx, {
+        phase: phaseOf(url0.pathname),
+        path: url0.pathname,
+        method: request.method,
+        status: res.status,
+        query: redact(url0.searchParams),
+        had_auth: !!request.headers.get("authorization"),
+        ua: (request.headers.get("user-agent") || "").slice(0, 120),
+        cf_ray: request.headers.get("cf-ray"),
+        country: request.headers.get("cf-ipcountry"),
+        session_id: request.headers.get("mcp-session-id"),
+        err,
+        ms: Date.now() - started,
+      });
+    } catch (_) { /* logging must never break the response */ }
+    return res;
+  },
+};
+
+async function handleRequest(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
     const ORIGIN = url.origin;
@@ -667,6 +743,8 @@ export default {
             }
           }
 
+          // Kept alongside the wrapper: only here do we know the JSON-RPC METHOD, which the
+          // wrapper cannot see without consuming the request body.
           return logged(ctx, new Response(JSON.stringify(payload), { status: up.status, headers: outH }), logBase);
         }
       }
@@ -683,19 +761,7 @@ export default {
     }
     for (const [k, v] of Object.entries(CORS)) outHeaders.set(k, v);
 
-    // Log the fall-through path too — an unauthenticated probe that never reaches the branches
-    // above is exactly the request that was invisible before.
-    const res = new Response(upstream.body, { status: upstream.status, headers: outHeaders });
-    if (path === "/mcp" || path.startsWith("/mcp/")) {
-      connLog(ctx, {
-        path,
-        rpc_method: null,
-        status: upstream.status,
-        had_auth: !!request.headers.get("authorization"),
-        ua: (request.headers.get("user-agent") || "").slice(0, 120),
-        note: method + " (proxied)",
-      });
-    }
-    return res;
-  },
-};
+    // (The fall-through no longer logs here — the wrapper around handleRequest logs every request,
+    // including this one, and duplicating it only made the flow harder to read.)
+    return new Response(upstream.body, { status: upstream.status, headers: outHeaders });
+}
