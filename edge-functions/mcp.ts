@@ -209,7 +209,7 @@ async function authenticate(db: any, req: Request) {
 
   // Which partner? And are they still allowed?
   const { data: partner } = await db.from('pm_mcp_tokens')
-    .select('id, partner, active, calls_made').eq('id', at.token_id).maybeSingle();
+    .select('id, partner, active, calls_made, can_approve').eq('id', at.token_id).maybeSingle();
   if (!partner || !partner.active) return null;            // revoked mid-session
 
   // Best-effort usage tracking — never let it break the request.
@@ -490,12 +490,51 @@ const TOOLS = [
     },
   },
   {
+    name: 'approve_question',
+    description:
+      'Approve ONE question from the review queue and make it LIVE. This is the last gate before a ' +
+      'child sees it, so treat it as one: PREVIEW THE QUESTION FIRST with preview_questions and ' +
+      'actually play it — a same-length pair or a wrong option that also fits the sentence is ' +
+      'invisible in a list and only shows when you try it. There is deliberately no bulk approve. ' +
+      'You must pass confirm_answer (the correct word, exactly as shown on the card); this exists so ' +
+      'a question cannot be approved off a list without being looked at. Only available to tokens ' +
+      'granted approval rights.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The review-queue id, from preview_questions.' },
+        confirm_answer: { type: 'string', description: 'The CORRECT word for this question, as shown on the card.' },
+      },
+      required: ['id', 'confirm_answer'],
+      additionalProperties: false,
+    },
+    annotations: { title: 'Approve one question' },
+  },
+  {
+    name: 'unapprove_question',
+    description:
+      'Undo an approval: takes a live question out of the game and returns it to the review queue. ' +
+      'Use it the moment an approval looks wrong — it only ever REMOVES content from children, so it ' +
+      'is safe. The question is set inactive rather than deleted, so nothing is lost and the CMS can ' +
+      'restore it. Pass the LIVE question id that approve_question returned.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        question_id: { type: 'string', description: 'The live question id returned by approve_question.' },
+        reason: { type: 'string', description: 'Optional note recorded on the queue row.' },
+      },
+      required: ['question_id'],
+      additionalProperties: false,
+    },
+    annotations: { title: 'Undo an approval' },
+  },
+  {
     name: 'reject_questions',
     description:
       'Reject questions that are waiting in the review queue, with a reason. Rejecting only REMOVES ' +
       'something from the pipeline — it can never put content in front of a child — so it is safe to ' +
-      'do from here. Get the ids from preview_questions. Approving is deliberately NOT possible ' +
-      'through this connector; that happens in the CMS.',
+      'do from here. Get the ids from preview_questions. (Approving is a separate tool and is only ' +
+      'available to tokens that have been granted it.)',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1206,6 +1245,65 @@ async function callTool(db: any, partner: string, name: string, args: any) {
   // Safe by construction: rejecting only removes something from the pipeline. pm_review_reject
   // enforces status='pending' itself. It stamps decided_by from a JWT email, which the connector
   // (service role) does not have — so it would record 'admin'. We patch the real actor in after.
+  // APPROVE — one at a time, and only for a token with can_approve.
+  // Rule 4.19 withheld this for two reasons. The first (every token equally powerful) is now
+  // answered by the per-token flag: a partner's tools/list will not even contain this. The second
+  // (reviewing content in the chat that generated it is a worse review environment) has no
+  // technical fix, so the design leans on making review REAL rather than fast:
+  //   • ONE AT A TIME. No bulk. The defects that matter here — a same-length pair, a distractor
+  //     that also fits — are invisible in a list and only surface when you PLAY the question.
+  //   • confirm_answer MUST match. Statelessly, we cannot verify the caller previewed anything;
+  //     requiring the answer word back proves they have at least SEEN the question rather than
+  //     approving an id read off a list.
+  if (name === 'approve_question') {
+    if (!who?.can_approve) {
+      return { error: 'This token cannot approve. Approval is granted per token; ask Albert to enable it.' };
+    }
+    const qid = String(args.id || '').trim();
+    if (!qid) return { error: 'Which question? Pass the review-queue id from preview_questions.' };
+
+    const { data: row } = await db.from('pm_review_queue')
+      .select('id, pack_id, template, answer, alt_answer, status, provider, validation')
+      .eq('id', qid).maybeSingle();
+    if (!row) return { error: 'No question in the review queue with that id.' };
+    if (row.status !== 'pending') {
+      return { error: `That question was already ${row.status}. Nothing changed.` };
+    }
+
+    const confirm = String(args.confirm_answer || '').trim().toUpperCase();
+    if (!confirm || confirm !== String(row.answer || '').toUpperCase()) {
+      return {
+        error: 'confirm_answer must be the CORRECT word for this question, exactly as it appears. ' +
+               'Preview the question first and read it off the card — this exists so a question ' +
+               'cannot be approved from a list without being looked at.',
+        question: `"${row.template}"`,
+      };
+    }
+
+    const { data: res, error } = await db.rpc('pm_review_approve', { p_id: qid });
+    if (error) return { error: String(error.message || error) };
+
+    return {
+      approved: `"${row.template}" — ${row.answer} / ${row.alt_answer}`,
+      question_id: (res as any)?.question_id ?? null,
+      note: 'This is now LIVE and the game will pick it up on its next sync. If that was a mistake, ' +
+            'unapprove_question puts it back in the queue and removes it from the game.',
+    };
+  }
+
+  // UNDO. Only ever REMOVES content from children, which is what makes it safe under rule 4.19 —
+  // the same reasoning that permits reject_questions.
+  if (name === 'unapprove_question') {
+    if (!who?.can_approve) return { error: 'This token cannot approve or unapprove.' };
+    const qid = String(args.question_id || '').trim();
+    if (!qid) return { error: 'Pass question_id — the LIVE question id returned when it was approved.' };
+    const { data, error } = await db.rpc('pm_connector_unapprove', {
+      p_question_id: qid, p_reason: args.reason || null,
+    });
+    if (error) return { error: String(error.message || error) };
+    return data;
+  }
+
   if (name === 'reject_questions') {
     const ids: string[] = Array.isArray(args.ids) ? args.ids.filter(Boolean) : [];
     if (!ids.length) return { error: 'No ids given. Get them from preview_questions.' };
@@ -1430,7 +1528,7 @@ Deno.serve(async (req) => {
 
     const hash = await sha256(raw);
     const { data: partner } = await db.from('pm_mcp_tokens')
-      .select('id, partner, active').eq('token_hash', hash).eq('active', true).maybeSingle();
+      .select('id, partner, active, can_approve').eq('token_hash', hash).eq('active', true).maybeSingle();
     if (!partner) return reject('That token was not recognised, or access has been revoked. Ask Albert for a new one.');
 
     // Re-verify the redirect_uri (do not trust the form).
@@ -1626,12 +1724,21 @@ Deno.serve(async (req) => {
         '• PACKS: create_pack for a theme that does not exist yet, update_pack to change one\'s details. ' +
         'A new pack appears in the CMS immediately; its questions still go to the review queue.\n' +
         '• FIXING THE QUEUE: edit_queued_question to correct a pending item, reject_questions to drop ' +
-        'one. APPROVING is deliberately not possible here — that happens in the CMS.',
+        'one. APPROVING one question is possible ONLY for a token granted approval rights, and only ' +
+        'one at a time after previewing it — see approve_question. There is no bulk approve, on ' +
+        'purpose: the defects that matter only show when a question is played.',
     });
   }
   if (method === 'notifications/initialized') return new Response(null, { status: 202, headers: cors });
 
-  if (method === 'tools/list') return rpcOk({ tools: TOOLS });
+  if (method === 'tools/list') {
+    // Tokens without approval rights never SEE these tools. A capability that is absent cannot be
+    // attempted, argued with, or half-explained — which is a better boundary than a refusal.
+    const visible = who?.can_approve
+      ? TOOLS
+      : TOOLS.filter((t: any) => t.name !== 'approve_question' && t.name !== 'unapprove_question');
+    return rpcOk({ tools: visible });
+  }
 
   if (method === 'tools/call') {
     const name = params?.name;
