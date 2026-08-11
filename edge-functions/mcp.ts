@@ -305,7 +305,9 @@ const TOOLS = [
       'Check draft questions against the real game engine AND the pack\'s existing content, WITHOUT ' +
       'saving anything. ALWAYS run this before proposing. It catches the problems a human eye misses — ' +
       'above all whether both words are the same LENGTH (which gives the child two correct answers), ' +
-      'and whether a draft exactly duplicates a question already in the pack or the review queue.',
+      'and whether a draft duplicates or closely resembles anything already in the database — the whole ' +
+      'database, not just this pack, and including the review queue. An identical sentence blocks; a ' +
+      'reworded one or a reused word pair is reported so the writer can choose.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -707,6 +709,27 @@ async function callTool(db: any, partner: string, name: string, args: any) {
       ...(queuedQs || []).map((q: any) => ({ ...q, source: q.status })),
     ];
 
+    // DUPLICATE SCAN — across the WHOLE database, not just this pack.
+    // The engine's own `duplicate` flag only catches an identical sentence AND pair inside the same
+    // pack. That misses the cases that actually occur: the same sentence with a different pair, a
+    // sentence reworded by three words, the same question already living in another pack, and
+    // anything sitting in the review queue rather than live. pm_find_similar uses a trigram index
+    // over a normalised template (lowercased, {blank} removed, punctuation stripped) so a reword
+    // cannot hide behind a comma.
+    // Severity 1-2 (identical sentence) BLOCKS; 3-4 (reworded, or the same pair reused elsewhere)
+    // advise. Rule 4.15: a duplicate sentence is a defect in the content; reusing a pair is a
+    // variety judgement and must not stop a proposal.
+    const dupFindings: Record<number, any[]> = {};
+    for (let i = 0; i < list.length; i++) {
+      const q: any = list[i];
+      try {
+        const { data: sim } = await db.rpc('pm_find_similar', {
+          p_template: q.template, p_answer: q.answer, p_alt_answer: q.alt_answer,
+        });
+        if (Array.isArray(sim) && sim.length) dupFindings[i] = sim;
+      } catch (_) { /* a failed scan must not block a proposal — it is a check, not a gate */ }
+    }
+
     // VOCABULARY ADVICE — advisory, never blocking (rule 4.15: only defects that make a question
     // WRONG FOR A CHILD are hard). Cross-role reuse does not break the engine, so it must not stop
     // a proposal; it is a strong smell that the pack is recycling six words, and the reviewer and
@@ -737,6 +760,28 @@ async function callTool(db: any, partner: string, name: string, args: any) {
       }
       if (advice.length) (result as any).vocabulary_advice = advice;
 
+      // Attach the duplicate findings, splitting blocking from advisory.
+      const found = dupFindings[list.indexOf(q)] || [];
+      const blocking = found.filter((f: any) => f.severity <= 2);
+      const advisory = found.filter((f: any) => f.severity >= 3);
+      const describe = (f: any) => ({
+        reason: f.reason,
+        found_in: f.source === 'queue' ? 'the review queue' : 'live content',
+        pack: f.pack_name,
+        question: `"${f.template}" — ${f.answer} / ${f.alt_answer}`,
+        similarity: Math.round((f.similarity || 0) * 100) / 100,
+      });
+      if (blocking.length) {
+        (result as any).ok = false;
+        result.flags = [...(result.flags || []), {
+          code: 'duplicate_elsewhere',
+          detail: blocking[0].reason === 'exact_same_pair'
+            ? `This question already exists in ${blocking[0].pack_name} (${blocking[0].source === 'queue' ? 'awaiting review' : 'live'}). Write a different one.`
+            : `The SAME sentence is already used in ${blocking[0].pack_name}: "${blocking[0].template}" — ${blocking[0].answer} / ${blocking[0].alt_answer}. A child would meet the same sentence twice.`,
+        }];
+      }
+      if (advisory.length) (result as any).similar_questions = advisory.map(describe);
+
       answersInPack.add(ans); altsInPack.add(alt);
       seen.push({ template: q.template, answer: q.answer, alt_answer: q.alt_answer, source: 'batch' });
       return { q, result };
@@ -754,6 +799,15 @@ async function callTool(db: any, partner: string, name: string, args: any) {
         advice: (c.result as any).vocabulary_advice,
       }));
 
+    // Near-duplicates that did NOT block. Worth showing: a reworded question is usually a sign the
+    // writer did not know the original existed, and the fix is a different question, not a comma.
+    const similar = checked
+      .filter(c => (c.result as any).similar_questions)
+      .map(c => ({
+        question: `"${c.q.template}" — ${c.q.answer} / ${c.q.alt_answer}`,
+        resembles: (c.result as any).similar_questions,
+      }));
+
     // check_questions: report only. Nothing is saved.
     if (name === 'check_questions') {
       return {
@@ -764,6 +818,7 @@ async function callTool(db: any, partner: string, name: string, args: any) {
           problems: c.result.flags.map((f: any) => f.detail),
         })),
         vocabulary: vocab.length ? vocab : undefined,
+        similar_questions: similar.length ? similar : undefined,
         note: (flagged.length
           ? 'Fix these and check again before proposing.'
           : 'Mechanically sound — you can propose these.') +
@@ -799,6 +854,7 @@ async function callTool(db: any, partner: string, name: string, args: any) {
         problems: c.result.flags.map((f: any) => f.detail),
       })),
       vocabulary: vocab.length ? vocab : undefined,
+      similar_questions: similar.length ? similar : undefined,
       note: 'These are now waiting for a human to approve, edit or reject. Nothing is live yet. Call review_status later to see what was approved or rejected.',
     };
   }
