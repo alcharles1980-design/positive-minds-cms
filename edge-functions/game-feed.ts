@@ -1,4 +1,24 @@
-// game-feed — PUBLIC pull endpoint. Serves published game content,
+// game-feed — SHAPED exports. One saved profile per target engine.
+//
+//   • GET ?list=1                  → the available profiles
+//   • GET ?profile=<id|name>       → export in that profile's shape (default: first built-in)
+//   • GET ?packs=slug1,slug2       → narrow to specific packs (same param name as content-api)
+//   • GET ?stats=1                 → include the CMS content status alongside the content
+//   • GET ?stats=only              → the status and NOTHING else — cheap to poll for a dashboard
+//   • GET ?format=xml              → XML instead of JSON
+//   • GET ?health=1                → liveness probe
+//
+// A PROFILE defines the SHAPE: rename every field (template->sentence, answer->primaryWord),
+// transform values (upper/lower/slug), choose nested vs keyed vs flat, set the root and questions
+// keys, and filter by status. Stored in pm_export_profiles.spec; spec.include_stats turns stats on
+// permanently for that profile, and ?stats= overrides it per request.
+//
+// WHICH ENDPOINT DO I WANT?
+//   content-api  — SYNCING. Versioning, ?since incremental, deletions, ETag/304, ?include blocks.
+//                  Use it for the recurring pull that keeps a backend in step.
+//   game-feed    — SHAPING. Field names and structure for one specific engine, saved as a profile.
+//                  Use it when the consumer needs ITS vocabulary, not ours.
+// Both read the same content and both can return the same stats block.
 // transformed through a named export profile. No auth required.
 // Add ?format=xml for XML output (default JSON).
 //
@@ -224,8 +244,35 @@ Deno.serve(async (req) => {
 
     const spec = profile.spec || {};
     const filters = spec.filters || {};
-    const packs = await fetchAll(db, 'pm_packs', filters.status ? 'status' : undefined, filters.status);
-    const questions = await fetchAll(db, 'pm_questions', filters.question_status ? 'status' : undefined, filters.question_status);
+
+    // STATS. A profile can turn this on permanently (spec.include_stats), or a caller can ask for
+    // it per request with ?stats=1 / ?stats=0. The query parameter wins, so a saved profile never
+    // stops you asking a different question today.
+    const statsParam = url.searchParams.get('stats');
+    const wantStats = statsParam !== null ? (statsParam !== '0' && statsParam !== 'false')
+                                          : !!spec.include_stats;
+    let stats: any = null;
+    if (wantStats) {
+      const { data: st } = await db.rpc('pm_content_stats');
+      stats = st;
+    }
+    // Stats WITHOUT content: ?stats=only. Cheap enough for a dashboard to poll on a timer.
+    if ((statsParam || '').toLowerCase() === 'only') {
+      const body = { meta: { service: 'game-feed', generated_at: new Date().toISOString(), mode: 'stats' }, stats };
+      return wantXml ? xmlResp(toXml(body, 'feed')) : json(body);
+    }
+
+    let packs = await fetchAll(db, 'pm_packs', filters.status ? 'status' : undefined, filters.status);
+    let questions = await fetchAll(db, 'pm_questions', filters.question_status ? 'status' : undefined, filters.question_status);
+
+    // AD-HOC NARROWING, same parameter names as content-api so the two endpoints do not disagree
+    // about what ?packs means. A profile defines the SHAPE; these choose the SUBSET.
+    const packSlugs = (url.searchParams.get('packs') || '').split(',').map(x => x.trim()).filter(Boolean);
+    if (packSlugs.length) {
+      packs = packs.filter((p: any) => packSlugs.includes(p.slug));
+      const keep = new Set(packs.map((p: any) => p.id));
+      questions = questions.filter((q: any) => keep.has(q.pack_id));
+    }
 
     const packLevel: Record<string, number> = {};
     for (const p of packs) packLevel[p.id] = p.level || 1;
@@ -248,7 +295,8 @@ Deno.serve(async (req) => {
     const body = build(spec, packList, byPack);
 
     const payload = spec.include_meta === false ? body : {
-      meta: { generated_at: new Date().toISOString(), profile: profile.name, pack_count: packList.length, question_count: questions.length, levels_expanded: !!spec.expand_levels },
+      meta: { generated_at: new Date().toISOString(), profile: profile.name, pack_count: packList.length, question_count: questions.length, levels_expanded: !!spec.expand_levels, filtered_packs: packSlugs.length ? packSlugs : undefined },
+      ...(stats ? { stats } : {}),
       ...(Array.isArray(body) ? { data: body } : body),
     };
     if (wantXml) return xmlResp(toXml(payload, 'gameContent'), 200, { 'Cache-Control': 'public, max-age=60' });
