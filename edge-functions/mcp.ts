@@ -1338,7 +1338,13 @@ async function callTool(db: any, partner: string, name: string, args: any, canAp
 
     const checks = describeChecks(row.validation);
 
-    const { data: res, error } = await db.rpc('pm_review_approve', { p_id: qid });
+    // Pass the actor through. Without it the RPC falls back to the JWT email — and the connector
+    // authenticates as the SERVICE ROLE, which has none, so every approval recorded as 'admin' and
+    // a connector approval was indistinguishable from someone pressing Approve in the CMS.
+    const { data: res, error } = await db.rpc('pm_review_approve', {
+      p_id: qid,
+      p_actor: `connector:${partner}`,
+    });
     if (error) return { error: String(error.message || error) };
 
     return {
