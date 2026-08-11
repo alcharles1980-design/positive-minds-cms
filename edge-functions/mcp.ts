@@ -1245,9 +1245,12 @@ async function callTool(db: any, partner: string, name: string, args: any) {
   // Safe by construction: rejecting only removes something from the pipeline. pm_review_reject
   // enforces status='pending' itself. It stamps decided_by from a JWT email, which the connector
   // (service role) does not have — so it would record 'admin'. We patch the real actor in after.
-  // APPROVE — one at a time, and only for a token with can_approve.
-  // Rule 4.19 withheld this for two reasons. The first (every token equally powerful) is now
-  // answered by the per-token flag: a partner's tools/list will not even contain this. The second
+  // APPROVE — one at a time, for any token with can_approve (DEFAULT TRUE since 11 Aug 2026).
+  // Rule 4.19 withheld this for two reasons. The first (every token equally powerful) is answered
+  // by the per-token flag EXISTING, not by its default: approval can be withdrawn from any single
+  // token with one UPDATE and takes effect on its next request. Albert chose default-on knowingly —
+  // a partner approving is still a HUMAN approving, which is what the invariant protects. What it
+  // costs is the second pair of eyes: the writer and the reviewer may now be the same person. The second
   // (reviewing content in the chat that generated it is a worse review environment) has no
   // technical fix, so the design leans on making review REAL rather than fast:
   //   • ONE AT A TIME. No bulk. The defects that matter here — a same-length pair, a distractor

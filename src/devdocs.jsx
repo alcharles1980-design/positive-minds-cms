@@ -1077,6 +1077,39 @@ If you want the gate in a pull model you must also arrange to release, or the ga
   3. Store the new global_version and the ETag against your sync record.
   4. Never assume a 200 means changed — check the version. Never assume 304 means broken.
 
+### DUPLICATE DETECTION, and APPROVING FROM THE CONNECTOR
+
+**DUPLICATES — the whole database, not exact matches in one pack.** The engine's own \`duplicate\`
+flag only fires when an existing question in the SAME pack has the SAME sentence AND the SAME pair.
+Everything that actually happens slipped past it: the same sentence with a different pair, a reword
+of three words, a question already living in another pack, and anything sitting in the queue rather
+than live.
+  pm_norm_template()  lowercase, {blank} removed, punctuation stripped, whitespace collapsed. This
+                      is the whole trick — without it a comma hides a duplicate.
+  pm_find_similar()   searches LIVE content and the PENDING queue together, via GIN trigram indexes
+                      over the normalised form, and returns a reason with a severity:
+                        1 exact_same_pair  identical sentence AND pair      -> BLOCKS
+                        2 same_sentence    identical sentence, new pair     -> BLOCKS
+                        3 near_sentence    reworded above the threshold     -> advises
+                        4 same_pair        the same two words elsewhere     -> advises
+Severity 1-2 block because a duplicate sentence is a defect in the content; 3-4 advise because a
+reword may be deliberate and a reused pair is a variety judgement (rule 4.15 draws that line).
+REPORT THE STRONGEST REASON: a reword that also reuses the pair first reported as \`same_pair\`,
+which reads as a variety nudge when it is actually a near duplicate. Severity now drives both the
+label and the ORDER BY so the two cannot disagree.
+A FAILED SCAN NEVER BLOCKS A PROPOSAL. It is a check, not a gate.
+
+**APPROVING.** See rule 4.19 for the reasoning and the conditions. In short: approve_question takes
+ONE review-queue id plus confirm_answer (the correct word, exactly as shown on the card), and
+unapprove_question undoes it by setting the question inactive and returning the row to pending.
+can_approve on pm_mcp_tokens gates both, defaults TRUE, and tokens without it never see the tools.
+THE INTENDED FLOW, and the reason confirm_answer exists:
+    preview_questions (source: pending)   -> play the card, tap the words
+    approve_question(id, confirm_answer)  -> one at a time
+    unapprove_question(question_id)       -> the moment it looks wrong
+Approving straight from a list without previewing defeats the point: a same-length pair or a
+distractor that also fits the sentence is invisible until the question is played.
+
 ### VOCABULARY: why a word must not play both roles
 
 **THE DEFECT.** In the Calmness pack, seven of twelve words are the ANSWER to one question and the
@@ -2976,27 +3009,40 @@ actually deployed and compares, deploying nothing.
    server and read what it actually receives: adding request logging to the shim is what finally
    located this, and each stage of an OAuth flow leaves a row (pm_oauth_clients → codes → tokens),
    so a count of those tables tells you exactly how far the real client got.
-4.19. **The MCP connector must never gain a write path to LIVE QUESTIONS.** The invariant is not "few
-   tools" — it is that pm_review_approve stays the ONLY route a question can take into a pack.
-   propose_questions writes to the queue and nowhere else. Never add a tool that approves, publishes
-   or edits a live question, and never let one write pm_questions directly.
-   REVISED Aug 2026: create_pack and update_pack DO write, and that is acceptable, because a pack is a
-   CONTAINER, not content — a connector-created pack is EMPTY until Albert approves questions into it.
-   preview_questions is READ-ONLY; reject_questions and edit_queued_question WRITE, but only to
-   PENDING queue rows — rejecting removes from the pipeline and an edited row stays pending, so
-   neither can reach a child. An edit is re-validated and refused if it breaks a rule.
-   APPROVE WAS CONSIDERED AND DELIBERATELY NOT BUILT (Aug 2026). Two reasons: pm_mcp_tokens has no
-   role column, so every token is equally powerful and an approve tool would let a partner approve
-   their OWN work in the same conversation; and reviewing content in the chat that just generated it
-   is a materially worse review environment than meeting it cold in the CMS. If approve is ever
-   added it needs: a role flag on tokens, one-at-a-time only, preview mandatory first.
-   review_status also exists but is READ-ONLY. Its visibility is deliberately SHARED (all
-   partners see all submissions) — matching the shared-admin model rather than inventing a boundary
-   the CMS itself does not enforce.
-   The blast radius is still "a queue full of things Albert rejects", plus pack names he can rename.
+4.19. **The MCP connector must never gain a write path to LIVE QUESTIONS — except approval, which
+   was built Aug 2026 under conditions this rule set.** The invariant is that pm_review_approve stays
+   the only route a question takes into a pack. propose_questions writes to the queue and nowhere
+   else. Never let a tool write pm_questions directly.
+   create_pack and update_pack DO write, and that is acceptable, because a pack is a CONTAINER, not
+   content — a connector-created pack is EMPTY until questions are approved into it.
+   preview_questions is READ-ONLY; reject_questions and edit_queued_question write only to PENDING
+   queue rows — rejecting removes from the pipeline and an edited row stays pending, so neither can
+   reach a child. An edit is re-validated and refused if it breaks a rule.
+   APPROVE, BUILT 11 Aug 2026, meeting the three conditions this rule named when it withheld it:
+   • PER-TOKEN. can_approve on pm_mcp_tokens. Tokens without it never SEE approve_question or
+     unapprove_question — tools/list filters them out, because a capability that is absent cannot be
+     attempted or argued with. DEFAULT IS TRUE by Albert's explicit decision: a partner approving is
+     still a HUMAN approving, which is what this invariant protects. The cost, recorded plainly, is
+     that the writer and the reviewer may now be the same person, so the queue is a checkpoint the
+     author passes through rather than a second pair of eyes. Withdraw it per token with one UPDATE;
+     authenticate() re-reads the row every request, so it bites immediately.
+   • ONE AT A TIME, NO BULK. A same-length pair, or a wrong option that also fits the sentence, is
+     invisible in a list and only surfaces when the question is PLAYED. Bulk approval is one tap that
+     puts unexamined questions in front of children. The friction is the feature.
+   • confirm_answer MUST MATCH the correct word, exactly as shown on the card. Statelessly we cannot
+     verify a preview happened; requiring the word back proves the caller SAW the question rather
+     than approving an id off a list. It is a weak proof and an honest one — a speed bump, not
+     security.
+   • AND AN UNDO, which is what makes approval a tap rather than a commitment. unapprove_question
+     sets the question inactive (feeds serve active only, so it leaves the game next poll) and
+     returns the row to pending. Nothing is deleted. It only ever REMOVES content from children —
+     the same reasoning that has always permitted reject_questions.
+   review_status is READ-ONLY and its visibility is deliberately SHARED (all partners see all
+   submissions), matching the shared-admin model rather than inventing a boundary the CMS does not
+   enforce.
    Deliberately still absent: DELETE for packs (destructive — it takes the questions with it), and
-   anything touching a question's live status. If a partner needs those, they belong in the CMS.
-   The validator in the MCP server is a FOURTH copy — it must stay byte-identical to the other three.
+   any edit to a live question's CONTENT. Removing is safe; changing is not.
+
 4.18. **EVERY content-entry path goes through the review queue.** Not just AI generation — imports
    too. There were two ways in and only one was gated, and the ungated one (Bulk Import) is how
    BRIGHT/GENTLE reached children. Do NOT try to detect whether content "came from AI": you usually
