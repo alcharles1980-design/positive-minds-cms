@@ -1099,7 +1099,19 @@ which reads as a variety nudge when it is actually a near duplicate. Severity no
 label and the ORDER BY so the two cannot disagree.
 A FAILED SCAN NEVER BLOCKS A PROPOSAL. It is a check, not a gate.
 
-**APPROVING.** See rule 4.19 for the reasoning and the conditions. In short: approve_question takes
+**CHECKS ARE STORED ON THE QUEUE ROW.** propose_questions writes the whole validation result into
+pm_review_queue.validation — flags, similar_questions, vocabulary_advice — plus checked_at,
+proposed_by, a CHECKS_VERSION and \`checks_run\` NAMING each check that ran. describeChecks() renders
+it in one line for preview_questions and approve_question.
+WHY NAME THE CHECKS: a stored {ok:true, flags:[]} cannot tell a reviewer whether a question was
+checked and clean, or checked by a build that never looked for duplicates. Absence must be
+distinguishable from a pass, so a row below the current CHECKS_VERSION reports "checked by an older
+version" and says to play it rather than trust the silence.
+Reported at approval AFTER the fact, never as a gate: blocking on stale checks would strand every
+question queued before the scanner existed.
+
+**APPROVING.** See rule 4.19 for the reasoning and the conditions. pm_connector_unapprove() is the
+undo — it sets the live question inactive and returns the queue row to pending. In short: approve_question takes
 ONE review-queue id plus confirm_answer (the correct word, exactly as shown on the card), and
 unapprove_question undoes it by setting the question inactive and returning the row to pending.
 can_approve on pm_mcp_tokens gates both, defaults TRUE, and tokens without it never see the tools.
@@ -1539,7 +1551,8 @@ THE LAYOUT, so nothing is a surprise:
                          is the viewer over it plus a scratchpad backed by pm_dev_notes.
   tools/                 workspace.cjs (mirror), split.cjs (pm_cms.jsx -> src/), assemble.cjs
                          (src/ -> pm_cms.jsx), build.cjs (-> index.html), verify.cjs (proves the
-                         round trip is byte-identical)
+                         round trip is byte-identical), typecheck.sh (tsc --noEmit over the edge
+                         functions, config in tsconfig.check.json — see rule 4.48)
   mcp-shim/index.js      the Cloudflare Worker partners connect to; view-app.js is the MCP App UI
   edge-functions/*.ts    mcp, content-api, game-feed, pack-describe, generate-questions
   engine.js runtime.js read.js inspect.js interact.js visual.js   the six test harnesses
@@ -2693,6 +2706,25 @@ there were two 4t, two 4u, two 4r, two 4s, two 4v and two 4d, so "see rule 4t" w
    the edge function didn't, so a question with its own letter_position rendered differently
    in-game than in the CMS.) After any engine edit, diff the two by fetching the deployed edge
    function and comparing, or run a parity test with a question that has its own overrides.
+4.48. **A bundler is not a type checker. \`esbuild\` compiles an undefined identifier without a
+   murmur.** The pre-deploy check for edge functions was
+   \`esbuild edge-functions/mcp.ts --outfile=/tmp/check.js\`, and it passed cleanly on a handler that
+   referenced \`who\` — a variable that exists in the request scope and NOT inside callTool(), whose
+   signature is (db, partner, name, args). It deployed. Every approve call threw
+   "ReferenceError: who is not defined" at the first real request.
+   The second bug was worse because it fails SILENTLY: authenticate() SELECTED can_approve and then
+   returned only { partner, id }, so the flag would have read undefined forever, tools/list would
+   have hidden the tools permanently, and the symptom would have been "the feature just does not
+   appear" with nothing in any log. \`npm run test:types\` (tools/typecheck.sh, tsc --noEmit) found
+   that one on its own, in one line, the moment it existed.
+   esbuild PARSES. It does not resolve identifiers, scopes or types. A check that cannot fail on an
+   undefined variable is not a check, and I leaned on it for a whole session.
+   test:types now runs FIRST in npm test, because it is the cheapest and catches the class of error
+   that reaches production silently. Deno/jsr specifiers cannot resolve under tsc and are filtered;
+   everything else is a genuine finding.
+   AND: the first bug was caught by CALLING THE DEPLOYED ENDPOINT, whose raw JSON-RPC response said
+   "ReferenceError: who is not defined" in plain words. Compiling and assuming would never have
+   found either.
 4.47. **Run the whole test target, not the commands you happen to remember.** This project has SIX
    test suites wired into \`npm test\` — engine, runtime, read, inspect, interact, visual — plus three
    more under mcp-shim/. I learned \`node engine.js\` and \`node runtime.js\` early and ran only those
@@ -3216,8 +3248,12 @@ actually deployed and compares, deploying nothing.
 
 ## Testing capabilities
 
-### THE TEST SUITES — there are SIX, and \`npm test\` runs them all
+### THE TEST SUITES — SEVEN, and \`npm test\` runs them all
 Run \`npm test\`. Do not run the two you remember (rule 4.47).
+  npm run test:types     tools/typecheck.sh — tsc --noEmit over edge-functions/*.ts. RUNS FIRST.
+                         esbuild only PARSES; it compiled "who is not defined" and shipped it
+                         (rule 4.48). This is the only check that catches an undefined identifier
+                         or a property that does not exist on a returned object.
   npm run test:engine    engine.js    1725 cases — maskWord parity across EVERY copy of it
   npm run test:runtime   runtime.js   renders each page headless, fails on any warning or crash
   npm run test:read      read.js      reads each page as a human would: the words, in order
@@ -3239,9 +3275,11 @@ Plus three the npm target does NOT cover, run them by hand after touching mcp-sh
             Watch the SERIOUS count; if it is not 0, something actually broke.
   visual also writes browsable HTML to /home/claude/bt/visual/ — open it rather than guessing.
 
-### Edge functions: compile before you deploy
-A syntax error in edge-functions/*.ts ships silently and the function 500s in production:
-  npx esbuild edge-functions/mcp.ts --outfile=/tmp/check.js --format=esm --target=es2022
+### Edge functions: TYPE-CHECK before you deploy, do not merely compile
+  npm run test:types
+esbuild is NOT sufficient and this is not a style preference — it parses without resolving
+identifiers, so a ReferenceError compiles and deploys (rule 4.48). Use esbuild only as a fast
+syntax smoke test; tsc is what decides.
 
 This environment cannot reach *.supabase.co / *.workers.dev / *.pages.dev / Firebase hosts
 directly from bash. Work around it:
