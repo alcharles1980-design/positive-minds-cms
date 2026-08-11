@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.08.10-31", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.08.10-32", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -2420,6 +2420,10 @@ function ProfileBuilder({ profile, sampleContent, onSave, onClose }) {
               <label style={{ display: "flex", alignItems: "flex-start", gap: 9, marginTop: S.sm + 2, cursor: "pointer" }}>
                 <input type="checkbox" checked={!!spec.expand_levels} onChange={(e) => setSpecField("expand_levels", e.target.checked)} style={{ width: 16, height: 16, accentColor: C.brand, marginTop: 2 }} />
                 <span style={{ fontSize: 13.5, color: C.ink, fontWeight: 600 }}>Expand levels<div style={{ fontSize: 12, color: C.sub, fontWeight: 500, marginTop: 1 }}>Add a <code>levels</code> array to each question with the sentence, blank, and an explicit <code>target</code> (the guess word) + <code>frames</code> map for all 10 levels.</div></span>
+              </label>
+              <label style={{ display: "flex", alignItems: "flex-start", gap: 9, marginTop: S.sm + 2, cursor: "pointer" }}>
+                <input type="checkbox" checked={!!spec.include_stats} onChange={(e) => setSpecField("include_stats", e.target.checked)} style={{ width: 16, height: 16, marginTop: 2, accentColor: C.brand }} />
+                <span style={{ fontSize: 13.5, color: C.ink, fontWeight: 600 }}>Include content status<div style={{ fontSize: 12, color: C.sub, fontWeight: 500, marginTop: 2 }}>Adds a stats block: pack and question counts, review queue totals, and per-pack live/pending/approved figures. Useful for a dashboard reading the same feed as the game. A caller can override this per request with ?stats=1 or ?stats=0.</div></span>
               </label>
               <label style={{ display: "flex", alignItems: "flex-start", gap: 9, marginTop: S.sm + 2, cursor: "pointer" }}>
                 <input type="checkbox" checked={!!spec.include_frames} onChange={(e) => setSpecField("include_frames", e.target.checked)} style={{ width: 16, height: 16, accentColor: C.brand, marginTop: 2 }} />

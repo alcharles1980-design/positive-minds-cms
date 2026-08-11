@@ -267,7 +267,21 @@ Deno.serve(async (req) => {
 
     // AD-HOC NARROWING, same parameter names as content-api so the two endpoints do not disagree
     // about what ?packs means. A profile defines the SHAPE; these choose the SUBSET.
+    // RELEASE GATE — OPT-IN, and off by default on purpose.
+    // released_version tracks what has been PUSHED to a configured sync target (publish2 calls
+    // pm_mark_released after a successful sync). A PULL is not a release, so pulling has never been
+    // gated — and turning that on by default would hide every live question from the game until
+    // somebody pressed a button they have never needed to press.
+    // ?released=1 is for a client that wants only content a human has deliberately released:
+    // released_version >= content_version. Anything edited since the last release drops out until
+    // it is released again.
+    const releasedOnly = ['1', 'true', 'yes'].includes((url.searchParams.get('released') || '').toLowerCase());
     const packSlugs = (url.searchParams.get('packs') || '').split(',').map(x => x.trim()).filter(Boolean);
+    if (releasedOnly) {
+      packs = packs.filter((p: any) => (p.released_version ?? 0) >= (p.content_version ?? 0));
+      const rel = new Set(packs.map((p: any) => p.id));
+      questions = questions.filter((q: any) => rel.has(q.pack_id));
+    }
     if (packSlugs.length) {
       packs = packs.filter((p: any) => packSlugs.includes(p.slug));
       const keep = new Set(packs.map((p: any) => p.id));

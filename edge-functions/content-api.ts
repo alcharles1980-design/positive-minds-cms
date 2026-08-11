@@ -286,6 +286,15 @@ Deno.serve(async (req) => {
       return json({ error: `Unknown ?shape=${shape}. Use nested, keyed or flat.` }, 400);
     }
 
+    // RELEASE GATE — OPT-IN, and off by default on purpose.
+    // released_version tracks what has been PUSHED to a configured sync target (publish2 calls
+    // pm_mark_released after a successful sync). A PULL is not a release, so pulling has never been
+    // gated — and turning that on by default would hide every live question from the game until
+    // somebody pressed a button they have never needed to press.
+    // ?released=1 is for a client that wants only content a human has deliberately released:
+    // released_version >= content_version. Anything edited since the last release drops out until
+    // it is released again.
+    const releasedOnly = ['1', 'true', 'yes'].includes((p.get('released') || '').toLowerCase());
     const packSlugs = (p.get('packs') || '').split(',').map(s => s.trim()).filter(Boolean);
     const levelNums = (p.get('levels') || '').split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
     const sinceRaw = p.get('since');
@@ -300,6 +309,7 @@ Deno.serve(async (req) => {
     // ETag captures the exact request shape (mode + filters) so different queries don't collide.
     const shapeKey = [
       since ? 'inc' : 'full', sinceRaw || '', packSlugs.join('.'), levelNums.join('.'), wantXml ? 'xml' : 'json',
+      releasedOnly ? 'rel' : 'any',
       // Without these two a client that switches ?include or ?shape gets a 304 and keeps rendering
       // the previous shape — a stale-cache bug that would look like the parameter being ignored.
       [...inc].sort().join('+'), shape,
@@ -339,6 +349,7 @@ Deno.serve(async (req) => {
     // ---- Load published content ----
     let packs = await fetchAll(db, 'pm_packs', [['status', 'eq', 'published']]);
     if (packSlugs.length) packs = packs.filter(p => packSlugs.includes(p.slug));
+    if (releasedOnly) packs = packs.filter(p => (p.released_version ?? 0) >= (p.content_version ?? 0));
     const packById: Record<string, any> = {};
     const publishedPackIds = new Set<string>();
     for (const pk of packs) { packById[pk.id] = pk; publishedPackIds.add(pk.id); }
@@ -422,6 +433,7 @@ Deno.serve(async (req) => {
         question_count: questions.length,
         include: [...inc].sort(),
         shape,
+        released_only: releasedOnly,
         filtered: { packs: packSlugs.length ? packSlugs : undefined, levels: levelNums.length ? levelNums : undefined },
       },
       ...(stats ? { stats } : {}),
