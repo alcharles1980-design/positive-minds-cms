@@ -83,7 +83,16 @@ check("headline leads with what needs doing",
   /^12 question\(s\) waiting/.test(o.headline), o.headline);
 check("carries the action menu", Array.isArray(o.what_you_can_do) && o.what_you_can_do.length >= 8,
   o.what_you_can_do.length + " actions");
-check("states the approval invariant", /pm_review_approve/.test(o.what_you_cannot_do));
+// Assert the INVARIANT, not the wording. The old test checked for "pm_review_approve", so it
+// happily kept passing while the sentence around it ("Approve. Nothing written here reaches a
+// child until a human approves it in the CMS") became false — and the assistant read that
+// sentence out as fact while holding the approve tool.
+check("says nothing goes live on its own", /goes live on its own/i.test(o.what_you_cannot_do));
+check("says a HUMAN approves", /human approves/i.test(o.what_you_cannot_do));
+check("does NOT claim approval is impossible here",
+  !/only route|not exposed as a tool|only when a human approves it in the CMS/i.test(o.what_you_cannot_do),
+  o.what_you_cannot_do.slice(0, 60));
+check("the menu offers approval", o.what_you_can_do.some((a) => /approve/i.test(a.do)));
 check("no problems flagged when both legs succeed", o.problems === undefined);
 check("passes the review queue through", o.review_queue.by_pack.focus.pending === 12);
 
@@ -139,7 +148,9 @@ check("it lists what else is possible",
   Array.isArray(r2.also_available.you_can_also) && r2.also_available.you_can_also.length >= 6,
   (r2.also_available.you_can_also || []).length + " capabilities");
 check("it points at the full picture", /overview/.test(r2.also_available.full_picture));
-check("it restates the approval limit", /approves it in the CMS/.test(r2.also_available.cannot));
+check("it restates the limit without denying the capability",
+  /human/i.test(r2.also_available.cannot) && !/only.*in the CMS\.$/.test(r2.also_available.cannot),
+  r2.also_available.cannot.slice(0, 60));
 check("no tool names in the plain-language list",
   !/propose_questions|preview_questions|check_questions/.test(r2.also_available.you_can_also.join(" ")));
 r2 = await callTool("preview_questions");

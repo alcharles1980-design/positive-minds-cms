@@ -522,9 +522,24 @@ async function handleRequest(request, env, ctx) {
               { do: "Sharpen a pack's definition", icon: "\u2699",
                 how: "update_pack",
                 say: "I want to refine the purpose, focus or style of an existing pack." },
+              // Approval is real now. It is listed LAST deliberately: reviewing comes before
+              // approving, and a menu that offers approve first invites approving from a list.
+              { do: "Approve a question into a pack", icon: "\u2714",
+                how: "preview_questions first, then approve_question(id, confirm_answer)",
+                say: "Let me review the questions waiting, one at a time, so I can approve them." },
+              { do: "Undo an approval", icon: "\u21A9",
+                how: "unapprove_question",
+                say: "I want to take back a question I approved." },
             ],
-            what_you_cannot_do: "Approve. Nothing written here reaches a child until a human approves it in the CMS — " +
-              "pm_review_approve is the only route a question takes into a pack, and it is not exposed as a tool.",
+            // WAS: "Approve. Nothing written here reaches a child until a human approves it in the
+            // CMS." That stayed true-sounding and became false the moment approve_question shipped,
+            // and the assistant read it out as fact in a fresh session while holding the tool.
+            // A capability is declared in several places and every one that says NO wins (rule 4.42).
+            what_you_cannot_do: "Nothing you write goes live on its own. A question reaches a child only when a " +
+              "HUMAN approves it — either in the CMS, or here with approve_question after previewing it. " +
+              "There is no bulk approve on purpose: a same-length pair, or a wrong word that also fits the " +
+              "sentence, only shows itself when you PLAY the question. Approving is available to tokens " +
+              "granted it; if you do not see the tool, you do not have it.",
             how_to_show_this: "Give the person a SHORT orientation, not this JSON. In this order:\n" +
               "1. The headline.\n" +
               "2. A bulleted list of the packs that have something in them (live or awaiting) with their " +
@@ -725,9 +740,11 @@ async function handleRequest(request, env, ctx) {
                   "Fix or remove a question already in the queue",
                   "Check progress and see why things were rejected",
                   "Start a new pack, or sharpen an existing one's definition",
+                  "Review and approve a question into a pack, one at a time (and undo it)",
                 ],
                 full_picture: "Call the 'overview' tool for live counts and the complete menu.",
-                cannot: "Nothing reaches a child until a human approves it in the CMS.",
+                cannot: "Nothing goes live on its own — a question reaches a child only when a human " +
+                        "approves it, in the CMS or here after previewing it.",
               };
             }
 
