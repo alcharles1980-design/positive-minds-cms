@@ -9,6 +9,27 @@
 //   • GET ?format=xml              → XML instead of JSON (any of the above)
 //   • GET ?health=1                → liveness probe
 //
+// CHOOSING WHAT YOU PULL:
+//   • GET ?include=a,b,c           → pick the blocks you want. Any of:
+//         packs      pack records (slug, name, description, emoji, colour, difficulty, version)
+//         questions  questions nested inside their pack (implies packs)
+//         levels     the level DEFINITIONS (the ladder itself, so a client can label/render)
+//         variants   the pre-rendered per-level sentence variants on each question. THE HEAVY ONE
+//                    — omit it and the payload shrinks by roughly 10x if you mask client-side.
+//         stats      full CMS content status: pack/question/level counts, review-queue totals,
+//                    and per-pack live/pending/approved/rejected with descriptions and versions
+//         deletions  tombstones (automatic with ?since)
+//     Default (?include absent) = packs,questions,levels,variants — byte-identical to before, so
+//     nothing that already polls this endpoint changes behaviour.
+//   • GET ?include=stats           → status ONLY, no content. Cheap enough to poll for a dashboard.
+//   • GET ?shape=nested|keyed|flat → nested (default, questions inside packs);
+//         keyed = packs as an object keyed by slug, which is what Firebase/Firestore wants;
+//         flat  = one array of questions each carrying its pack, for a plain table or SQL import.
+//
+// THE ETAG COVERS EVERY PARAMETER ABOVE. It must: a 304 is a promise that the body you already
+// have is still correct, and if the key ignored ?include or ?shape we would answer "unchanged" to
+// a client asking a different question.
+//
 // Efficiency: every response carries an ETag (a hash of global_version + query shape).
 // Send it back as `If-None-Match` and unchanged content returns 304 Not Modified (no body).
 //
@@ -252,6 +273,19 @@ Deno.serve(async (req) => {
     }
 
     // ---- Query options (apply to both full + incremental) ----
+    // ---- what to include -------------------------------------------------------------------
+    const DEFAULT_INCLUDE = ['packs', 'questions', 'levels', 'variants'];
+    const rawInclude = (p.get('include') || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+    const inc = new Set(rawInclude.length ? (rawInclude.includes('all')
+        ? ['packs', 'questions', 'levels', 'variants', 'stats', 'deletions']
+        : rawInclude) : DEFAULT_INCLUDE);
+    if (inc.has('questions')) inc.add('packs');     // questions live inside packs
+    if (inc.has('variants'))  inc.add('questions'); // variants hang off questions
+    const shape = (p.get('shape') || 'nested').toLowerCase();
+    if (!['nested', 'keyed', 'flat'].includes(shape)) {
+      return json({ error: `Unknown ?shape=${shape}. Use nested, keyed or flat.` }, 400);
+    }
+
     const packSlugs = (p.get('packs') || '').split(',').map(s => s.trim()).filter(Boolean);
     const levelNums = (p.get('levels') || '').split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
     const sinceRaw = p.get('since');
@@ -266,6 +300,9 @@ Deno.serve(async (req) => {
     // ETag captures the exact request shape (mode + filters) so different queries don't collide.
     const shapeKey = [
       since ? 'inc' : 'full', sinceRaw || '', packSlugs.join('.'), levelNums.join('.'), wantXml ? 'xml' : 'json',
+      // Without these two a client that switches ?include or ?shape gets a 304 and keeps rendering
+      // the previous shape — a stale-cache bug that would look like the parameter being ignored.
+      [...inc].sort().join('+'), shape,
     ].join('|');
     const etag = '"c-' + hash(globalVersion + '|' + shapeKey) + '"';
     // For a FULL (non-incremental) request, a matching ETag means nothing changed → 304.
@@ -273,6 +310,30 @@ Deno.serve(async (req) => {
     // (unchanged global_version ⇒ nothing new since last identical poll).
     if (etagMatches(req.headers.get('if-none-match'), etag)) {
       return new Response(null, { status: 304, headers: { ...cors, ETag: etag } });
+    }
+
+    // ---- stats: answerable without touching content at all ----
+    // Fetched first and independently, so ?include=stats alone never loads a question.
+    let stats: any = null;
+    if (inc.has('stats')) {
+      const { data: st, error: sErr } = await db.rpc('pm_content_stats');
+      if (sErr) return json({ error: 'stats unavailable: ' + sErr.message }, 500);
+      stats = st;
+    }
+    // Nothing else requested? Answer now rather than reading every pack and question to throw away.
+    if (!inc.has('packs') && !inc.has('levels')) {
+      const statsOnly = clean({
+        meta: {
+          service: 'content-api', generated_at: new Date().toISOString(),
+          global_version: globalVersion, global_updated_at: manifestData?.global_updated_at,
+          mode: 'stats', include: [...inc].sort(),
+        },
+        stats,
+      });
+      const so = wantXml ? xmlResp(toXml(statsOnly, 'content')) : json(statsOnly);
+      so.headers.set('ETag', etag);
+      so.headers.set('Cache-Control', 'public, max-age=30');
+      return so;
     }
 
     // ---- Load published content ----
@@ -294,7 +355,11 @@ Deno.serve(async (req) => {
     const ovRows = await fetchAll(db, 'pm_question_levels');
     const ovByQ: Record<string, Record<number, any>> = {};
     for (const r of ovRows) { (ovByQ[r.question_id] ||= {})[r.level] = r; }
-    for (const q of questions) q.levels = buildLevelVariants(q, levels, ovByQ[q.id] || {});
+    // The pre-rendered variants are by far the biggest thing in the payload. Only build them if
+    // asked — a client that masks its own words does not want ~10x the bytes.
+    if (inc.has('variants')) {
+      for (const q of questions) q.levels = buildLevelVariants(q, levels, ovByQ[q.id] || {});
+    }
 
     // ---- INCREMENTAL: narrow to changed rows + gather deletions ----
     let deletions: any[] = [];
@@ -320,8 +385,29 @@ Deno.serve(async (req) => {
 
     const packsOut = packs.map(pk => ({
       ...shapePack(pk),
-      questions: (byPack[pk.id] || []).map(shapeQuestion),
+      ...(inc.has('questions') ? { questions: (byPack[pk.id] || []).map(shapeQuestion) } : {}),
     }));
+
+    // ---- SHAPE ------------------------------------------------------------------------------
+    // nested (default) — packs with their questions inside. Unchanged from before.
+    // keyed           — { "calmness": {...}, "focus": {...} }. Firestore stores documents by key,
+    //                   so a keyed object drops straight in without a client-side reindex.
+    // flat            — one array of questions, each carrying pack_slug/pack_name. For a SQL
+    //                   import or a plain table, where nesting is just something to undo.
+    let packsShaped: any = packsOut;
+    let flatQuestions: any[] | null = null;
+    if (shape === 'keyed') {
+      packsShaped = {};
+      for (const pk of packsOut) packsShaped[pk.slug] = pk;
+    } else if (shape === 'flat') {
+      flatQuestions = [];
+      for (const pk of packsOut) {
+        const { questions: qs, ...packFields } = pk as any;
+        for (const q of (qs || [])) {
+          flatQuestions.push({ pack_slug: packFields.slug, pack_name: packFields.name, ...q });
+        }
+      }
+    }
 
     const payload: any = {
       meta: {
@@ -334,18 +420,23 @@ Deno.serve(async (req) => {
         since: sinceRaw || null,
         pack_count: packsOut.length,
         question_count: questions.length,
+        include: [...inc].sort(),
+        shape,
         filtered: { packs: packSlugs.length ? packSlugs : undefined, levels: levelNums.length ? levelNums : undefined },
       },
+      ...(stats ? { stats } : {}),
       // The level DEFINITIONS themselves (rules), so a client can render/label without guessing.
-      levels: levels.map(l => ({
+      // Omitted entirely when ?include leaves out `levels` — clean() drops undefined keys, but
+      // relying on key ORDER for that would be a trap, so the conditional is explicit.
+      levels: inc.has('levels') ? levels.map(l => ({
         level: l.level, name: l.name, tagline: l.tagline, theme: l.theme, age_hint: l.age_hint,
         hidden_mode: l.hidden_mode, letters_hidden_default: l.letters_hidden_default,
         letter_position: l.letter_position, letter_grouping: l.letter_grouping, color: l.color,
         min_word_len: l.min_word_len, max_word_len: l.max_word_len,
         allow_multiword: l.allow_multiword, vocab_rule: l.vocab_rule,
         updated_at: l.updated_at,
-      })),
-      packs: packsOut,
+      })) : undefined,
+      ...(shape === 'flat' ? { questions: flatQuestions } : { packs: packsShaped }),
       ...(since ? { deletions } : {}),
     };
 
