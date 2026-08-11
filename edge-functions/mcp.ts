@@ -258,7 +258,10 @@ async function authenticate(db: any, req: Request) {
       .update({ last_used_at: new Date().toISOString() }).eq('access_token', token);
   } catch { /* ignore */ }
 
-  return { partner: partner.partner, id: partner.id };
+  // can_approve must come back with the identity, or every approval check silently reads undefined
+  // and the tools never appear. The type checker caught exactly that — the column was selected and
+  // then dropped on the way out.
+  return { partner: partner.partner, id: partner.id, can_approve: !!partner.can_approve };
 }
 
 // The partner's login screen. Deliberately plain — they paste the token you sent them.
@@ -648,7 +651,7 @@ The ONE hard rule about repetition remains: never reproduce an existing question
 sentence AND the same two words. Reusing a sentence with a genuinely different pair is allowed.`;
 
 // ============================================================
-async function callTool(db: any, partner: string, name: string, args: any) {
+async function callTool(db: any, partner: string, name: string, args: any, canApprove = false) {
   // ---- list_packs ----
   if (name === 'list_packs') {
     const { data: packs } = await db.from('pm_packs')
@@ -1309,7 +1312,7 @@ async function callTool(db: any, partner: string, name: string, args: any) {
   //     requiring the answer word back proves they have at least SEEN the question rather than
   //     approving an id read off a list.
   if (name === 'approve_question') {
-    if (!who?.can_approve) {
+    if (!canApprove) {
       return { error: 'This token cannot approve. Approval is granted per token; ask Albert to enable it.' };
     }
     const qid = String(args.id || '').trim();
@@ -1352,7 +1355,7 @@ async function callTool(db: any, partner: string, name: string, args: any) {
   // UNDO. Only ever REMOVES content from children, which is what makes it safe under rule 4.19 —
   // the same reasoning that permits reject_questions.
   if (name === 'unapprove_question') {
-    if (!who?.can_approve) return { error: 'This token cannot approve or unapprove.' };
+    if (!canApprove) return { error: 'This token cannot approve or unapprove.' };
     const qid = String(args.question_id || '').trim();
     if (!qid) return { error: 'Pass question_id — the LIVE question id returned when it was approved.' };
     const { data, error } = await db.rpc('pm_connector_unapprove', {
@@ -1802,7 +1805,7 @@ Deno.serve(async (req) => {
     const name = params?.name;
     const args = params?.arguments || {};
     try {
-      const out = await callTool(db, who.partner, name, args);
+      const out = await callTool(db, who.partner, name, args, !!who.can_approve);
       return rpcOk({
         content: [{ type: 'text', text: JSON.stringify(out, null, 2) }],
         isError: !!(out as any)?.error,

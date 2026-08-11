@@ -1,0 +1,8 @@
+{
+  "//": "Type-check ONLY. esbuild bundles without resolving identifiers, so `who is not defined` compiled cleanly and shipped a ReferenceError to production. tsc catches that; esbuild never will. Deno/jsr specifiers are expected to fail resolution here and are filtered by tools/typecheck.sh.",
+  "compilerOptions": {
+    "noEmit": true, "skipLibCheck": true, "target": "es2022",
+    "module": "esnext", "moduleResolution": "bundler", "types": [], "strict": false
+  },
+  "include": ["edge-functions/*.ts"]
+}
