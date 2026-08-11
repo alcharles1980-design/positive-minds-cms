@@ -14,7 +14,7 @@
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.08.11-35", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.08.11-36", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",

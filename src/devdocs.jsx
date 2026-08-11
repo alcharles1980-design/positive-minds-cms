@@ -726,7 +726,9 @@ asking for it: "write 15 questions for Calmness about bedtime worries". Their Cl
 for the generation — no API key of ours is involved.
 
 **WHY IT IS SAFE, and this matters more than any permission check:** a partner CANNOT reach a child.
-\`pm_review_approve\` is the ONLY path into live content and it requires a human to press Approve. So
+\`pm_review_approve\` is the ONLY path into live content and it requires a HUMAN to approve —
+in the CMS, or via approve_question after previewing (rule 4.19). The gate is the human, not the
+surface. So
 the worst a partner can do — even a compromised one — is fill the review queue with things you reject,
 plus create or rename pack containers. That is the entire blast radius. There is deliberately NO tool
 to DELETE a pack, and none to approve or publish a QUESTION.
@@ -832,7 +834,8 @@ approval time" and is what review_status reports as approved_but_edited_first.
 
 **WHY THIS IS ALL SAFE:** every one of these is PRE-approval. Rejecting only removes something from
 the pipeline. An edited item stays pending. Nothing here can put a word in front of a child —
-pm_review_approve is still the only route, and there is deliberately no tool for it.
+pm_review_approve is still the only route into a pack. Approving THROUGH it from the connector
+became possible Aug 2026 — one at a time, per-token, preview first; see rule 4.19.
 
 ### How the preview is rendered — BOTH paths now work
 
@@ -1059,6 +1062,13 @@ Profiles are edited in the CMS under Publishing → Export profiles (ProfileBuil
 mapping (template->sentence, answer->primaryWord), value transforms, structure, root and questions
 keys, filters, and include_stats.
 
+**\`live\` MEANS WHAT THE FEED MEANS.** The questions block counted active questions regardless of
+whether their PACK was published, so it reported 52 while content-api served 51 — a dashboard would
+have overstated what children can see, and the row it overstated by was a KIND/MEAN scratch question
+in a draft pack. \`live\` is now "active question in a PUBLISHED pack"; \`active_any_pack\` and
+\`not_in_a_live_pack\` are reported alongside so the difference is visible rather than reconciled
+away. Every per-pack entry carries \`reaches_children\`.
+
 **THE STATS BLOCK** (?include=stats, or ?stats=1) is the whole CMS content status in one call,
 backed by pm_content_stats(): pack counts by state, question counts and distinct answer words,
 level count, review-queue totals, and per-pack live/pending/approved/rejected with descriptions and
@@ -1109,6 +1119,15 @@ distinguishable from a pass, so a row below the current CHECKS_VERSION reports "
 version" and says to play it rather than trust the silence.
 Reported at approval AFTER the fact, never as a gate: blocking on stale checks would strand every
 question queued before the scanner existed.
+
+**PROVENANCE.** pm_review_approve takes an optional \`p_actor\`, and the connector passes
+\`connector:<partner>\`. Without it the RPC falls back to the signed-in JWT email, and the connector
+authenticates as the SERVICE ROLE which has none — so every connector approval recorded as 'admin',
+indistinguishable from someone pressing Approve in the CMS. Four questions went live that way on
+11 Aug before this was noticed and are still marked 'admin'; they were deliberately NOT backfilled,
+because guessing at provenance after the fact is the thing the change exists to prevent.
+The question's notes line reads "Proposed by X — approved by Y" rather than asserting a human
+approved without saying which.
 
 **APPROVING.** See rule 4.19 for the reasoning and the conditions. pm_connector_unapprove() is the
 undo — it sets the live question inactive and returns the queue row to pending. In short: approve_question takes
@@ -1329,7 +1348,8 @@ approval time" and is what review_status reports as approved_but_edited_first.
 
 **WHY THIS IS ALL SAFE:** every one of these is PRE-approval. Rejecting only removes something from
 the pipeline. An edited item stays pending. Nothing here can put a word in front of a child —
-pm_review_approve is still the only route, and there is deliberately no tool for it.
+pm_review_approve is still the only route into a pack. Approving THROUGH it from the connector
+became possible Aug 2026 — one at a time, per-token, preview first; see rule 4.19.
 
 ### How the preview is rendered — the MCP Apps route, and what the "dead end" really was
 
@@ -2778,6 +2798,11 @@ there were two 4t, two 4u, two 4r, two 4s, two 4v and two 4d, so "see rule 4t" w
    FIX: content-address it — ui://.../view-<hash of the content>. Change a character, get a new URI,
    which the host cannot mistake for what it holds. Nothing to remember to bump; anything requiring a
    human to bump a version will eventually not be bumped.
+   WHAT REFRESHES WHEN, established by observation rather than assumption — I told Albert a new chat
+   would not pick up new tools and was wrong:
+     tools/list                  refreshed on a NEW CHAT. No disconnect needed.
+     the ui:// view resource     cached per connector, keyed on the URI. Hence the content hash.
+     an already-rendered widget  NEVER re-fetches, for the life of that message.
    AND KEEP SERVING THE OLD ADDRESSES. Content-addressing invalidates the host's cache of the
    RESOURCE — but the host also caches TOOLS/LIST, which is where it reads the URI from, so it will
    keep asking for the hash it saw THERE. Serving only the current hash turned every shim deploy
