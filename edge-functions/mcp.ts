@@ -1275,7 +1275,7 @@ async function callTool(db: any, partner: string, name: string, args: any) {
         checks: describeChecks(r.validation),
       })),
       note: pendingShown
-        ? 'Render these as playable cards. The person can reject any with reject_questions (using the id), or fix one with edit_queued_question. APPROVING is not possible here — that is done in the CMS.' +
+        ? 'Render these as playable cards. The person can reject any with reject_questions (using the id), or fix one with edit_queued_question. To APPROVE one, play it first, then call approve_question with its id and the correct word.' +
           ((pendingTotal ?? 0) > pendingShown ? ` Showing the first ${pendingShown} of ${pendingTotal} still waiting.` : '')
         : 'Nothing is awaiting review. If they wanted to play a pack\'s existing questions, call this again with source:"live" and a pack_slug.',
     };
