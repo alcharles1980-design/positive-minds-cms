@@ -237,6 +237,117 @@ function FeedRow({ profile }) {
   );
 }
 
+// A compact API reference, on the page a developer is already on when they wonder how to pull.
+// Written to answer the question people actually arrive with — "which endpoint, and how do I ask
+// for only what I need" — rather than to enumerate every parameter alphabetically.
+function ApiRow({ param, children, eg }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "minmax(150px,190px) 1fr", gap: S.md, padding: "9px 0", borderTop: `1px solid ${C.line}`, alignItems: "start" }}>
+      <code style={{ fontSize: 12, fontWeight: 700, color: C.brandInk, fontFamily: "ui-monospace,Menlo,monospace", wordBreak: "break-all" }}>{param}</code>
+      <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.55 }}>
+        {children}
+        {eg && <div style={{ marginTop: 4, fontSize: 11.5, color: C.faint, fontFamily: "ui-monospace,Menlo,monospace" }}>{eg}</div>}
+      </div>
+    </div>
+  );
+}
+
+function ApiReference() {
+  const SYNC = `${CFG.url}/functions/v1/content-api`;
+  const FEED = `${CFG.url}/functions/v1/game-feed`;
+  const [tab, setTab] = useState("sync");
+  const Code = ({ children }) => (
+    <code style={{ display: "block", fontSize: 11.5, color: C.ink2, background: C.bg, padding: "9px 11px",
+      borderRadius: R.sm, overflowX: "auto", whiteSpace: "pre", fontFamily: "ui-monospace,Menlo,monospace", marginTop: 6 }}>{children}</code>
+  );
+
+  return (
+    <Channel icon="⚙" title="API reference" desc="Two endpoints. One keeps a backend in step; the other reshapes content for a specific engine.">
+      <div style={{ display: "flex", gap: 6, marginBottom: S.md, flexWrap: "wrap" }}>
+        {[["sync", "content-api — syncing"], ["feed", "game-feed — shaping"], ["recipes", "Recipes"]].map(([id, label]) => (
+          <Btn key={id} size="sm" variant={tab === id ? "primary" : "ghost"} onClick={() => setTab(id)}>{label}</Btn>
+        ))}
+      </div>
+
+      {tab === "sync" && (
+        <div>
+          <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.6, marginBottom: S.sm }}>
+            For the recurring pull that keeps a backend in step. Versioned, incremental, cacheable.
+            Everything below is optional — with no parameters you get all published packs, their
+            active questions, the level definitions, and every pre-rendered level variant.
+          </div>
+          <Code>{SYNC}</Code>
+          <ApiRow param="?manifest=1">Versions only — global version, per-pack versions, counts. Cheap enough to poll on a timer to decide whether a real pull is needed.</ApiRow>
+          <ApiRow param="?since=<iso|epoch>" eg="?since=2026-08-01T00:00:00Z">Only what changed since that moment, plus a <code>deletions</code> array of tombstones so you can remove what was withdrawn.</ApiRow>
+          <ApiRow param="?include=…" eg="?include=packs,questions">Choose blocks: <b>packs</b>, <b>questions</b>, <b>levels</b>, <b>variants</b>, <b>stats</b>, <b>deletions</b>, or <b>all</b>. Omitting <b>variants</b> shrinks the payload roughly 19x (363KB → 19KB) — do that if your client masks its own words.</ApiRow>
+          <ApiRow param="?include=stats">Content status only, no content: pack and question counts, review-queue totals, and per-pack live/pending/approved/rejected with descriptions and versions.</ApiRow>
+          <ApiRow param="?shape=nested|keyed|flat">nested (default) nests questions in packs; <b>keyed</b> returns packs as an object keyed by slug, which is what Firestore wants; <b>flat</b> returns one array of questions each carrying pack_slug.</ApiRow>
+          <ApiRow param="?packs= / ?levels=" eg="?packs=calmness,focus&levels=1,2,3">Narrow to specific packs by slug, or to specific levels in the variant expansion.</ApiRow>
+          <ApiRow param="?released=1">Only content that has been deliberately released (released_version ≥ content_version). Off by default — see the note below.</ApiRow>
+          <ApiRow param="?format=xml">XML instead of JSON, for any of the above.</ApiRow>
+          <div style={{ marginTop: S.md, padding: "10px 12px", background: C.bg, borderRadius: R.sm, fontSize: 12.5, color: C.ink2, lineHeight: 1.6 }}>
+            <b>Use the ETag.</b> Every response carries one. Send it back as <code>If-None-Match</code> and
+            an unchanged pull returns <b>304</b> with no body. The ETag covers every parameter above, so
+            switching <code>include</code> or <code>shape</code> always fetches fresh rather than
+            returning a stale 304 for a different question.
+          </div>
+        </div>
+      )}
+
+      {tab === "feed" && (
+        <div>
+          <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.6, marginBottom: S.sm }}>
+            For when the consumer needs <i>its</i> vocabulary rather than ours. A profile renames every
+            field, transforms values, and picks the structure — edit them under Export profiles.
+          </div>
+          <Code>{FEED}</Code>
+          <ApiRow param="?list=1">Every available profile, with id and description.</ApiRow>
+          <ApiRow param="?profile=<id|name>" eg="?profile=Firebase (nested)">Export in that profile's shape. Defaults to the first built-in.</ApiRow>
+          <ApiRow param="?stats=1 | ?stats=only">Add the content-status block, or return it alone. A profile can set this permanently; the parameter overrides it per request.</ApiRow>
+          <ApiRow param="?packs=" eg="?packs=calmness,focus">Narrow to specific packs — same parameter name as content-api, on purpose.</ApiRow>
+          <ApiRow param="?released=1">Only released content, as above.</ApiRow>
+          <ApiRow param="?format=xml">XML instead of JSON.</ApiRow>
+          <div style={{ marginTop: S.md, padding: "10px 12px", background: C.bg, borderRadius: R.sm, fontSize: 12.5, color: C.ink2, lineHeight: 1.6 }}>
+            <b>Which one do I want?</b> If you are keeping a backend in step, use <b>content-api</b> —
+            only it has versioning, <code>?since</code>, deletions and 304s. If you need field names to
+            match an existing game, use <b>game-feed</b> with a profile. Both read the same content and
+            both can return the same stats block.
+          </div>
+        </div>
+      )}
+
+      {tab === "recipes" && (
+        <div style={{ display: "grid", gap: S.md }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: C.ink }}>Firebase / Firestore</div>
+            <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.55, marginTop: 3 }}>Packs keyed by slug drop straight into a document collection with no client-side reindexing.</div>
+            <Code>{`${SYNC}?shape=keyed&include=packs,questions`}</Code>
+          </div>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: C.ink }}>A game that masks its own words</div>
+            <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.55, marginTop: 3 }}>Skip the pre-rendered variants and carry the level rules instead. About 19x smaller.</div>
+            <Code>{`${SYNC}?include=packs,questions,levels`}</Code>
+          </div>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: C.ink }}>Polling for changes, cheaply</div>
+            <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.55, marginTop: 3 }}>Check the manifest; pull only when global_version moves. Or send your ETag and act on a 200.</div>
+            <Code>{`${SYNC}?manifest=1\n${SYNC}?since=<last successful sync>`}</Code>
+          </div>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: C.ink }}>A status dashboard</div>
+            <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.55, marginTop: 3 }}>Counts and per-pack figures without loading a single question.</div>
+            <Code>{`${SYNC}?include=stats`}</Code>
+          </div>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: C.ink }}>A SQL import or a plain table</div>
+            <Code>{`${SYNC}?shape=flat&include=packs,questions`}</Code>
+          </div>
+        </div>
+      )}
+    </Channel>
+  );
+}
+
 function ChannelsPanel({ profiles }) {
   const [cfg, setCfg] = useState(getPushCfg());
   const [mode, setMode] = useState(cfg.mode || "manual");
@@ -244,6 +355,7 @@ function ChannelsPanel({ profiles }) {
 
   return (
     <div style={{ display: "grid", gap: S.lg }}>
+      <ApiReference />
       {/* Feed */}
       <Channel icon="🔗" title="Pull feed (game fetches on its own)" desc="A stable public URL that returns transformed content. The game backend polls this on its schedule. Most robust — works with any backend.">
         <div style={{ fontSize: 12.5, color: C.sub, marginBottom: 6 }}>Base endpoint:</div>

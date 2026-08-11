@@ -1015,6 +1015,68 @@ Apps — the documented fallback — Claude phrased the verdict itself and could
 sentence being removed. The wording is now also in preview_questions' render note with an explicit
 "do not improvise them". Rule 4.42 applied BEFORE it bit rather than after.
 
+### SYNCING CONTENT OUT: the two APIs, and how to choose
+
+A developer wiring a game or a backend to this CMS needs one decision and then a handful of
+parameters. The decision:
+
+  content-api  — SYNCING. Versioning, ?since incremental, deletions, ETag/304, selectable blocks.
+                 Use it for the recurring pull that keeps something in step with the CMS.
+  game-feed    — SHAPING. A saved profile renames every field and picks the structure, so the
+                 consumer gets ITS vocabulary rather than ours. Use it when field names must match
+                 an engine you do not control.
+Both read the same content, both return the same stats block, and both live at
+\`{SUPABASE_URL}/functions/v1/<name>\`. Auth is OPTIONAL: set the CONTENT_API_KEY secret to require
+\`X-API-Key\` (or ?key=); unset, the endpoints are public and read-only over published content.
+
+**content-api parameters**
+  ?manifest=1            versions and counts only — poll this to decide whether to pull at all
+  ?since=<iso|epoch>     only what changed, plus a deletions array of tombstones
+  ?include=…             packs, questions, levels, variants, stats, deletions, or all
+  ?shape=                nested (default) | keyed (packs keyed by slug) | flat (one question array)
+  ?packs= ?levels=       narrow by pack slug, or narrow the variant expansion to certain levels
+  ?released=1            only released content (see the gate below)
+  ?format=xml            XML instead of JSON
+
+**THE BIG ONE IS \`variants\`.** The pre-rendered per-level sentences dominate the payload:
+    default (with variants)     363,038 bytes
+    ?include=packs,questions     18,811 bytes     — about 19x smaller
+Include them if the client renders what it is given. Omit them and take \`levels\` instead if the
+client masks its own words — but then its masking MUST match maskWord exactly, which is the parity
+invariant in rule 4.4, and getting it wrong shows a child two correct answers.
+
+**USE THE ETAG.** Every response carries one; send it back as If-None-Match and an unchanged pull is
+a 304 with no body. The key covers every parameter, including include, shape and released — so
+switching any of them refetches instead of returning a stale 304 for a different question.
+
+**game-feed parameters**
+  ?list=1                available profiles
+  ?profile=<id|name>     export in that shape (default: first built-in)
+  ?stats=1 | ?stats=only add the status block, or return it alone
+  ?packs=                narrow — deliberately the SAME parameter name as content-api
+  ?released=1 ?format=xml
+Profiles are edited in the CMS under Publishing → Export profiles (ProfileBuilder): per-field
+mapping (template->sentence, answer->primaryWord), value transforms, structure, root and questions
+keys, filters, and include_stats.
+
+**THE STATS BLOCK** (?include=stats, or ?stats=1) is the whole CMS content status in one call,
+backed by pm_content_stats(): pack counts by state, question counts and distinct answer words,
+level count, review-queue totals, and per-pack live/pending/approved/rejected with descriptions and
+versions. Cheap enough for a dashboard to poll, and it short-circuits before loading any content.
+
+**THE RELEASE GATE — off by default, and know why before you turn it on.**
+\`released_version\` tracks what has been PUSHED to a configured sync target; publish2 calls
+pm_mark_released after a successful Firebase sync or import. A PULL is not a release, so pulls have
+never been gated. ?released=1 opts in: only packs where released_version >= content_version.
+Today that returns NOTHING, because no push target has ever run — every pack has released_version 0.
+If you want the gate in a pull model you must also arrange to release, or the game starves.
+
+**WHAT A CONSUMER SHOULD ACTUALLY DO**, in order:
+  1. Poll ?manifest=1 (or send your ETag). If global_version has not moved, stop.
+  2. Pull ?since=<your last successful sync>. Apply packs/questions, then apply deletions.
+  3. Store the new global_version and the ETag against your sync record.
+  4. Never assume a 200 means changed — check the version. Never assume 304 means broken.
+
 ### VOCABULARY: why a word must not play both roles
 
 **THE DEFECT.** In the Calmness pack, seven of twelve words are the ANSWER to one question and the
@@ -1568,6 +1630,9 @@ EDGE FUNCTIONS — the state before 10 Aug
   sentence has a caveat in it and cannot be made unconditional.
 
 TEMPORARY THINGS STILL IN PLACE (remove when convenient)
+- The SYNC API is documented for developers in two places, kept in step: the CMS itself
+  (Publishing -> Channels & sync -> API reference, with per-endpoint parameter tables and copyable
+  recipes) and the SYNCING CONTENT OUT section of this document. Change one, change the other.
 - pm_connector_log records every connector request (capped at 2000 rows, self-pruning). KEEP IT. It
   is the thing that made connection failures readable, and it settled in one query what four hours
   of theorising could not. See THE CONNECTOR LOG section for how to read it.
@@ -3532,6 +3597,17 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    Hash the view itself so nobody has to remember to bump anything. Keep serving any older URI so a
    live session does not break. And know that an already-rendered widget NEVER re-fetches: scrollback
    is not a current view.
+   THE SYNC API IS TWO ENDPOINTS, and keep them distinct: one for SYNCING (versions, ?since
+   incremental, deletions, ETag/304, selectable blocks) and one for SHAPING (saved profiles that
+   rename fields and choose structure for a specific engine). Give the sync one ?include= so a
+   caller takes only the blocks it needs — the pre-rendered level variants are ~19x the rest of the
+   payload, so a client that masks its own words must be able to decline them. Give it
+   ?shape=nested|keyed|flat, because a keyed object is what Firestore wants and a flat array is what
+   a SQL import wants. PUT EVERY PARAMETER IN THE ETAG KEY: a 304 promises the body the client holds
+   is still correct, and a key that ignores ?include or ?shape answers "unchanged" to a client asking
+   a different question.
+   Expose the CMS's own status through the same API (counts, review-queue totals, per-pack figures)
+   from ONE database function, so a dashboard and the game cannot get different numbers.
    LOG EVERY REQUEST IN A WRAPPER around the whole handler, not per-branch: discovery probes, CORS
    preflight and error paths answer early, and those are exactly the requests you need when a client
    appears to do nothing. Record the phase, method, status, whether credentials were present, the

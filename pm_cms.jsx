@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.08.10-32", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.08.11-33", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -2963,6 +2963,117 @@ function FeedRow({ profile }) {
   );
 }
 
+// A compact API reference, on the page a developer is already on when they wonder how to pull.
+// Written to answer the question people actually arrive with — "which endpoint, and how do I ask
+// for only what I need" — rather than to enumerate every parameter alphabetically.
+function ApiRow({ param, children, eg }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "minmax(150px,190px) 1fr", gap: S.md, padding: "9px 0", borderTop: `1px solid ${C.line}`, alignItems: "start" }}>
+      <code style={{ fontSize: 12, fontWeight: 700, color: C.brandInk, fontFamily: "ui-monospace,Menlo,monospace", wordBreak: "break-all" }}>{param}</code>
+      <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.55 }}>
+        {children}
+        {eg && <div style={{ marginTop: 4, fontSize: 11.5, color: C.faint, fontFamily: "ui-monospace,Menlo,monospace" }}>{eg}</div>}
+      </div>
+    </div>
+  );
+}
+
+function ApiReference() {
+  const SYNC = `${CFG.url}/functions/v1/content-api`;
+  const FEED = `${CFG.url}/functions/v1/game-feed`;
+  const [tab, setTab] = useState("sync");
+  const Code = ({ children }) => (
+    <code style={{ display: "block", fontSize: 11.5, color: C.ink2, background: C.bg, padding: "9px 11px",
+      borderRadius: R.sm, overflowX: "auto", whiteSpace: "pre", fontFamily: "ui-monospace,Menlo,monospace", marginTop: 6 }}>{children}</code>
+  );
+
+  return (
+    <Channel icon="⚙" title="API reference" desc="Two endpoints. One keeps a backend in step; the other reshapes content for a specific engine.">
+      <div style={{ display: "flex", gap: 6, marginBottom: S.md, flexWrap: "wrap" }}>
+        {[["sync", "content-api — syncing"], ["feed", "game-feed — shaping"], ["recipes", "Recipes"]].map(([id, label]) => (
+          <Btn key={id} size="sm" variant={tab === id ? "primary" : "ghost"} onClick={() => setTab(id)}>{label}</Btn>
+        ))}
+      </div>
+
+      {tab === "sync" && (
+        <div>
+          <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.6, marginBottom: S.sm }}>
+            For the recurring pull that keeps a backend in step. Versioned, incremental, cacheable.
+            Everything below is optional — with no parameters you get all published packs, their
+            active questions, the level definitions, and every pre-rendered level variant.
+          </div>
+          <Code>{SYNC}</Code>
+          <ApiRow param="?manifest=1">Versions only — global version, per-pack versions, counts. Cheap enough to poll on a timer to decide whether a real pull is needed.</ApiRow>
+          <ApiRow param="?since=<iso|epoch>" eg="?since=2026-08-01T00:00:00Z">Only what changed since that moment, plus a <code>deletions</code> array of tombstones so you can remove what was withdrawn.</ApiRow>
+          <ApiRow param="?include=…" eg="?include=packs,questions">Choose blocks: <b>packs</b>, <b>questions</b>, <b>levels</b>, <b>variants</b>, <b>stats</b>, <b>deletions</b>, or <b>all</b>. Omitting <b>variants</b> shrinks the payload roughly 19x (363KB → 19KB) — do that if your client masks its own words.</ApiRow>
+          <ApiRow param="?include=stats">Content status only, no content: pack and question counts, review-queue totals, and per-pack live/pending/approved/rejected with descriptions and versions.</ApiRow>
+          <ApiRow param="?shape=nested|keyed|flat">nested (default) nests questions in packs; <b>keyed</b> returns packs as an object keyed by slug, which is what Firestore wants; <b>flat</b> returns one array of questions each carrying pack_slug.</ApiRow>
+          <ApiRow param="?packs= / ?levels=" eg="?packs=calmness,focus&levels=1,2,3">Narrow to specific packs by slug, or to specific levels in the variant expansion.</ApiRow>
+          <ApiRow param="?released=1">Only content that has been deliberately released (released_version ≥ content_version). Off by default — see the note below.</ApiRow>
+          <ApiRow param="?format=xml">XML instead of JSON, for any of the above.</ApiRow>
+          <div style={{ marginTop: S.md, padding: "10px 12px", background: C.bg, borderRadius: R.sm, fontSize: 12.5, color: C.ink2, lineHeight: 1.6 }}>
+            <b>Use the ETag.</b> Every response carries one. Send it back as <code>If-None-Match</code> and
+            an unchanged pull returns <b>304</b> with no body. The ETag covers every parameter above, so
+            switching <code>include</code> or <code>shape</code> always fetches fresh rather than
+            returning a stale 304 for a different question.
+          </div>
+        </div>
+      )}
+
+      {tab === "feed" && (
+        <div>
+          <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.6, marginBottom: S.sm }}>
+            For when the consumer needs <i>its</i> vocabulary rather than ours. A profile renames every
+            field, transforms values, and picks the structure — edit them under Export profiles.
+          </div>
+          <Code>{FEED}</Code>
+          <ApiRow param="?list=1">Every available profile, with id and description.</ApiRow>
+          <ApiRow param="?profile=<id|name>" eg="?profile=Firebase (nested)">Export in that profile's shape. Defaults to the first built-in.</ApiRow>
+          <ApiRow param="?stats=1 | ?stats=only">Add the content-status block, or return it alone. A profile can set this permanently; the parameter overrides it per request.</ApiRow>
+          <ApiRow param="?packs=" eg="?packs=calmness,focus">Narrow to specific packs — same parameter name as content-api, on purpose.</ApiRow>
+          <ApiRow param="?released=1">Only released content, as above.</ApiRow>
+          <ApiRow param="?format=xml">XML instead of JSON.</ApiRow>
+          <div style={{ marginTop: S.md, padding: "10px 12px", background: C.bg, borderRadius: R.sm, fontSize: 12.5, color: C.ink2, lineHeight: 1.6 }}>
+            <b>Which one do I want?</b> If you are keeping a backend in step, use <b>content-api</b> —
+            only it has versioning, <code>?since</code>, deletions and 304s. If you need field names to
+            match an existing game, use <b>game-feed</b> with a profile. Both read the same content and
+            both can return the same stats block.
+          </div>
+        </div>
+      )}
+
+      {tab === "recipes" && (
+        <div style={{ display: "grid", gap: S.md }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: C.ink }}>Firebase / Firestore</div>
+            <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.55, marginTop: 3 }}>Packs keyed by slug drop straight into a document collection with no client-side reindexing.</div>
+            <Code>{`${SYNC}?shape=keyed&include=packs,questions`}</Code>
+          </div>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: C.ink }}>A game that masks its own words</div>
+            <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.55, marginTop: 3 }}>Skip the pre-rendered variants and carry the level rules instead. About 19x smaller.</div>
+            <Code>{`${SYNC}?include=packs,questions,levels`}</Code>
+          </div>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: C.ink }}>Polling for changes, cheaply</div>
+            <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.55, marginTop: 3 }}>Check the manifest; pull only when global_version moves. Or send your ETag and act on a 200.</div>
+            <Code>{`${SYNC}?manifest=1\n${SYNC}?since=<last successful sync>`}</Code>
+          </div>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: C.ink }}>A status dashboard</div>
+            <div style={{ fontSize: 12.5, color: C.ink2, lineHeight: 1.55, marginTop: 3 }}>Counts and per-pack figures without loading a single question.</div>
+            <Code>{`${SYNC}?include=stats`}</Code>
+          </div>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: C.ink }}>A SQL import or a plain table</div>
+            <Code>{`${SYNC}?shape=flat&include=packs,questions`}</Code>
+          </div>
+        </div>
+      )}
+    </Channel>
+  );
+}
+
 function ChannelsPanel({ profiles }) {
   const [cfg, setCfg] = useState(getPushCfg());
   const [mode, setMode] = useState(cfg.mode || "manual");
@@ -2970,6 +3081,7 @@ function ChannelsPanel({ profiles }) {
 
   return (
     <div style={{ display: "grid", gap: S.lg }}>
+      <ApiReference />
       {/* Feed */}
       <Channel icon="🔗" title="Pull feed (game fetches on its own)" desc="A stable public URL that returns transformed content. The game backend polls this on its schedule. Most robust — works with any backend.">
         <div style={{ fontSize: 12.5, color: C.sub, marginBottom: 6 }}>Base endpoint:</div>
@@ -4070,6 +4182,68 @@ Apps — the documented fallback — Claude phrased the verdict itself and could
 sentence being removed. The wording is now also in preview_questions' render note with an explicit
 "do not improvise them". Rule 4.42 applied BEFORE it bit rather than after.
 
+### SYNCING CONTENT OUT: the two APIs, and how to choose
+
+A developer wiring a game or a backend to this CMS needs one decision and then a handful of
+parameters. The decision:
+
+  content-api  — SYNCING. Versioning, ?since incremental, deletions, ETag/304, selectable blocks.
+                 Use it for the recurring pull that keeps something in step with the CMS.
+  game-feed    — SHAPING. A saved profile renames every field and picks the structure, so the
+                 consumer gets ITS vocabulary rather than ours. Use it when field names must match
+                 an engine you do not control.
+Both read the same content, both return the same stats block, and both live at
+\`{SUPABASE_URL}/functions/v1/<name>\`. Auth is OPTIONAL: set the CONTENT_API_KEY secret to require
+\`X-API-Key\` (or ?key=); unset, the endpoints are public and read-only over published content.
+
+**content-api parameters**
+  ?manifest=1            versions and counts only — poll this to decide whether to pull at all
+  ?since=<iso|epoch>     only what changed, plus a deletions array of tombstones
+  ?include=…             packs, questions, levels, variants, stats, deletions, or all
+  ?shape=                nested (default) | keyed (packs keyed by slug) | flat (one question array)
+  ?packs= ?levels=       narrow by pack slug, or narrow the variant expansion to certain levels
+  ?released=1            only released content (see the gate below)
+  ?format=xml            XML instead of JSON
+
+**THE BIG ONE IS \`variants\`.** The pre-rendered per-level sentences dominate the payload:
+    default (with variants)     363,038 bytes
+    ?include=packs,questions     18,811 bytes     — about 19x smaller
+Include them if the client renders what it is given. Omit them and take \`levels\` instead if the
+client masks its own words — but then its masking MUST match maskWord exactly, which is the parity
+invariant in rule 4.4, and getting it wrong shows a child two correct answers.
+
+**USE THE ETAG.** Every response carries one; send it back as If-None-Match and an unchanged pull is
+a 304 with no body. The key covers every parameter, including include, shape and released — so
+switching any of them refetches instead of returning a stale 304 for a different question.
+
+**game-feed parameters**
+  ?list=1                available profiles
+  ?profile=<id|name>     export in that shape (default: first built-in)
+  ?stats=1 | ?stats=only add the status block, or return it alone
+  ?packs=                narrow — deliberately the SAME parameter name as content-api
+  ?released=1 ?format=xml
+Profiles are edited in the CMS under Publishing → Export profiles (ProfileBuilder): per-field
+mapping (template->sentence, answer->primaryWord), value transforms, structure, root and questions
+keys, filters, and include_stats.
+
+**THE STATS BLOCK** (?include=stats, or ?stats=1) is the whole CMS content status in one call,
+backed by pm_content_stats(): pack counts by state, question counts and distinct answer words,
+level count, review-queue totals, and per-pack live/pending/approved/rejected with descriptions and
+versions. Cheap enough for a dashboard to poll, and it short-circuits before loading any content.
+
+**THE RELEASE GATE — off by default, and know why before you turn it on.**
+\`released_version\` tracks what has been PUSHED to a configured sync target; publish2 calls
+pm_mark_released after a successful Firebase sync or import. A PULL is not a release, so pulls have
+never been gated. ?released=1 opts in: only packs where released_version >= content_version.
+Today that returns NOTHING, because no push target has ever run — every pack has released_version 0.
+If you want the gate in a pull model you must also arrange to release, or the game starves.
+
+**WHAT A CONSUMER SHOULD ACTUALLY DO**, in order:
+  1. Poll ?manifest=1 (or send your ETag). If global_version has not moved, stop.
+  2. Pull ?since=<your last successful sync>. Apply packs/questions, then apply deletions.
+  3. Store the new global_version and the ETag against your sync record.
+  4. Never assume a 200 means changed — check the version. Never assume 304 means broken.
+
 ### VOCABULARY: why a word must not play both roles
 
 **THE DEFECT.** In the Calmness pack, seven of twelve words are the ANSWER to one question and the
@@ -4623,6 +4797,9 @@ EDGE FUNCTIONS — the state before 10 Aug
   sentence has a caveat in it and cannot be made unconditional.
 
 TEMPORARY THINGS STILL IN PLACE (remove when convenient)
+- The SYNC API is documented for developers in two places, kept in step: the CMS itself
+  (Publishing -> Channels & sync -> API reference, with per-endpoint parameter tables and copyable
+  recipes) and the SYNCING CONTENT OUT section of this document. Change one, change the other.
 - pm_connector_log records every connector request (capped at 2000 rows, self-pruning). KEEP IT. It
   is the thing that made connection failures readable, and it settled in one query what four hours
   of theorising could not. See THE CONNECTOR LOG section for how to read it.
@@ -6587,6 +6764,17 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    Hash the view itself so nobody has to remember to bump anything. Keep serving any older URI so a
    live session does not break. And know that an already-rendered widget NEVER re-fetches: scrollback
    is not a current view.
+   THE SYNC API IS TWO ENDPOINTS, and keep them distinct: one for SYNCING (versions, ?since
+   incremental, deletions, ETag/304, selectable blocks) and one for SHAPING (saved profiles that
+   rename fields and choose structure for a specific engine). Give the sync one ?include= so a
+   caller takes only the blocks it needs — the pre-rendered level variants are ~19x the rest of the
+   payload, so a client that masks its own words must be able to decline them. Give it
+   ?shape=nested|keyed|flat, because a keyed object is what Firestore wants and a flat array is what
+   a SQL import wants. PUT EVERY PARAMETER IN THE ETAG KEY: a 304 promises the body the client holds
+   is still correct, and a key that ignores ?include or ?shape answers "unchanged" to a client asking
+   a different question.
+   Expose the CMS's own status through the same API (counts, review-queue totals, per-pack figures)
+   from ONE database function, so a dashboard and the game cannot get different numbers.
    LOG EVERY REQUEST IN A WRAPPER around the whole handler, not per-branch: discovery probes, CORS
    preflight and error paths answer early, and those are exactly the requests you need when a client
    appears to do nothing. Record the phase, method, status, whether credentials were present, the
