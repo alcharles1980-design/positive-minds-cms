@@ -906,13 +906,23 @@ async function callTool(db: any, partner: string, name: string, args: any) {
     }
 
     // propose_questions: write to the REVIEW QUEUE. Never to a pack.
+    // WHAT WAS CHECKED, not just whether it passed. A stored {ok:true, flags:[]} cannot tell a
+    // reviewer whether the question was checked and clean, or checked by an older build that never
+    // looked for duplicates — and that difference is the whole question at the moment of approving.
+    // Naming the checks makes absence distinguishable from a pass.
     const { data: res, error } = await db.rpc('pm_review_enqueue', {
       p_pack_id: pack.id,
       p_items: checked.map(c => ({
         template: c.q.template,
         answer: c.q.answer,
         alt_answer: c.q.alt_answer,
-        validation: c.result,
+        validation: {
+          ...c.result,
+          checked_at: new Date().toISOString(),
+          checks_version: CHECKS_VERSION,
+          checks_run: ['engine', 'ambiguity', 'duplicates', 'vocabulary'],
+          proposed_by: partner,
+        },
       })),
       p_source: `partner:${partner}`,     // so Albert knows whose work he is reviewing
       p_target_level: pack.level ?? null,
