@@ -36,6 +36,43 @@
 
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 
+// Bump when the SET of checks changes, not when a check's internals change. A reviewer needs to know
+// which questions were examined for duplicates AT ALL; v2 is the first that was.
+const CHECKS_VERSION = 2;
+
+// Turn a stored validation blob into something a person can act on in one line.
+// The important distinction is NOT pass/fail — it is CHECKED vs NEVER CHECKED FOR THAT. A row
+// written before duplicate scanning existed has no flags and is not therefore clean.
+function describeChecks(v: any) {
+  if (!v || typeof v !== 'object') {
+    return { status: 'not recorded', detail: 'No checks were stored with this question. Play it before approving.' };
+  }
+  const ver = v.checks_version ?? 1;
+  const ran: string[] = Array.isArray(v.checks_run) ? v.checks_run : ['engine'];
+  const notes: string[] = [];
+  if (Array.isArray(v.flags) && v.flags.length) {
+    notes.push(...v.flags.map((f: any) => f.detail || f.code));
+  }
+  if (Array.isArray(v.similar_questions) && v.similar_questions.length) {
+    notes.push(`${v.similar_questions.length} similar question(s) already exist — see resembles.`);
+  }
+  if (Array.isArray(v.vocabulary_advice) && v.vocabulary_advice.length) {
+    notes.push(...v.vocabulary_advice);
+  }
+  const stale = ver < CHECKS_VERSION;
+  return {
+    status: notes.length ? 'checked, with notes' : (stale ? 'checked by an older version' : 'checked, clean'),
+    checked_at: v.checked_at ?? null,
+    checks_run: ran,
+    stale_checks: stale || undefined,
+    stale_note: stale
+      ? `These checks are from version ${ver}; the current set is ${CHECKS_VERSION}. Duplicate scanning ` +
+        `may not have run on this question — treat "clean" with caution and play it.`
+      : undefined,
+    notes: notes.length ? notes : undefined,
+  };
+}
+
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 
@@ -1211,7 +1248,7 @@ async function callTool(db: any, partner: string, name: string, args: any) {
     const { count: pendingTotal } = await qCount;
 
     const qq = db.from('pm_review_queue')
-      .select('id,pack_id,template,answer,alt_answer,provider,frame_slots,created_at')
+      .select('id,pack_id,template,answer,alt_answer,provider,frame_slots,created_at,validation')
       .eq('status', 'pending').order('created_at').limit(PREVIEW_CAP);
     if (packFilter) qq.eq('pack_id', packFilter.id);
     const { data: queued } = await qq;
@@ -1233,6 +1270,9 @@ async function callTool(db: any, partner: string, name: string, args: any) {
         by: (r.provider || 'unknown').replace(/^partner:/, ''),
         ...renderOne(r),
         has_slot_variations: !!(r.frame_slots && Object.keys(r.frame_slots).length),
+        // What was checked when this was proposed — so approving is a decision with evidence
+        // rather than a leap of faith about a conversation that happened hours ago.
+        checks: describeChecks(r.validation),
       })),
       note: pendingShown
         ? 'Render these as playable cards. The person can reject any with reject_questions (using the id), or fix one with edit_queued_question. APPROVING is not possible here — that is done in the CMS.' +
@@ -1283,11 +1323,16 @@ async function callTool(db: any, partner: string, name: string, args: any) {
       };
     }
 
+    const checks = describeChecks(row.validation);
+
     const { data: res, error } = await db.rpc('pm_review_approve', { p_id: qid });
     if (error) return { error: String(error.message || error) };
 
     return {
       approved: `"${row.template}" — ${row.answer} / ${row.alt_answer}`,
+      // Reported AFTER the fact deliberately: this is a record of what the approval rested on, not a
+      // gate. Blocking on stale checks would strand every question queued before the scanner existed.
+      checks_at_approval: checks,
       question_id: (res as any)?.question_id ?? null,
       note: 'This is now LIVE and the game will pick it up on its next sync. If that was a mistake, ' +
             'unapprove_question puts it back in the queue and removes it from the game.',
