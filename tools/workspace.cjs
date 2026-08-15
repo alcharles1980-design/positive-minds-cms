@@ -27,13 +27,21 @@ fs.mkdirSync(path.join(REPO, 'generate-questions'), { recursive: true });
 link(path.join(REPO, 'edge-functions/content-api.ts'),        path.join(REPO, 'content-api/index.ts'));
 link(path.join(REPO, 'edge-functions/generate-questions.ts'), path.join(REPO, 'generate-questions/index.ts'));
 
-// the absolute /home/claude/bt/v2 the other five scripts hardcode
-fs.mkdirSync(BT, { recursive: true });
-link(path.join(REPO, 'src'), path.join(BT, 'v2'));
-link(path.join(REPO, 'node_modules'), path.join(BT, 'node_modules'));
+// Legacy compatibility: older copies of the tests hardcoded /home/claude/bt/v2.
+// Current tests resolve from this repo, so this mirror should not make setup fail
+// on macOS where /home is a protected system path.
+let mirroredAbsolute = false;
+try {
+  fs.mkdirSync(BT, { recursive: true });
+  link(path.join(REPO, 'src'), path.join(BT, 'v2'));
+  link(path.join(REPO, 'node_modules'), path.join(BT, 'node_modules'));
+  mirroredAbsolute = true;
+} catch (e) {
+  console.warn(`skipped legacy /home/claude/bt mirror: ${e.code || e.message}`);
+}
 
 console.log('workspace mirrored:');
 console.log('  v2/                      -> src/            (20 modules)');
 console.log('  content-api/index.ts     -> edge-functions/content-api.ts');
 console.log('  generate-questions/…     -> edge-functions/generate-questions.ts');
-console.log('  /home/claude/bt/v2       -> src/            (absolute path the scripts hardcode)');
+if (mirroredAbsolute) console.log('  /home/claude/bt/v2       -> src/            (legacy absolute mirror)');

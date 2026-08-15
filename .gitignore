@@ -9,3 +9,6 @@ package-lock.json
 /content-api/
 /generate-questions/
 src/node_modules
+
+# local IDE metadata
+.idea/

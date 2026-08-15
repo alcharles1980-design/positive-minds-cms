@@ -1,10 +1,11 @@
 // READ the pages the way a human would see them — the actual words, in order, with structure.
 // This is the closest I can get to "looking at it": I read what it says.
-const React=require('react');const {renderToString}=require('react-dom/server');const fs=require('fs');
+const React=require('react');const {renderToString}=require('react-dom/server');const fs=require('fs');const path=require('path');
 const babel=require('@babel/core');const vm=require('vm');const {JSDOM,VirtualConsole}=require('jsdom');
 const vc=new VirtualConsole();
 const order=['core.jsx','primitives.jsx','realtime.jsx','engine.jsx','firebase.jsx','editors.jsx','features.jsx','publish1.jsx','firebase2.jsx','publish2.jsx','devdocs.jsx','devnotes.jsx','levels.jsx','aireview.jsx','aisettings.jsx','generator.jsx','views1.jsx','views2.jsx','shell.jsx'];
-let src='';for(const f of order){let c=fs.readFileSync('/home/claude/bt/v2/'+f,'utf8');c=c.replace(/^import[^\n]*\n/gm,'').replace(/export default function App/,'function App').replace(/^export\s+/gm,'');src+='\n'+c;}
+const SRC_DIR=path.join(__dirname,'src');
+let src='';for(const f of order){let c=fs.readFileSync(path.join(SRC_DIR,f),'utf8');c=c.replace(/^import[^\n]*\n/gm,'').replace(/export default function App/,'function App').replace(/^export\s+/gm,'');src+='\n'+c;}
 src=src.replace(/const useAsync = \(fn, deps = \[\]\) => \{[\s\S]*?\n\};/,`const useAsync=(fn,deps=[])=>({loading:false,error:null,data:(globalThis.__D__&&globalThis.__D__.length)?globalThis.__D__.shift():null,reload:()=>{},setData:()=>{}});`);
 const compiled=babel.transformSync('const {useState,useEffect,useMemo,useCallback,useRef}=React;\n'+src,{presets:[['@babel/preset-react',{runtime:'classic'}]]}).code;
 const el=()=>({style:{},setAttribute(){},getAttribute:()=>null,appendChild(){},classList:{add(){},remove(){},toggle(){}},addEventListener(){},removeEventListener(){},focus(){},select(){}});
