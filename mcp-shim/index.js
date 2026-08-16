@@ -530,16 +530,26 @@ async function handleRequest(request, env, ctx) {
               { do: "Undo an approval", icon: "\u21A9",
                 how: "unapprove_question",
                 say: "I want to take back a question I approved." },
+              // Sending is listed LAST because it IS last: approving puts a question in a pack, and
+              // the game does not have it until a sync. Leaving this off the menu is what made the
+              // line below claim approval was the final gate (rule 4.42, second time).
+              { do: "Send approved content to the game", icon: "\u2601",
+                how: "sync_to_game with no confirm (dry run), show the packs and counts, then only " +
+                     "sync_to_game(confirm: true) once the person has said yes",
+                say: "I want to send the approved content to the game." },
             ],
             // WAS: "Approve. Nothing written here reaches a child until a human approves it in the
             // CMS." That stayed true-sounding and became false the moment approve_question shipped,
             // and the assistant read it out as fact in a fresh session while holding the tool.
             // A capability is declared in several places and every one that says NO wins (rule 4.42).
-            what_you_cannot_do: "Nothing you write goes live on its own. A question reaches a child only when a " +
-              "HUMAN approves it — either in the CMS, or here with approve_question after previewing it. " +
-              "There is no bulk approve on purpose: a same-length pair, or a wrong word that also fits the " +
-              "sentence, only shows itself when you PLAY the question. Approving is available to tokens " +
-              "granted it; if you do not see the tool, you do not have it.",
+            what_you_cannot_do: "Nothing you write goes live on its own, and there are TWO human gates, not " +
+              "one. First a HUMAN approves the question — in the CMS, or here with approve_question after " +
+              "previewing it. Approving puts it in a PACK; the game still does not have it. It reaches a " +
+              "child only when the content is SENT, and sync_to_game sends nothing until a person has seen " +
+              "the dry run and said yes. There is no bulk approve on purpose: a same-length pair, or a " +
+              "wrong word that also fits the sentence, only shows itself when you PLAY the question. " +
+              "Approving and sending are available only to tokens granted them; if you do not see the " +
+              "tool, you do not have it.",
             how_to_show_this: "Give the person a SHORT orientation, not this JSON. In this order:\n" +
               "1. The headline.\n" +
               "2. A bulleted list of the packs that have something in them (live or awaiting) with their " +
@@ -741,10 +751,11 @@ async function handleRequest(request, env, ctx) {
                   "Check progress and see why things were rejected",
                   "Start a new pack, or sharpen an existing one's definition",
                   "Review and approve a question into a pack, one at a time (and undo it)",
+                  "Send approved content to the game, once a human has seen what would go and said yes",
                 ],
                 full_picture: "Call the 'overview' tool for live counts and the complete menu.",
-                cannot: "Nothing goes live on its own — a question reaches a child only when a human " +
-                        "approves it, in the CMS or here after previewing it.",
+                cannot: "Nothing goes live on its own. A human approves the question, which puts it in " +
+                        "a pack — and a human then has to send it before the game has it.",
               };
             }
 

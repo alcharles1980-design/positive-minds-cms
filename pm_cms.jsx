@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.08.16-39", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.08.16-40", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -4006,6 +4006,7 @@ not a Supabase JWT). Speaks JSON-RPC 2.0 over Streamable HTTP. Ten tools, delibe
 | \`preview_questions\` | renders drafts/queue as a CHILD sees them | — |
 | \`reject_questions\` | — | rejects PENDING queue items (never approves) |
 | \`edit_queued_question\` | — | fixes a PENDING queue item, re-validated |
+| \`sync_to_game\` | dry run reports what would be sent | with confirm:true, SENDS to the game (gated on can_approve) |
 
 **PACK CREATION (Aug 2026).** \`create_pack\` mirrors the CMS's own PackEditor + \`savePack\` convention
 EXACTLY — same \`slugify\` as core.jsx, \`sort_order = count + 1\`, emoji default 💪, the same pack-detail
@@ -4883,7 +4884,7 @@ THE LAYOUT, so nothing is a surprise:
 
 ### 3. Read, in this order
   1. This file's section 11z — current state, what is temporary, what is outstanding.
-  2. DOC_CLAUDE_MD's golden rules, 4.1-4.45. EVERY ONE EXISTS BECAUSE SOMETHING BROKE. They are
+  2. DOC_CLAUDE_MD's golden rules, 4.1-4.49. EVERY ONE EXISTS BECAUSE SOMETHING BROKE. They are
      numbered oldest-first, listed newest-first, and none is theoretical.
   3. DOC_BUILD_PROMPT if you need to understand a subsystem you have not touched.
 
@@ -4964,13 +4965,33 @@ LIVE AND WORKING
   issued 16 Jul, shows calls_made 0, last_used_at null and no OAuth token — on the data, Steve
   has never completed a connection. Confirm before treating him as an active contributor, and
   before clearing anything of his in the token cleanup.
-- Ten tools: list_packs, get_pack_content, check_questions, propose_questions, create_pack,
-  update_pack, review_status, preview_questions, reject_questions, edit_queued_question.
+- Twelve tools + overview: list_packs, get_pack_content, check_questions, propose_questions,
+  create_pack, update_pack, review_status, preview_questions, reject_questions,
+  edit_queued_question, and gated on can_approve: approve_question, unapprove_question,
+  sync_to_game. \`overview\` is injected by the shim, not the function.
 - Connector URL is the Cloudflare shim: positive-minds-mcp.alcharles1980.workers.dev/mcp
   (NOT the Supabase function — see the discovery-shim section).
 - Preview returns question-first data; the assistant renders it as a playable artifact.
 - Site deploys automatically on push (wrangler deploy, Worker + static assets from ./public).
   The shim deploys automatically on push to mcp-shim/.
+
+SYNC — TWO PATHS, ONE TRANSFORM (16 Aug)
+- Content reaching a child is now TWO gates, not one: approve puts a question in a PACK, a sync puts
+  the pack in the GAME. Any text claiming approval is the last gate is wrong (rule 4.49).
+- Three ways to sync, all funnelling through \`runFirebaseSync\`/\`build()\` so they cannot drift:
+  the CMS Browser sync button (original), the CMS Server sync button, and \`sync_to_game\` in the
+  connector. The latter two both call \`game-feed?sync=<target>\`; \`&dry=1\` reports and writes
+  nothing. Every server attempt is logged to pm_sync_log (channel \`server\`), failures included.
+- \`sync_to_game\` is gated on \`can_approve\`. THIS IS UNRESOLVED, NOT DECIDED: an earlier proposal
+  for a separate \`can_sync\` column (default false, on the reasoning that approving content and
+  shipping it to production are different decisions) was never overridden — the code just reused
+  can_approve. Decide deliberately. If splitting: \`alter table pm_mcp_tokens add column can_sync
+  boolean not null default false\`, gate the declaration in tools/list the way approve_question is.
+- \`?sync_status=1\` exists on content-api ONLY. It was never written into game-feed, despite a
+  handover claiming "both API endpoints". Add it or stop claiming it.
+- test-pack IS PUBLISHED, so it is in the feed and in the sync set. It contains KIND/MEAN — equal
+  lengths, a negative word, and an unfinished template ("I am {blank} when …"). Earlier notes said
+  Test Pack was draft and therefore contained; that was wrong. Resolve before the next sync.
 
 EDGE FUNCTIONS — CI IS LIVE AND HAS DEPLOYED. deployed == repo is now true by construction.
 - First real deploy 10 Aug, and it immediately fixed a production defect: the mcp function had been
@@ -6030,6 +6051,19 @@ there were two 4t, two 4u, two 4r, two 4s, two 4v and two 4d, so "see rule 4t" w
    the edge function didn't, so a question with its own letter_position rendered differently
    in-game than in the CMS.) After any engine edit, diff the two by fetching the deployed edge
    function and comparing, or run a parity test with a question that has its own overrides.
+4.49. **A capability list is an advertisement too, and it is the one nobody re-reads.** \`sync_to_game\`
+   shipped in the mcp function, deployed, and gated correctly — and was still invisible, because the
+   shim's \`what_you_can_do\` menu and its \`also_available\` fallback are HAND-MAINTAINED lists that
+   nobody updated. Worse, both carried a \`cannot\` line saying a question reaches a child "only when a
+   human approves it", which sync made FALSE: approving puts a question in a pack, sending is what
+   puts it in the game. The comment above \`what_you_cannot_do\` already recorded this exact failure
+   happening with \`approve_question\` — and it happened again anyway, in the same field, one feature
+   later. This is 4.42 with the advertisement being prose rather than protocol metadata, and prose is
+   worse: nothing type-checks it and no client errors when it lies.
+   WHEN ADDING A TOOL, GREP THE SHIM FOR EVERY HAND-WRITTEN LIST AND EVERY "cannot"/"only"/"nothing"
+   SENTENCE, and update them in the same commit as the tool. If a claim describes the LAST gate before
+   a child, treat changing it as part of the feature, not documentation.
+
 4.48. **A bundler is not a type checker. \`esbuild\` compiles an undefined identifier without a
    murmur.** The pre-deploy check for edge functions was
    \`esbuild edge-functions/mcp.ts --outfile=/tmp/check.js\`, and it passed cleanly on a handler that
@@ -6967,6 +7001,11 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    summary), check_questions (validate drafts, SAVE NOTHING — this is what lets Claude fix its own
    mistakes before proposing), propose_questions (writes to the REVIEW QUEUE ONLY), create_pack and
    update_pack, review_status, preview_questions, reject_questions and edit_queued_question.
+   THEN sync_to_game, and only once the sync route exists on game-feed: it calls that ONE route
+   rather than re-implementing the transform, takes no destination of its own, and dry-runs unless
+   confirm:true. Whatever gates it, update every hand-written capability list and every "nothing
+   goes live until…" sentence in the SHIM in the same pass — approval stops being the last gate
+   the moment this tool exists (rule 4.49).
    BUILD preview_questions EARLY — it renders a question exactly as a child sees it, at every level,
    mirroring the CMS's own level-variant builder. It is the only way a human can judge TONE, which is
    the thing every automated check misses and the reason the human reviewer exists at all.
