@@ -221,6 +221,45 @@ const build = (spec: any, packs: any[], byPack: Record<string, any[]>) => {
   return spec.root_key ? { [spec.root_key]: arr } : arr;
 };
 
+// ============================================================================================
+// SERVER-SIDE SYNC (?sync=<target name|id>)
+//
+// The CMS's Sync button runs in the BROWSER: it reads content, reshapes it and posts to the target.
+// That works, but only while a page is open — so nothing else can trigger a sync, and a connector
+// cannot. This is the same job done on the server, so the CMS and Claude can both reach it.
+//
+// DELIBERATELY NOT A PORT OF THE TRANSFORM. build() above is the same function game-feed already
+// uses for every export, so the shape sent to Firebase is by construction the shape a caller would
+// get from ?profile=. A second copy of the builder is exactly the drift this codebase has a rule
+// about (4.42) — the only NEW code here is the write planner and the HTTP writers.
+//
+// THE BROWSER PATH IS UNTOUCHED. Both exist; the browser one keeps working while this is proven.
+const resolvePath = (tpl: string, ctx: Record<string, any>) =>
+  (tpl || '').replace(/\{(\w+)\}/g, (_, k) => ctx[k] ?? '');
+
+const planWrites = (cfg: any, packs: any[], byPack: Record<string, any[]>, spec: any) => {
+  const layout = cfg.layout || 'per-pack';
+  const ops: any[] = [];
+  if (layout === 'single-doc') {
+    ops.push({ path: cfg.singlePath || 'content/all', data: build(spec, packs, byPack) });
+  } else if (layout === 'per-question') {
+    for (const p of packs) {
+      for (const q of byPack[p.id] || []) {
+        const one = build({ ...spec, structure: 'flat', root_key: null }, [p], { [p.id]: [q] });
+        ops.push({ path: resolvePath(cfg.questionPath || 'questions/{id}', { id: q.id, slug: p.slug }),
+                   data: Array.isArray(one) ? one[0] : one });
+      }
+    }
+  } else {
+    for (const p of packs) {
+      const one = build({ ...spec, structure: 'nested', root_key: null }, [p], byPack);
+      ops.push({ path: resolvePath(cfg.packPath || 'packs/{slug}', { slug: p.slug, id: p.id }),
+                 data: Array.isArray(one) ? one[0] : one });
+    }
+  }
+  return ops;
+};
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   const url = new URL(req.url);
@@ -323,6 +362,84 @@ Deno.serve(async (req) => {
           pack_count: packList.length, question_count: questions.length,
         }),
       }).catch(() => {});
+    }
+
+    // ---- SERVER SYNC ----------------------------------------------------------------------
+    // ?sync=<target name or id>. Reads the target from pm_sync_targets, applies ITS pack filter,
+    // writes, and records the push in pm_sync_log so the history looks identical to a browser sync.
+    // ?dry=1 reports what WOULD be sent and writes nothing — the safe way to check a target.
+    const syncTarget = url.searchParams.get('sync');
+    if (syncTarget) {
+      const dry = ['1','true','yes'].includes((url.searchParams.get('dry') || '').toLowerCase());
+      const { data: targets } = await db.from('pm_sync_targets').select('*');
+      const t = (targets || []).find((x: any) => x.id === syncTarget || x.name === syncTarget);
+      if (!t) {
+        return json({ error: `No sync target called "${syncTarget}".`,
+                      available: (targets || []).map((x: any) => x.name) }, 404);
+      }
+      const cfg = t.config || {};
+
+      // THE TARGET'S OWN PACK FILTER, honoured here exactly as the browser honours it. A caller
+      // cannot widen it: the target's configuration is the authority on where its content goes.
+      const wanted: string[] = Array.isArray(cfg.packs) ? cfg.packs.filter(Boolean) : [];
+      let syncPacks = packList;
+      if (wanted.length) syncPacks = packList.filter((p: any) => wanted.includes(p.slug));
+      const syncByPack: Record<string, any[]> = {};
+      for (const p of syncPacks) syncByPack[p.id] = byPack[p.id] || [];
+      const qCount = syncPacks.reduce((n: number, p: any) => n + (syncByPack[p.id] || []).length, 0);
+
+      const ops = planWrites(cfg, syncPacks, syncByPack, spec);
+      const fullBody = build(spec, syncPacks, syncByPack);
+      const summary = {
+        target: t.name, profile: profile.name, mode: cfg.mode || 'rtdb',
+        packs: syncPacks.map((p: any) => p.slug), pack_count: syncPacks.length,
+        question_count: qCount, writes: ops.length,
+        filtered_by_target: wanted.length ? wanted : null,
+      };
+
+      if (dry) return json({ ok: true, dry_run: true, would_send: summary,
+                             note: 'Nothing was written. Drop ?dry=1 to send it.' });
+
+      let written = 0; let err: string | null = null;
+      try {
+        if (cfg.mode === 'cloudfn') {
+          if (!cfg.fnUrl) throw new Error('This target has no Cloud Function URL.');
+          const headers: Record<string,string> = { 'Content-Type': 'application/json' };
+          if (cfg.secret) headers[cfg.header || 'Authorization'] = cfg.secret;
+          const r = await fetch(cfg.fnUrl, { method: 'POST', headers,
+            body: JSON.stringify({ writes: ops, payload: { meta: summary, ...(fullBody as any) } }) });
+          if (!r.ok) throw new Error(`Cloud Function returned HTTP ${r.status}`);
+          written = ops.length;
+        } else if (cfg.mode === 'rtdb') {
+          const base = (cfg.rtdbUrl || '').replace(/\/$/, '');
+          if (!base) throw new Error('This target has no Realtime Database URL.');
+          for (const op of ops) {
+            const u = `${base}/${op.path}.json${cfg.secret ? `?auth=${encodeURIComponent(cfg.secret)}` : ''}`;
+            const r = await fetch(u, { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                                       body: JSON.stringify(op.data) });
+            if (!r.ok) throw new Error(`Realtime DB returned HTTP ${r.status} for ${op.path}`);
+            written++;
+          }
+        } else {
+          throw new Error(`Server sync does not support mode "${cfg.mode}" yet. Use the browser Sync button for this target.`);
+        }
+      } catch (e) {
+        err = String((e as any)?.message || e);
+      }
+
+      // Record it either way — a failed sync is exactly what you want in the history.
+      await db.from('pm_sync_log').insert({
+        direction: 'push', channel: 'server', mode: 'server',
+        profile_id: profile.id, profile_name: profile.name, target_name: t.name,
+        status: err ? 'error' : 'success',
+        pack_count: syncPacks.length, question_count: qCount,
+        packs: wanted.length ? wanted : null,
+        detail: err ? err : `${written} writes → ${t.name} (server)`,
+      });
+
+      if (err) return json({ ok: false, error: err, attempted: summary }, 502);
+      return json({ ok: true, sent: summary, writes: written,
+                    note: 'Sent from the server. The CMS Sync history will show this as a server sync.' });
     }
 
     const payload = spec.include_meta === false ? body : {
