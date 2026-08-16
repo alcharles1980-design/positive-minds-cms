@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.08.16-41", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.08.16-42", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -4497,6 +4497,13 @@ is per-call and stores nothing.
   is NOT re-implemented in the CMS or the connector — both pass the list through untouched.
 - AN UNKNOWN SLUG IS AN ERROR, not a silent drop. \`?packs=calmnes\` returning 200 having sent nothing
   is indistinguishable from success, and the absence is discovered later by a child.
+- \`?packs=\` WAS ALREADY A FEED FILTER on game-feed and narrows the pack list well before the sync
+  block runs. The names collide because they mean the same thing to a caller, which is fine — but it
+  means the sync block's own intersection is belt-and-braces, not the thing doing the work, and
+  \`allowed\` MUST be computed from \`packUniverse\` (captured before that filter). Computing it from
+  the filtered list made it a subset of what was asked for, so a typo answered with an EMPTY list of
+  alternatives while looking correct in every other respect. Found by running the typo, not by
+  reading the diff.
 - \`pm_sync_log.packs\` records what ACTUALLY went, not the target's filter. Partial sends make the
   history unreadable otherwise.
 - markReleased(null) IS SKIPPED on a partial send. It clears pending-changes on every published

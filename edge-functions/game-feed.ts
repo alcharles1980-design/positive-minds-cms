@@ -321,6 +321,10 @@ Deno.serve(async (req) => {
       const rel = new Set(packs.map((p: any) => p.id));
       questions = questions.filter((q: any) => rel.has(q.pack_id));
     }
+    // Every pack this profile COULD serve, captured before ?packs= narrows it. The sync route needs
+    // this to tell a caller what its options were — computing "allowed" from the already-filtered
+    // list makes it a subset of what was asked for, so a typo reports an empty list of alternatives.
+    const packUniverse: string[] = packs.map((p: any) => p.slug);
     if (packSlugs.length) {
       packs = packs.filter((p: any) => packSlugs.includes(p.slug));
       const keep = new Set(packs.map((p: any) => p.id));
@@ -391,9 +395,12 @@ Deno.serve(async (req) => {
       // An unrecognised slug is an ERROR, not silently dropped: "sync just calmnes" quietly sending
       // nothing looks identical to a successful sync, and the missing content is found later by a
       // child. Fail loudly and say what was allowed.
-      const allowed: string[] = wanted.length ? wanted : packList.map((p: any) => p.slug);
-      const asked: string[] = (url.searchParams.get('packs') || '')
-        .split(',').map((x) => x.trim()).filter(Boolean);
+      // NOTE THE PARAMETER IS SHARED. ?packs= already existed as a FEED filter (line ~318) and has
+      // narrowed packList before we get here, so the intersection below is belt-and-braces rather
+      // than the thing doing the work. That is fine — both mean the same thing to a caller — but
+      // `allowed` MUST come from the unfiltered universe or it degenerates into a copy of `asked`.
+      const allowed: string[] = wanted.length ? wanted : packUniverse;
+      const asked: string[] = packSlugs;
       const unknown = asked.filter((x) => !allowed.includes(x));
       if (asked.length && unknown.length) {
         return json({ error: `Not sendable to this target: ${unknown.join(', ')}.`,
@@ -403,6 +410,8 @@ Deno.serve(async (req) => {
       }
       const effective: string[] = asked.length ? allowed.filter((x) => asked.includes(x)) : allowed;
 
+      // Rebuild from `packs` (post-feed-filter, pre-empty-drop) intersected with effective, so the
+      // result is identical whether the narrowing arrived via the feed filter or is applied here.
       const syncPacks = packList.filter((p: any) => effective.includes(p.slug));
       if (!syncPacks.length) {
         return json({ error: 'That selection matches no packs, so there is nothing to send.',
