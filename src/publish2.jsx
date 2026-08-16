@@ -245,7 +245,7 @@ function PublishHub({ packs, onSynced }) {
                           <Btn variant="ghost" size="sm" onClick={() => setEditTarget(t)}>Edit</Btn>
                           <Btn size="sm" disabled={busyId === t.id || !prof} onClick={() => syncTarget(t)} icon="🔥" title="Runs in this browser tab. The original path.">{busyId === t.id ? "Syncing…" : "Browser sync"}</Btn>
                           <Btn size="sm" variant="ghost" disabled={busyId === t.id || !prof} onClick={() => serverSync(t)} icon="☁" title="Runs on the server. Same result, and this is the one Claude can trigger.">{busyId === t.id ? "Syncing…" : "Server sync"}</Btn>
-                          <Btn size="sm" variant="ghost" disabled={busyId === t.id || !prof} onClick={() => setPick({ target: t, sel: [] })} icon="◧" title="Send only some packs, this once. Does not change the target.">Some packs…</Btn>
+                          <Btn size="sm" variant="ghost" disabled={busyId === t.id || !prof || t.config?.mode === "cloudfn"} onClick={() => setPick({ target: t, sel: [] })} icon="◧" title={t.config?.mode === "cloudfn" ? "Disabled for Cloud Function targets until it is confirmed whether the function replaces the whole tree or only the documents it is given. If it replaces the root, sending one pack would remove all the others." : "Send only some packs, this once. Does not change the target."}>Some packs…</Btn>
                           <Btn variant="danger" size="sm" onClick={() => deleteTarget(t)}>Delete</Btn>
                         </div>
                       </div>

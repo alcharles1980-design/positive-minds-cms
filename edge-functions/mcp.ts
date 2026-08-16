@@ -1229,15 +1229,22 @@ async function callTool(db: any, partner: string, name: string, args: any, canAp
     // Timestamped BEFORE the delete so the note lands only on the tombstone this delete creates. A
     // question that was deactivated first ALREADY has a tombstone from the status trigger, and an
     // unscoped update would back-date this reason onto that earlier, unrelated event.
-    const beforeDelete = new Date(Date.now() - 1000).toISOString();
     const { error: delErr } = await db.from('pm_questions').delete().eq('id', q.id);
     if (delErr) return { error: `Delete failed: ${delErr.message}` };
 
     // The tombstone is written by a BEFORE DELETE trigger, not here — so it cannot be forgotten by a
     // caller and cannot differ between the CMS and the connector.
+    // Scoped by ID, not by a timestamp window. A question deactivated first — which the guard
+    // REQUIRES — already has a tombstone from the status trigger, so this must hit only the newest
+    // row. The previous attempt compared against the edge function's own clock, which silently
+    // dropped the note whenever the database clock sat a second the other side of it.
     if (args.reason) {
-      await db.from('pm_deletions').update({ note: String(args.reason).slice(0, 500) })
-        .eq('entity_id', q.id).eq('entity_type', 'question').gte('deleted_at', beforeDelete);
+      const { data: newest } = await db.from('pm_deletions')
+        .select('id').eq('entity_id', q.id).eq('entity_type', 'question')
+        .order('deleted_at', { ascending: false }).limit(1).maybeSingle();
+      if (newest) {
+        await db.from('pm_deletions').update({ note: String(args.reason).slice(0, 500) }).eq('id', newest.id);
+      }
     }
     return {
       deleted: true,
@@ -1389,13 +1396,20 @@ async function callTool(db: any, partner: string, name: string, args: any, canAp
 
     const seriousD = dedupe(serious), minorD = dedupe(minor), advisoryD = dedupe(advisory);
 
+    // by_issue MUST be counted from the deduped findings. Built from the raw ones it reported
+    // cross_role: 12 in the same response as advisory: 6 — two numbers for one thing, disagreeing,
+    // in a tool whose entire job is telling someone how much is wrong. The dedupe pass fixed the
+    // list and the totals and left this behind.
+    const byIssue: Record<string, number> = {};
+    for (const f of [...seriousD, ...minorD, ...advisoryD]) byIssue[f.issue] = (byIssue[f.issue] || 0) + 1;
+
     return {
       scanned: { scope, packs: packs.length, questions: questions.length,
                  note: scope === 'live'
                    ? 'Active questions in published packs — what a child can actually reach.'
                    : 'Every saved question, including inactive ones and unpublished packs.' },
       totals: { serious: seriousD.length, minor: minorD.length, advisory: advisoryD.length },
-      by_issue: byCode,
+      by_issue: byIssue,
       serious: trim(seriousD),
       ...(includeMinor ? { minor: trim(minorD) } : { minor_count_only: minorD.length }),
       ...(includeAdvisory ? { advisory: trim(advisoryD) } : { advisory_count_only: advisoryD.length }),

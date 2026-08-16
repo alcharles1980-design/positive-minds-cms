@@ -734,7 +734,7 @@ plus create or rename pack containers. That is the entire blast radius. There is
 to DELETE a pack, and none to approve or publish a QUESTION.
 
 **The server:** edge function \`mcp\` (verify_jwt=FALSE — partners authenticate with their own token,
-not a Supabase JWT). Speaks JSON-RPC 2.0 over Streamable HTTP. Ten tools, deliberately narrow:
+not a Supabase JWT). Speaks JSON-RPC 2.0 over Streamable HTTP. Sixteen tools, deliberately narrow:
 | Tool | Reads | Writes |
 |---|---|---|
 | \`list_packs\` | packs (published + draft) w/ per-pack stats, level rules, the brief | — |
@@ -1733,10 +1733,12 @@ LIVE AND WORKING
   issued 16 Jul, shows calls_made 0, last_used_at null and no OAuth token — on the data, Steve
   has never completed a connection. Confirm before treating him as an active contributor, and
   before clearing anything of his in the token cleanup.
-- Twelve tools + overview: list_packs, get_pack_content, check_questions, propose_questions,
-  create_pack, update_pack, review_status, preview_questions, reject_questions,
-  edit_queued_question, and gated on can_approve: approve_question, unapprove_question,
-  sync_to_game. \`overview\` is injected by the shim, not the function.
+- Sixteen tools + overview. Ungated: list_packs, get_pack_content, check_questions,
+  propose_questions, create_pack, update_pack, review_status, preview_questions,
+  reject_questions, edit_queued_question, audit_content. Gated on can_approve:
+  approve_question, unapprove_question, sync_to_game, delete_question, delete_pack.
+  \`overview\` is injected by the shim, not the function. IF YOU ADD A TOOL, THIS COUNT AND THIS
+  LIST ARE BOTH HAND-MAINTAINED — they were stale within a day of being written (4.49).
 - Connector URL is the Cloudflare shim: positive-minds-mcp.alcharles1980.workers.dev/mcp
   (NOT the Supabase function — see the discovery-shim section).
 - Preview returns question-first data; the assistant renders it as a playable artifact.
@@ -1746,6 +1748,16 @@ LIVE AND WORKING
 SYNC — TWO PATHS, ONE TRANSFORM (16 Aug)
 - Content reaching a child is now TWO gates, not one: approve puts a question in a PACK, a sync puts
   the pack in the GAME. Any text claiming approval is the last gate is wrong (rule 4.49).
+PARTIAL SEND IS DISABLED FOR CLOUD FUNCTION TARGETS (16 Aug)
+- The "Some packs…" picker is greyed out when \`config.mode === 'cloudfn'\`, because a cloudfn target
+  hands the whole \`payload\` to a function we do not control, and payload is built from ONLY the
+  packs being sent. If that function replaces at the ROOT, sending one pack removes the other
+  fourteen. If it replaces per-document, the picker is safe.
+- WHICH IT DOES IS NOT CONFIRMED, so the guard REFUSES rather than warns. Re-enable it by deciding
+  the question, not by removing the check. If root-replace: send the FULL payload always and narrow
+  only the \`writes\` list.
+- The full-send path is unaffected either way and is the one to use meanwhile.
+
 DELETION FROM THE CONNECTOR (16 Aug)
 - \`delete_question\` and \`delete_pack\`. Both permanent, both one at a time, both gated on can_approve.
 - \`delete_question\` REFUSES while the question is active. Deactivate, look, then delete. A refusal
@@ -1778,7 +1790,11 @@ DELETION FROM THE CONNECTOR (16 Aug)
   split should probably cover deletion too.
 
 - \`audit_content\` (16 Aug) scans SAVED questions and lists defects, tiered serious/minor/advisory.
-  It calls the SAME \`validateQuestion\` that check_questions calls — a second validator would drift
+  It calls the SAME \`validateQuestion\` that check_questions calls — with ONE deliberate difference:
+  audit passes \`targetLevel: q.level ?? pack.level\`, check_questions passes \`pack.level\`. A question
+  carrying its own level should be judged at that level, but it does mean audit can report a length
+  finding on a question check_questions passed. Known and intended; do not "fix" one to match the
+  other without deciding which is right. — a second validator would drift
   and then the two would disagree about what a defect is, which is worse than not auditing. Scope
   defaults to \`live\` (active questions in published packs) because that is where a defect does harm.
   Read-only and ungated: looking for problems is not a privileged action.
