@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.08.11-36", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.08.16-37", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -1285,16 +1285,39 @@ const runFirebaseSync = async (target, profile) => {
   const cfg = target.config || {};
   const content = await fetchAllContent(profile.spec.filters || {}, { expandLevels: !!profile.spec.expand_levels });
   const spec = { ...profile.spec, __name: profile.name };
-  const ops = planWrites(cfg, content.packs, content.byPack, buildOutput, spec);
-  const fullBody = buildOutput(spec, content.packs, content.byPack, "id");
-  const fullPayload = withMeta(spec, fullBody, { packs: content.packs.length, questions: content.questionCount });
+
+  // PER-TARGET PACK FILTER. cfg.packs is a list of slugs; empty or absent means EVERYTHING, which
+  // keeps every existing target behaving exactly as before.
+  // Filtered HERE, at the single choke point, rather than inside planWrites — every layout
+  // (per-pack, per-question, single-doc) and every writer (rtdb, firestore, cloudfn) goes through
+  // this function, so one filter cannot disagree with another.
+  // NOTE what this does NOT do: it never deletes. Removing a pack from the list stops SENDING it;
+  // whatever was already written to Firebase stays there until something removes it. That is the
+  // safe default — a sync that silently deletes remote content because a filter changed would be a
+  // far worse surprise than a stale document.
+  const wanted = Array.isArray(cfg.packs) ? cfg.packs.filter(Boolean) : [];
+  let packs = content.packs;
+  let byPack = content.byPack;
+  if (wanted.length) {
+    packs = content.packs.filter((p) => wanted.includes(p.slug));
+    byPack = {};
+    for (const p of packs) byPack[p.id] = content.byPack[p.id] || [];
+  }
+  const questionCount = packs.reduce((n, p) => n + (byPack[p.id] || []).length, 0);
+
+  const ops = planWrites(cfg, packs, byPack, buildOutput, spec);
+  const fullBody = buildOutput(spec, packs, byPack, "id");
+  const fullPayload = withMeta(spec, fullBody, { packs: packs.length, questions: questionCount });
 
   let result;
   if (cfg.mode === "firestore") result = await fbWriters.firestore(cfg, ops);
   else if (cfg.mode === "cloudfn") result = await fbWriters.cloudFn(cfg, ops, fullPayload);
   else result = await fbWriters.rtdb(cfg, ops);
 
-  return { ...result, packCount: content.packs.length, questionCount: content.questionCount, opCount: ops.length };
+  // Report what was ACTUALLY sent, not what exists. Returning content.packs.length here would log
+  // "57 questions" after sending 13, and the sync history would quietly lie about every filtered run.
+  return { ...result, packCount: packs.length, questionCount, opCount: ops.length,
+           filteredPacks: wanted.length ? wanted : null };
 };
 
 const db_targets = {
@@ -2638,6 +2661,44 @@ function FirebaseTargetEditor({ target, profiles, sampleContent, onSave, onClose
           </div>
         )}
 
+        {/* WHICH PACKS. Optional per target: none selected = send everything, which is what every
+            existing target does and must keep doing. Useful for a staging destination that takes one
+            pack, or for a faster sync when only one pack changed. */}
+        <Field label="Which packs" hint="Leave all unticked to send everything. Ticking some sends only those — useful for a staging target, or a quick sync after changing one pack.">
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {(sampleContent.packs || []).map((p) => {
+              const on = Array.isArray(cfg.packs) && cfg.packs.includes(p.slug);
+              return (
+                <button
+                  key={p.slug}
+                  type="button"
+                  onClick={() => {
+                    const cur = Array.isArray(cfg.packs) ? cfg.packs : [];
+                    set("packs", on ? cur.filter((x) => x !== p.slug) : [...cur, p.slug]);
+                  }}
+                  style={{
+                    padding: "6px 11px", borderRadius: 999, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                    fontFamily: "inherit",
+                    border: `1px solid ${on ? C.brand : C.line}`,
+                    background: on ? C.brandSoft : C.card,
+                    color: on ? C.brandInk : C.ink2,
+                  }}
+                >
+                  {p.emoji ? p.emoji + " " : ""}{p.name}
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ fontSize: 12, color: C.sub, marginTop: 7 }}>
+            {Array.isArray(cfg.packs) && cfg.packs.length
+              ? `Sending ${cfg.packs.length} of ${(sampleContent.packs || []).length} packs.`
+              : `Sending all ${(sampleContent.packs || []).length} packs.`}
+            {Array.isArray(cfg.packs) && cfg.packs.length
+              ? " Unticking a pack stops sending it — it does not delete anything already in Firebase."
+              : ""}
+          </div>
+        </Field>
+
         {/* layout (skip for cloudfn since the function decides) */}
         {cfg.mode !== "cloudfn" && (
           <Field label="Content layout" hint="Where documents/nodes are written. {slug} and {id} are placeholders.">
@@ -2921,6 +2982,12 @@ function PublishHub({ packs, onSynced }) {
                             {t.config?.mode === "cloudfn" ? (t.config?.fnUrl || "no URL set")
                               : t.config?.mode === "firestore" ? `project: ${t.config?.projectId || "—"} · ${t.config?.layout || "per-pack"}`
                               : `${t.config?.rtdbUrl || "no URL set"} · ${t.config?.layout || "per-pack"}`}
+                            {Array.isArray(t.config?.packs) && t.config.packs.length > 0 && (
+                              <span style={{ marginLeft: 8, padding: "2px 8px", borderRadius: 999, background: C.brandSoft,
+                                             color: C.brandInk, fontSize: 11, fontWeight: 800 }}>
+                                {t.config.packs.length} pack{t.config.packs.length === 1 ? "" : "s"} only
+                              </span>
+                            )}
                           </div>
                         </div>
                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -4286,6 +4353,24 @@ distinguishable from a pass, so a row below the current CHECKS_VERSION reports "
 version" and says to play it rather than trust the silence.
 Reported at approval AFTER the fact, never as a gate: blocking on stale checks would strand every
 question queued before the scanner existed.
+
+### PER-TARGET PACK FILTER (Firebase sync)
+
+A sync target's \`config.packs\` is an optional list of slugs. EMPTY OR ABSENT = SEND EVERYTHING, so
+every target that existed before this behaves exactly as it did. Set it to send only those packs —
+for a staging destination that takes one pack, or a faster sync when only one pack changed.
+
+FILTERED AT THE CHOKE POINT: runFirebaseSync(), not inside planWrites(). Every layout (per-pack,
+per-question, single-doc) and every writer (rtdb, firestore, cloudfn) passes through that one
+function, so one filter cannot disagree with another.
+
+IT NEVER DELETES. Unticking a pack stops SENDING it; whatever is already in Firebase stays until
+something removes it. A sync that silently deleted remote content because a filter changed would be
+a far worse surprise than a stale document — and the UI says so where the choice is made.
+
+THE COUNTS REPORT WHAT WAS SENT, not what exists. runFirebaseSync used to return
+content.packs.length, which after a filtered run would have logged "57 questions" having sent 13 —
+the sync history would have quietly lied about every filtered push.
 
 **PROVENANCE.** pm_review_approve takes an optional \`p_actor\`, and the connector passes
 \`connector:<partner>\`. Without it the RPC falls back to the signed-in JWT email, and the connector

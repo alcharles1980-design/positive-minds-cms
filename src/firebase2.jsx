@@ -105,6 +105,44 @@ function FirebaseTargetEditor({ target, profiles, sampleContent, onSave, onClose
           </div>
         )}
 
+        {/* WHICH PACKS. Optional per target: none selected = send everything, which is what every
+            existing target does and must keep doing. Useful for a staging destination that takes one
+            pack, or for a faster sync when only one pack changed. */}
+        <Field label="Which packs" hint="Leave all unticked to send everything. Ticking some sends only those — useful for a staging target, or a quick sync after changing one pack.">
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {(sampleContent.packs || []).map((p) => {
+              const on = Array.isArray(cfg.packs) && cfg.packs.includes(p.slug);
+              return (
+                <button
+                  key={p.slug}
+                  type="button"
+                  onClick={() => {
+                    const cur = Array.isArray(cfg.packs) ? cfg.packs : [];
+                    set("packs", on ? cur.filter((x) => x !== p.slug) : [...cur, p.slug]);
+                  }}
+                  style={{
+                    padding: "6px 11px", borderRadius: 999, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                    fontFamily: "inherit",
+                    border: `1px solid ${on ? C.brand : C.line}`,
+                    background: on ? C.brandSoft : C.card,
+                    color: on ? C.brandInk : C.ink2,
+                  }}
+                >
+                  {p.emoji ? p.emoji + " " : ""}{p.name}
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ fontSize: 12, color: C.sub, marginTop: 7 }}>
+            {Array.isArray(cfg.packs) && cfg.packs.length
+              ? `Sending ${cfg.packs.length} of ${(sampleContent.packs || []).length} packs.`
+              : `Sending all ${(sampleContent.packs || []).length} packs.`}
+            {Array.isArray(cfg.packs) && cfg.packs.length
+              ? " Unticking a pack stops sending it — it does not delete anything already in Firebase."
+              : ""}
+          </div>
+        </Field>
+
         {/* layout (skip for cloudfn since the function decides) */}
         {cfg.mode !== "cloudfn" && (
           <Field label="Content layout" hint="Where documents/nodes are written. {slug} and {id} are placeholders.">

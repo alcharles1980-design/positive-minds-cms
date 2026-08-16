@@ -105,16 +105,39 @@ const runFirebaseSync = async (target, profile) => {
   const cfg = target.config || {};
   const content = await fetchAllContent(profile.spec.filters || {}, { expandLevels: !!profile.spec.expand_levels });
   const spec = { ...profile.spec, __name: profile.name };
-  const ops = planWrites(cfg, content.packs, content.byPack, buildOutput, spec);
-  const fullBody = buildOutput(spec, content.packs, content.byPack, "id");
-  const fullPayload = withMeta(spec, fullBody, { packs: content.packs.length, questions: content.questionCount });
+
+  // PER-TARGET PACK FILTER. cfg.packs is a list of slugs; empty or absent means EVERYTHING, which
+  // keeps every existing target behaving exactly as before.
+  // Filtered HERE, at the single choke point, rather than inside planWrites — every layout
+  // (per-pack, per-question, single-doc) and every writer (rtdb, firestore, cloudfn) goes through
+  // this function, so one filter cannot disagree with another.
+  // NOTE what this does NOT do: it never deletes. Removing a pack from the list stops SENDING it;
+  // whatever was already written to Firebase stays there until something removes it. That is the
+  // safe default — a sync that silently deletes remote content because a filter changed would be a
+  // far worse surprise than a stale document.
+  const wanted = Array.isArray(cfg.packs) ? cfg.packs.filter(Boolean) : [];
+  let packs = content.packs;
+  let byPack = content.byPack;
+  if (wanted.length) {
+    packs = content.packs.filter((p) => wanted.includes(p.slug));
+    byPack = {};
+    for (const p of packs) byPack[p.id] = content.byPack[p.id] || [];
+  }
+  const questionCount = packs.reduce((n, p) => n + (byPack[p.id] || []).length, 0);
+
+  const ops = planWrites(cfg, packs, byPack, buildOutput, spec);
+  const fullBody = buildOutput(spec, packs, byPack, "id");
+  const fullPayload = withMeta(spec, fullBody, { packs: packs.length, questions: questionCount });
 
   let result;
   if (cfg.mode === "firestore") result = await fbWriters.firestore(cfg, ops);
   else if (cfg.mode === "cloudfn") result = await fbWriters.cloudFn(cfg, ops, fullPayload);
   else result = await fbWriters.rtdb(cfg, ops);
 
-  return { ...result, packCount: content.packs.length, questionCount: content.questionCount, opCount: ops.length };
+  // Report what was ACTUALLY sent, not what exists. Returning content.packs.length here would log
+  // "57 questions" after sending 13, and the sync history would quietly lie about every filtered run.
+  return { ...result, packCount: packs.length, questionCount, opCount: ops.length,
+           filteredPacks: wanted.length ? wanted : null };
 };
 
 const db_targets = {

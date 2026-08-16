@@ -195,6 +195,12 @@ function PublishHub({ packs, onSynced }) {
                             {t.config?.mode === "cloudfn" ? (t.config?.fnUrl || "no URL set")
                               : t.config?.mode === "firestore" ? `project: ${t.config?.projectId || "—"} · ${t.config?.layout || "per-pack"}`
                               : `${t.config?.rtdbUrl || "no URL set"} · ${t.config?.layout || "per-pack"}`}
+                            {Array.isArray(t.config?.packs) && t.config.packs.length > 0 && (
+                              <span style={{ marginLeft: 8, padding: "2px 8px", borderRadius: 999, background: C.brandSoft,
+                                             color: C.brandInk, fontSize: 11, fontWeight: 800 }}>
+                                {t.config.packs.length} pack{t.config.packs.length === 1 ? "" : "s"} only
+                              </span>
+                            )}
                           </div>
                         </div>
                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>

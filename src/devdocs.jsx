@@ -1120,6 +1120,24 @@ version" and says to play it rather than trust the silence.
 Reported at approval AFTER the fact, never as a gate: blocking on stale checks would strand every
 question queued before the scanner existed.
 
+### PER-TARGET PACK FILTER (Firebase sync)
+
+A sync target's \`config.packs\` is an optional list of slugs. EMPTY OR ABSENT = SEND EVERYTHING, so
+every target that existed before this behaves exactly as it did. Set it to send only those packs —
+for a staging destination that takes one pack, or a faster sync when only one pack changed.
+
+FILTERED AT THE CHOKE POINT: runFirebaseSync(), not inside planWrites(). Every layout (per-pack,
+per-question, single-doc) and every writer (rtdb, firestore, cloudfn) passes through that one
+function, so one filter cannot disagree with another.
+
+IT NEVER DELETES. Unticking a pack stops SENDING it; whatever is already in Firebase stays until
+something removes it. A sync that silently deleted remote content because a filter changed would be
+a far worse surprise than a stale document — and the UI says so where the choice is made.
+
+THE COUNTS REPORT WHAT WAS SENT, not what exists. runFirebaseSync used to return
+content.packs.length, which after a filtered run would have logged "57 questions" having sent 13 —
+the sync history would have quietly lied about every filtered push.
+
 **PROVENANCE.** pm_review_approve takes an optional \`p_actor\`, and the connector passes
 \`connector:<partner>\`. Without it the RPC falls back to the signed-in JWT email, and the connector
 authenticates as the SERVICE ROLE which has none — so every connector approval recorded as 'admin',
