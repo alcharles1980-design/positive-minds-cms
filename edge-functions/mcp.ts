@@ -167,7 +167,13 @@ function validateQuestion(q: any, levels: any[], opts: any = {}) {
   // trailing ellipsis, or a sentence ending on a word that cannot end one.
   if (tpl.trim()) {
     const bare = tpl.trim().replace(/[.!?]+$/, '').trim();
-    const danglers = /\b(when|and|but|because|so|that|to|the|a|an|my|your|if|as|with|for|is|am|are|was|were|of|in|on|at|it|he|she|they|we|i)$/i;
+    // DELIBERATELY SHORT. Every word here MUST be one that cannot end an English sentence. The first
+    // draft included pronouns, prepositions and copulas and immediately flagged two perfectly good
+    // live questions — "I feel {blank} that I can do it" and "I make a {blank} and follow it." A
+    // check that cries wolf on good content gets ignored, and then it is worth less than nothing.
+    // "so" (I think so), "of" (what I'm proud of), "for" (what I hope for), "with" (to play with),
+    // "that" (I want that), "am" (who I am) and every pronoun all end sentences legitimately.
+    const danglers = /\b(when|and|but|because|if|the|a|an|my|your)$/i;
     if (/(…|\.\.\.)\s*$/.test(tpl.trim()))
       flags.push({ code: 'truncated', detail: 'The sentence trails off — it ends in an ellipsis rather than finishing.' });
     else if (danglers.test(bare))

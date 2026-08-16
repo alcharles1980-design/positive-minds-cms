@@ -1751,7 +1751,12 @@ SYNC — TWO PATHS, ONE TRANSFORM (16 Aug)
   Read-only and ungated: looking for problems is not a privileged action.
 - \`validateQuestion\` gained a \`truncated\` check — an unfinished sentence ("I am {blank} when …")
   passed every other check and reached live content. Two low-false-positive signals: trailing
-  ellipsis, or ending on a word that cannot end a sentence.
+  ellipsis, or ending on a word that cannot end a sentence. THE DANGLER LIST IS DELIBERATELY SHORT —
+  when, and, but, because, if, the, a, an, my, your. The first draft included pronouns, prepositions
+  and copulas and immediately flagged two GOOD live questions ("…that I can do it", "…and follow
+  it."). "so", "of", "for", "with", "that", "am" and every pronoun end sentences legitimately. A
+  check that cries wolf on good content gets ignored, and is then worth less than nothing. Caught by
+  running the pattern against live content, not by reading it.
 - Any sync can be narrowed to a subset of packs FOR THAT CALL: "Some packs…" in the CMS, \`?packs=\`
   on the route, \`packs\` on the connector tool. Narrow-only, unknown slugs rejected, nothing stored.
   A partial send does NOT clear pending-changes and does NOT touch packs it was not asked for.
