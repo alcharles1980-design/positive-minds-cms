@@ -161,6 +161,19 @@ function validateQuestion(q: any, levels: any[], opts: any = {}) {
     if (words > 1 && !lvl.allow_multiword) flags.push({ code: 'multiword', level: lvl.level, detail: `Level ${lvl.level} doesn't allow multi-word answers.` });
   }
 
+  // TRUNCATED SENTENCE. "I am {blank} when …" reached live content and no check saw it: every word
+  // is valid, the blank is present, the lengths differ. The sentence is simply unfinished, and a
+  // child is asked to complete a thought that was never written. Two low-false-positive signals: a
+  // trailing ellipsis, or a sentence ending on a word that cannot end one.
+  if (tpl.trim()) {
+    const bare = tpl.trim().replace(/[.!?]+$/, '').trim();
+    const danglers = /\b(when|and|but|because|so|that|to|the|a|an|my|your|if|as|with|for|is|am|are|was|were|of|in|on|at|it|he|she|they|we|i)$/i;
+    if (/(…|\.\.\.)\s*$/.test(tpl.trim()))
+      flags.push({ code: 'truncated', detail: 'The sentence trails off — it ends in an ellipsis rather than finishing.' });
+    else if (danglers.test(bare))
+      flags.push({ code: 'truncated', detail: `The sentence ends on "${bare.split(/\s+/).pop()}", which cannot end a sentence — it looks unfinished.` });
+  }
+
   if (ans && /[^A-Z\s'-]/.test(ans)) flags.push({ code: 'bad_chars', detail: `"${ans}" contains characters other than letters.` });
   if (alt && /[^A-Z\s'-]/.test(alt)) flags.push({ code: 'bad_chars_alt', detail: `"${alt}" contains characters other than letters.` });
 
@@ -526,6 +539,38 @@ const TOOLS = [
         },
         pack_slug: { type: 'string', description: 'Limit to one pack. Required when source is "live".' },
         levels: { type: 'array', items: { type: 'number' }, description: 'Only these levels (default: all).' },
+      },
+    },
+  },
+  {
+    name: 'audit_content',
+    description:
+      'Scan questions ALREADY SAVED and list what is wrong with them. Read-only — it changes nothing ' +
+      'and cannot fix anything; the output is a list for a human to act on. This is the counterpart ' +
+      'to check_questions: that one checks DRAFTS before they are saved, this one checks what is ' +
+      'already there, using the SAME validator, so the two can never disagree about what a defect is. ' +
+      'Use it when the person asks to audit, sweep, review the bank, or find broken questions.\n' +
+      'SCOPE defaults to "live" — only what a child can actually reach (active questions in published ' +
+      'packs), because that is the set where a defect does harm. "all" widens it to every saved ' +
+      'question including inactive ones and unpublished packs.\n' +
+      'FINDINGS ARE TIERED. `serious` means a child meets a broken or unanswerable question — two ' +
+      'options that both fit the blank, a missing blank, an unfinished sentence. `minor` is a real ' +
+      'defect that is not dangerous, like a duplicate or a word outside the pack level. `advisory` is ' +
+      'judgement, not breakage — mostly a word used as the right answer in one question and the wrong ' +
+      'option in another.\n' +
+      'PRESENT THE SERIOUS ONES FIRST AND IN FULL, with the sentence and both words, so the person ' +
+      'can see the problem rather than a code. Do not summarise a serious finding into a count. If ' +
+      'nothing is serious, say so plainly before listing the rest.',
+    _meta: { 'openai/toolInvocation/invoking': 'Auditing the question bank…' },
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pack_slug: { type: 'string', description: 'Limit the scan to one pack. Omit to scan everything.' },
+        scope: { type: 'string', enum: ['live', 'all'],
+          description: '"live" (default) = active questions in published packs, i.e. what a child can reach. "all" = every saved question.' },
+        include_minor: { type: 'boolean', description: 'Include the minor findings in full. Default true.' },
+        include_advisory: { type: 'boolean', description: 'Include advisory findings in full. Default false — there is a known backlog of these and they drown the real defects.' },
       },
     },
   },
@@ -1105,6 +1150,99 @@ async function callTool(db: any, partner: string, name: string, args: any, canAp
   // submissions, pending and decided, with attribution. This matches how the CMS itself works —
   // partners share the admin login, so scoping this per-caller was a boundary that did not actually
   // hold anywhere else. Seeing each other's rejections is also the fastest way to learn the bar.
+  if (name === 'audit_content') {
+    // READ ONLY. Reuses validateQuestion — the SAME function check_questions calls — so a question
+    // this reports as broken is exactly a question that would have been refused at proposal time.
+    // A second validator written for auditing would drift within a month and then the two would
+    // disagree about what a defect is, which is worse than not auditing at all.
+    const scope = args.scope === 'all' ? 'all' : 'live';
+    const includeMinor = args.include_minor !== false;
+    const includeAdvisory = args.include_advisory === true;
+
+    let packQ = db.from('pm_packs').select('id,slug,name,level,status');
+    if (args.pack_slug) packQ = packQ.eq('slug', args.pack_slug);
+    if (scope === 'live') packQ = packQ.eq('status', 'published');
+    const { data: packs } = await packQ.order('slug').limit(500);
+    if (!packs || !packs.length) {
+      return { error: args.pack_slug
+        ? `No ${scope === 'live' ? 'published ' : ''}pack with slug "${args.pack_slug}".`
+        : 'No packs to scan.' };
+    }
+
+    const { data: levels } = await db.from('pm_levels').select('*').order('level').limit(200);
+    const packIds = packs.map((p: any) => p.id);
+    let qQ = db.from('pm_questions')
+      .select('id,pack_id,template,answer,alt_answer,level,status')
+      .in('pack_id', packIds);
+    if (scope === 'live') qQ = qQ.eq('status', 'active');
+    const { data: allQs } = await qQ.limit(5000);
+    const questions = allQs || [];
+
+    const byPack: Record<string, any[]> = {};
+    for (const q of questions) (byPack[q.pack_id] ||= []).push(q);
+
+    // Which tier a flag lands in. SERIOUS is deliberately narrow: it means a child meets something
+    // broken or unanswerable, not that a rule was bent. Widening it would bury the ones that matter.
+    const SERIOUS = new Set(['ambiguous', 'same_word', 'no_blank', 'multi_blank', 'no_answer', 'no_alt',
+                             'bad_chars', 'bad_chars_alt', 'truncated']);
+    const serious: any[] = [], minor: any[] = [], advisory: any[] = [];
+    const byCode: Record<string, number> = {};
+
+    for (const pack of packs) {
+      const list = byPack[pack.id] || [];
+      const answers = new Set(list.map((q: any) => (q.answer || '').toUpperCase()).filter(Boolean));
+      const alts = new Set(list.map((q: any) => (q.alt_answer || '').toUpperCase()).filter(Boolean));
+
+      for (const q of list) {
+        // EXCLUDE SELF from `existing`, or every question is its own duplicate and the scan reports
+        // 100% breakage with total confidence.
+        const others = list.filter((o: any) => o.id !== q.id);
+        const res = validateQuestion(q, levels || [], { targetLevel: q.level ?? pack.level ?? 1, existing: others });
+        const where = { pack: pack.name, pack_slug: pack.slug, id: q.id,
+                        question: `"${q.template}" — ${q.answer} / ${q.alt_answer}` };
+
+        for (const f of res.flags || []) {
+          byCode[f.code] = (byCode[f.code] || 0) + 1;
+          (SERIOUS.has(f.code) ? serious : minor).push({ ...where, issue: f.code, detail: f.detail, levels: f.levels });
+        }
+
+        // CROSS-ROLE: the same word right in one question and wrong in another, within a pack. Not
+        // breakage — a child is told the same word is correct once and incorrect once, which for
+        // this audience is its own problem. Advisory because there is a known backlog of these.
+        const ans = (q.answer || '').toUpperCase(), alt = (q.alt_answer || '').toUpperCase();
+        if (alt && answers.has(alt)) {
+          byCode.cross_role = (byCode.cross_role || 0) + 1;
+          advisory.push({ ...where, issue: 'cross_role',
+            detail: `"${alt}" is the wrong option here and the correct answer to another question in this pack.` });
+        } else if (ans && alts.has(ans)) {
+          byCode.cross_role = (byCode.cross_role || 0) + 1;
+          advisory.push({ ...where, issue: 'cross_role',
+            detail: `"${ans}" is the answer here and a wrong option in another question in this pack.` });
+        }
+      }
+    }
+
+    const CAP = 60;
+    const trim = (arr: any[]) => arr.length > CAP
+      ? { shown: arr.slice(0, CAP), omitted: arr.length - CAP, note: `Only the first ${CAP} are listed. Narrow with pack_slug to see the rest.` }
+      : arr;
+
+    return {
+      scanned: { scope, packs: packs.length, questions: questions.length,
+                 note: scope === 'live'
+                   ? 'Active questions in published packs — what a child can actually reach.'
+                   : 'Every saved question, including inactive ones and unpublished packs.' },
+      totals: { serious: serious.length, minor: minor.length, advisory: advisory.length },
+      by_issue: byCode,
+      serious: trim(serious),
+      ...(includeMinor ? { minor: trim(minor) } : { minor_count_only: minor.length }),
+      ...(includeAdvisory ? { advisory: trim(advisory) } : { advisory_count_only: advisory.length }),
+      note: serious.length
+        ? 'SERIOUS findings mean a child meets a broken question. Show each one with its sentence and both words. Nothing here has been changed — fixing is a separate, human decision.'
+        : 'No serious findings. Say that plainly before listing anything else. Nothing has been changed.',
+    };
+  }
+
   if (name === 'review_status') {
     let packFilter: any = null;
     if (args.pack_slug) {

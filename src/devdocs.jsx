@@ -747,6 +747,7 @@ not a Supabase JWT). Speaks JSON-RPC 2.0 over Streamable HTTP. Ten tools, delibe
 | \`preview_questions\` | renders drafts/queue as a CHILD sees them | — |
 | \`reject_questions\` | — | rejects PENDING queue items (never approves) |
 | \`edit_queued_question\` | — | fixes a PENDING queue item, re-validated |
+| \`audit_content\` | READ ONLY — scans saved questions, lists defects | nothing; it cannot fix |
 | \`sync_to_game\` | dry run reports what would be sent | with confirm:true, SENDS to the game; optional \`packs\` narrows this send only (gated on can_approve) |
 
 **PACK CREATION (Aug 2026).** \`create_pack\` mirrors the CMS's own PackEditor + \`savePack\` convention
@@ -1743,6 +1744,14 @@ LIVE AND WORKING
 SYNC — TWO PATHS, ONE TRANSFORM (16 Aug)
 - Content reaching a child is now TWO gates, not one: approve puts a question in a PACK, a sync puts
   the pack in the GAME. Any text claiming approval is the last gate is wrong (rule 4.49).
+- \`audit_content\` (16 Aug) scans SAVED questions and lists defects, tiered serious/minor/advisory.
+  It calls the SAME \`validateQuestion\` that check_questions calls — a second validator would drift
+  and then the two would disagree about what a defect is, which is worse than not auditing. Scope
+  defaults to \`live\` (active questions in published packs) because that is where a defect does harm.
+  Read-only and ungated: looking for problems is not a privileged action.
+- \`validateQuestion\` gained a \`truncated\` check — an unfinished sentence ("I am {blank} when …")
+  passed every other check and reached live content. Two low-false-positive signals: trailing
+  ellipsis, or ending on a word that cannot end a sentence.
 - Any sync can be narrowed to a subset of packs FOR THAT CALL: "Some packs…" in the CMS, \`?packs=\`
   on the route, \`packs\` on the connector tool. Narrow-only, unknown slugs rejected, nothing stored.
   A partial send does NOT clear pending-changes and does NOT touch packs it was not asked for.
@@ -3769,6 +3778,9 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    summary), check_questions (validate drafts, SAVE NOTHING — this is what lets Claude fix its own
    mistakes before proposing), propose_questions (writes to the REVIEW QUEUE ONLY), create_pack and
    update_pack, review_status, preview_questions, reject_questions and edit_queued_question.
+   Add audit_content: read-only, scans SAVED questions, tiers findings serious/minor/advisory, and
+   MUST call the same validateQuestion as check_questions rather than carrying its own copy. Exclude
+   the question itself from \`existing\` or every question is its own duplicate.
    Give sync_to_game an optional \`packs\` array for a one-off partial send, and enforce narrow-only in
    the EDGE FUNCTION rather than in each caller — reject any slug outside what the target would send,
    never silently drop it, and log the packs that actually went.
