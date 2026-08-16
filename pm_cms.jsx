@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.08.16-40", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.08.16-41", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -2804,6 +2804,8 @@ function PublishHub({ packs, onSynced }) {
   const [sample, setSample] = useState({ packs: [], byPack: {}, questionCount: 0 });
   const [sub, setSub] = useState("profiles"); // profiles | targets | channels | history
   const [busyId, setBusyId] = useState(null);
+  // One-off partial send. { target, sel } — sel is a list of slugs. Never written to the target.
+  const [pick, setPick] = useState(null);
 
   useEffect(() => { fetchAllContent({ status: "published", question_status: "active" }, { expandLevels: true }).then(setSample).catch(() => {}); }, []);
 
@@ -2834,19 +2836,31 @@ function PublishHub({ packs, onSynced }) {
   // risk to save a button. Both exist until the server path has proven itself.
   // The edge function reads the target's own config, so this cannot send anywhere the browser
   // button would not have.
-  const serverSync = async (t) => {
+  // `only` is an OPTIONAL array of slugs for a one-off partial send. It never touches the target's
+  // stored config — the picker is deliberately not a shortcut for editing the target, because a
+  // filter you set once and forget is how a target silently stops sending things for weeks.
+  const serverSync = async (t, only) => {
     setBusyId(t.id);
     try {
-      const url = `${CFG.url}/functions/v1/game-feed?sync=${encodeURIComponent(t.name)}`;
+      const narrow = Array.isArray(only) && only.length ? `&packs=${encodeURIComponent(only.join(","))}` : "";
+      const url = `${CFG.url}/functions/v1/game-feed?sync=${encodeURIComponent(t.name)}${narrow}`;
       const res = await fetch(url, { headers: { apikey: CFG.key, Authorization: `Bearer ${CFG.key}` } });
       const out = await res.json();
       if (!res.ok || out.ok === false) throw new Error(out.error || `HTTP ${res.status}`);
       // The edge function writes its own pm_sync_log row, so this does NOT log again — two rows for
       // one sync would make the history lie about how often content went out.
-      await db_sync.markReleased(null);
-      logActivity("target", t.id, t.name, "import", `server-synced ${out.sent?.pack_count ?? "?"} packs`);
+      // markReleased(null) clears pending-changes on EVERY published pack. After a partial send that
+      // would be a lie: packs that were not sent still have changes the game has not seen. Only clear
+      // the flag on a full send.
+      if (!narrow) await db_sync.markReleased(null);
+      const sentSlugs = out.sent?.packs || [];
+      logActivity("target", t.id, t.name, "import",
+        narrow ? `server-synced ${sentSlugs.length} pack(s): ${sentSlugs.join(", ")}`
+               : `server-synced ${out.sent?.pack_count ?? "?"} packs`);
       onSynced && onSynced();
-      notify(`Server sync: ${out.writes} writes to ${t.name}`);
+      notify(narrow ? `Sent ${sentSlugs.length} pack(s) to ${t.name} — everything else in the game is unchanged`
+                    : `Server sync: ${out.writes} writes to ${t.name}`,
+             narrow ? { duration: 6000 } : undefined);
     } catch (e) {
       notify("Server sync failed: " + e.message, { kind: "error", duration: 6000 });
     } finally { setBusyId(null); }
@@ -3018,6 +3032,7 @@ function PublishHub({ packs, onSynced }) {
                           <Btn variant="ghost" size="sm" onClick={() => setEditTarget(t)}>Edit</Btn>
                           <Btn size="sm" disabled={busyId === t.id || !prof} onClick={() => syncTarget(t)} icon="🔥" title="Runs in this browser tab. The original path.">{busyId === t.id ? "Syncing…" : "Browser sync"}</Btn>
                           <Btn size="sm" variant="ghost" disabled={busyId === t.id || !prof} onClick={() => serverSync(t)} icon="☁" title="Runs on the server. Same result, and this is the one Claude can trigger.">{busyId === t.id ? "Syncing…" : "Server sync"}</Btn>
+                          <Btn size="sm" variant="ghost" disabled={busyId === t.id || !prof} onClick={() => setPick({ target: t, sel: [] })} icon="◧" title="Send only some packs, this once. Does not change the target.">Some packs…</Btn>
                           <Btn variant="danger" size="sm" onClick={() => deleteTarget(t)}>Delete</Btn>
                         </div>
                       </div>
@@ -3028,6 +3043,54 @@ function PublishHub({ packs, onSynced }) {
             )}
         </div>
       )}
+
+      {/* PARTIAL SEND PICKER. Deliberately separate from the target editor: this is a one-off for
+          THIS send and stores nothing. The target's own filter still bounds it — the server rejects
+          any slug the target would not have sent, so this list showing something the target excludes
+          is not a way around it. */}
+      <Modal open={pick !== null} onClose={() => setPick(null)} width={560}>
+        {pick !== null && (() => {
+          const avail = (sample.packs || []);
+          const cfgPacks = Array.isArray(pick.target.config?.packs) ? pick.target.config.packs : [];
+          const sendable = cfgPacks.length ? avail.filter(p => cfgPacks.includes(p.slug)) : avail;
+          return (
+            <div>
+              <h3 style={{ margin: "0 0 6px", fontSize: 17, fontWeight: 800, color: C.ink }}>Send some packs to {pick.target.name}</h3>
+              <div style={{ fontSize: 13, color: C.sub, lineHeight: 1.6, marginBottom: S.lg }}>
+                A one-off send. This does not change the target — its settings are untouched, and the next
+                ordinary Server sync still sends everything.
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {sendable.map(p => {
+                  const on = pick.sel.includes(p.slug);
+                  return (
+                    <button key={p.slug} type="button"
+                      onClick={() => setPick({ ...pick, sel: on ? pick.sel.filter(x => x !== p.slug) : [...pick.sel, p.slug] })}
+                      style={{ padding: "6px 11px", borderRadius: 999, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                               fontFamily: "inherit", border: `1px solid ${on ? C.brand : C.line}`,
+                               background: on ? C.brandSoft : C.card, color: on ? C.brandInk : C.ink2 }}>
+                      {p.emoji ? p.emoji + " " : ""}{p.name}
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ marginTop: S.lg, padding: "11px 13px", borderRadius: R.md, background: C.brandSoft,
+                            color: C.brandInk, fontSize: 12.5, lineHeight: 1.6, fontWeight: 600 }}>
+                Everything you do not tick keeps whatever the game already has for it. A send never deletes,
+                and it never refreshes a pack it was not asked for — so a pack you edited but leave unticked
+                stays out of date in the game.
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: S.lg, justifyContent: "flex-end" }}>
+                <Btn variant="ghost" onClick={() => setPick(null)}>Cancel</Btn>
+                <Btn disabled={!pick.sel.length} icon="☁"
+                  onClick={() => { const t = pick.target, sel = pick.sel; setPick(null); serverSync(t, sel); }}>
+                  Send {pick.sel.length || ""} pack{pick.sel.length === 1 ? "" : "s"}
+                </Btn>
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
 
       <Modal open={editProfile !== null} onClose={() => setEditProfile(null)} width={720}>
         {editProfile !== null && <ProfileBuilder profile={editProfile.id ? editProfile : null} sampleContent={sample} onSave={saveProfile} onClose={() => setEditProfile(null)} />}
@@ -4006,7 +4069,7 @@ not a Supabase JWT). Speaks JSON-RPC 2.0 over Streamable HTTP. Ten tools, delibe
 | \`preview_questions\` | renders drafts/queue as a CHILD sees them | — |
 | \`reject_questions\` | — | rejects PENDING queue items (never approves) |
 | \`edit_queued_question\` | — | fixes a PENDING queue item, re-validated |
-| \`sync_to_game\` | dry run reports what would be sent | with confirm:true, SENDS to the game (gated on can_approve) |
+| \`sync_to_game\` | dry run reports what would be sent | with confirm:true, SENDS to the game; optional \`packs\` narrows this send only (gated on can_approve) |
 
 **PACK CREATION (Aug 2026).** \`create_pack\` mirrors the CMS's own PackEditor + \`savePack\` convention
 EXACTLY — same \`slugify\` as core.jsx, \`sort_order = count + 1\`, emoji default 💪, the same pack-detail
@@ -4424,6 +4487,23 @@ a far worse surprise than a stale document — and the UI says so where the choi
 THE COUNTS REPORT WHAT WAS SENT, not what exists. runFirebaseSync used to return
 content.packs.length, which after a filtered run would have logged "57 questions" having sent 13 —
 the sync history would have quietly lied about every filtered push.
+
+TWO LAYERS, AND ONLY ONE OF THEM IS STORED (16 Aug). The target filter above is CONFIGURATION —
+set once, applies to every send. On top of it sits a CALLER NARROWING, \`?packs=a,b\` on the server
+sync route, surfaced as "Some packs…" in the CMS and a \`packs\` argument on \`sync_to_game\`. That one
+is per-call and stores nothing.
+- NARROW ONLY. The intersection is taken against the target's own list (or every pack, if it has
+  none), so a caller can never reach a pack the target excludes. The rule lives in game-feed.ts and
+  is NOT re-implemented in the CMS or the connector — both pass the list through untouched.
+- AN UNKNOWN SLUG IS AN ERROR, not a silent drop. \`?packs=calmnes\` returning 200 having sent nothing
+  is indistinguishable from success, and the absence is discovered later by a child.
+- \`pm_sync_log.packs\` records what ACTUALLY went, not the target's filter. Partial sends make the
+  history unreadable otherwise.
+- markReleased(null) IS SKIPPED on a partial send. It clears pending-changes on every published
+  pack, which after sending three of six would mark three packs as delivered when they were not.
+- WHY A SEPARATE PICKER RATHER THAN THE TARGET EDITOR: a stored filter set for a one-off and then
+  forgotten is a target that silently stops sending things for weeks. Making the one-off case
+  stateless removes that whole failure mode rather than documenting it.
 
 **PROVENANCE.** pm_review_approve takes an optional \`p_actor\`, and the connector passes
 \`connector:<partner>\`. Without it the RPC falls back to the signed-in JWT email, and the connector
@@ -4978,6 +5058,9 @@ LIVE AND WORKING
 SYNC — TWO PATHS, ONE TRANSFORM (16 Aug)
 - Content reaching a child is now TWO gates, not one: approve puts a question in a PACK, a sync puts
   the pack in the GAME. Any text claiming approval is the last gate is wrong (rule 4.49).
+- Any sync can be narrowed to a subset of packs FOR THAT CALL: "Some packs…" in the CMS, \`?packs=\`
+  on the route, \`packs\` on the connector tool. Narrow-only, unknown slugs rejected, nothing stored.
+  A partial send does NOT clear pending-changes and does NOT touch packs it was not asked for.
 - Three ways to sync, all funnelling through \`runFirebaseSync\`/\`build()\` so they cannot drift:
   the CMS Browser sync button (original), the CMS Server sync button, and \`sync_to_game\` in the
   connector. The latter two both call \`game-feed?sync=<target>\`; \`&dry=1\` reports and writes
@@ -7001,6 +7084,9 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    summary), check_questions (validate drafts, SAVE NOTHING — this is what lets Claude fix its own
    mistakes before proposing), propose_questions (writes to the REVIEW QUEUE ONLY), create_pack and
    update_pack, review_status, preview_questions, reject_questions and edit_queued_question.
+   Give sync_to_game an optional \`packs\` array for a one-off partial send, and enforce narrow-only in
+   the EDGE FUNCTION rather than in each caller — reject any slug outside what the target would send,
+   never silently drop it, and log the packs that actually went.
    THEN sync_to_game, and only once the sync route exists on game-feed: it calls that ONE route
    rather than re-implementing the transform, takes no destination of its own, and dry-runs unless
    confirm:true. Whatever gates it, update every hand-written capability list and every "nothing

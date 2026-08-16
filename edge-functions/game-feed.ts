@@ -382,8 +382,32 @@ Deno.serve(async (req) => {
       // THE TARGET'S OWN PACK FILTER, honoured here exactly as the browser honours it. A caller
       // cannot widen it: the target's configuration is the authority on where its content goes.
       const wanted: string[] = Array.isArray(cfg.packs) ? cfg.packs.filter(Boolean) : [];
-      let syncPacks = packList;
-      if (wanted.length) syncPacks = packList.filter((p: any) => wanted.includes(p.slug));
+
+      // CALLER NARROWING — ?packs=a,b. This is a ONE-OFF subset for this call only; it changes no
+      // stored configuration. It can only ever REMOVE packs from what the target would have sent,
+      // never add one, so a caller cannot reach a pack the target was configured to exclude. The
+      // intersection is computed against `allowed`, which is already the target's filter (or every
+      // pack, if it has none), so the narrow-only property holds without a second check.
+      // An unrecognised slug is an ERROR, not silently dropped: "sync just calmnes" quietly sending
+      // nothing looks identical to a successful sync, and the missing content is found later by a
+      // child. Fail loudly and say what was allowed.
+      const allowed: string[] = wanted.length ? wanted : packList.map((p: any) => p.slug);
+      const asked: string[] = (url.searchParams.get('packs') || '')
+        .split(',').map((x) => x.trim()).filter(Boolean);
+      const unknown = asked.filter((x) => !allowed.includes(x));
+      if (asked.length && unknown.length) {
+        return json({ error: `Not sendable to this target: ${unknown.join(', ')}.`,
+                      allowed, note: wanted.length
+                        ? 'This target has its own pack filter; a call can only narrow within it.'
+                        : 'A pack must be published and in the feed to be sent.' }, 400);
+      }
+      const effective: string[] = asked.length ? allowed.filter((x) => asked.includes(x)) : allowed;
+
+      const syncPacks = packList.filter((p: any) => effective.includes(p.slug));
+      if (!syncPacks.length) {
+        return json({ error: 'That selection matches no packs, so there is nothing to send.',
+                      allowed }, 400);
+      }
       const syncByPack: Record<string, any[]> = {};
       for (const p of syncPacks) syncByPack[p.id] = byPack[p.id] || [];
       const qCount = syncPacks.reduce((n: number, p: any) => n + (syncByPack[p.id] || []).length, 0);
@@ -395,6 +419,11 @@ Deno.serve(async (req) => {
         packs: syncPacks.map((p: any) => p.slug), pack_count: syncPacks.length,
         question_count: qCount, writes: ops.length,
         filtered_by_target: wanted.length ? wanted : null,
+        narrowed_by_caller: asked.length ? asked : null,
+        // A partial sync leaves everything it did NOT send exactly as it was — sync never deletes.
+        // Say so in the summary, because "synced" otherwise reads as "Firebase now matches the CMS".
+        partial: asked.length ? 'Only these packs were sent. Everything else in Firebase is unchanged, ' +
+                                'including packs that have since been edited here.' : null,
       };
 
       if (dry) return json({ ok: true, dry_run: true, would_send: summary,
@@ -433,7 +462,7 @@ Deno.serve(async (req) => {
         profile_id: profile.id, profile_name: profile.name, target_name: t.name,
         status: err ? 'error' : 'success',
         pack_count: syncPacks.length, question_count: qCount,
-        packs: wanted.length ? wanted : null,
+        packs: effective,   // what ACTUALLY went, not the target's filter — a partial sync is unreadable in history otherwise
         detail: err ? err : `${written} writes → ${t.name} (server)`,
       });
 

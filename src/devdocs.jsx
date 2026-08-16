@@ -747,7 +747,7 @@ not a Supabase JWT). Speaks JSON-RPC 2.0 over Streamable HTTP. Ten tools, delibe
 | \`preview_questions\` | renders drafts/queue as a CHILD sees them | — |
 | \`reject_questions\` | — | rejects PENDING queue items (never approves) |
 | \`edit_queued_question\` | — | fixes a PENDING queue item, re-validated |
-| \`sync_to_game\` | dry run reports what would be sent | with confirm:true, SENDS to the game (gated on can_approve) |
+| \`sync_to_game\` | dry run reports what would be sent | with confirm:true, SENDS to the game; optional \`packs\` narrows this send only (gated on can_approve) |
 
 **PACK CREATION (Aug 2026).** \`create_pack\` mirrors the CMS's own PackEditor + \`savePack\` convention
 EXACTLY — same \`slugify\` as core.jsx, \`sort_order = count + 1\`, emoji default 💪, the same pack-detail
@@ -1165,6 +1165,23 @@ a far worse surprise than a stale document — and the UI says so where the choi
 THE COUNTS REPORT WHAT WAS SENT, not what exists. runFirebaseSync used to return
 content.packs.length, which after a filtered run would have logged "57 questions" having sent 13 —
 the sync history would have quietly lied about every filtered push.
+
+TWO LAYERS, AND ONLY ONE OF THEM IS STORED (16 Aug). The target filter above is CONFIGURATION —
+set once, applies to every send. On top of it sits a CALLER NARROWING, \`?packs=a,b\` on the server
+sync route, surfaced as "Some packs…" in the CMS and a \`packs\` argument on \`sync_to_game\`. That one
+is per-call and stores nothing.
+- NARROW ONLY. The intersection is taken against the target's own list (or every pack, if it has
+  none), so a caller can never reach a pack the target excludes. The rule lives in game-feed.ts and
+  is NOT re-implemented in the CMS or the connector — both pass the list through untouched.
+- AN UNKNOWN SLUG IS AN ERROR, not a silent drop. \`?packs=calmnes\` returning 200 having sent nothing
+  is indistinguishable from success, and the absence is discovered later by a child.
+- \`pm_sync_log.packs\` records what ACTUALLY went, not the target's filter. Partial sends make the
+  history unreadable otherwise.
+- markReleased(null) IS SKIPPED on a partial send. It clears pending-changes on every published
+  pack, which after sending three of six would mark three packs as delivered when they were not.
+- WHY A SEPARATE PICKER RATHER THAN THE TARGET EDITOR: a stored filter set for a one-off and then
+  forgotten is a target that silently stops sending things for weeks. Making the one-off case
+  stateless removes that whole failure mode rather than documenting it.
 
 **PROVENANCE.** pm_review_approve takes an optional \`p_actor\`, and the connector passes
 \`connector:<partner>\`. Without it the RPC falls back to the signed-in JWT email, and the connector
@@ -1719,6 +1736,9 @@ LIVE AND WORKING
 SYNC — TWO PATHS, ONE TRANSFORM (16 Aug)
 - Content reaching a child is now TWO gates, not one: approve puts a question in a PACK, a sync puts
   the pack in the GAME. Any text claiming approval is the last gate is wrong (rule 4.49).
+- Any sync can be narrowed to a subset of packs FOR THAT CALL: "Some packs…" in the CMS, \`?packs=\`
+  on the route, \`packs\` on the connector tool. Narrow-only, unknown slugs rejected, nothing stored.
+  A partial send does NOT clear pending-changes and does NOT touch packs it was not asked for.
 - Three ways to sync, all funnelling through \`runFirebaseSync\`/\`build()\` so they cannot drift:
   the CMS Browser sync button (original), the CMS Server sync button, and \`sync_to_game\` in the
   connector. The latter two both call \`game-feed?sync=<target>\`; \`&dry=1\` reports and writes
@@ -3742,6 +3762,9 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    summary), check_questions (validate drafts, SAVE NOTHING — this is what lets Claude fix its own
    mistakes before proposing), propose_questions (writes to the REVIEW QUEUE ONLY), create_pack and
    update_pack, review_status, preview_questions, reject_questions and edit_queued_question.
+   Give sync_to_game an optional \`packs\` array for a one-off partial send, and enforce narrow-only in
+   the EDGE FUNCTION rather than in each caller — reject any slug outside what the target would send,
+   never silently drop it, and log the packs that actually went.
    THEN sync_to_game, and only once the sync route exists on game-feed: it calls that ONE route
    rather than re-implementing the transform, takes no destination of its own, and dry-runs unless
    confirm:true. Whatever gates it, update every hand-written capability list and every "nothing

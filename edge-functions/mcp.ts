@@ -537,11 +537,17 @@ const TOOLS = [
       'Call it WITHOUT confirm first: that is a dry run which reports exactly what would be sent and ' +
       'writes nothing. Show the person the packs and counts, and only call again with confirm: true ' +
       'once they have said yes. You cannot choose a destination or which packs go — the target is ' +
-      'configured in the CMS and its own settings decide. Requires approval rights.',
+      'configured in the CMS and its own settings decide, though you MAY pass `packs` to send only ' +
+      'some of them this once. Requires approval rights.',
     inputSchema: {
       type: 'object',
       properties: {
         target: { type: 'string', description: 'The sync target name as configured in the CMS (e.g. "Firebase").' },
+        packs: { type: 'array', items: { type: 'string' },
+          description: 'OPTIONAL pack slugs, to send only some of them this once. Omit to send everything ' +
+            'the target is configured to send, which is the normal case. This can only NARROW — you ' +
+            'cannot reach a pack the target excludes. A partial send leaves every other pack in the ' +
+            'game exactly as it was; it does not remove them, and it does not update them.' },
         confirm: { type: 'boolean', description: 'Omit or false for a dry run. true actually sends.' },
       },
       required: ['target'],
@@ -1406,7 +1412,12 @@ async function callTool(db: any, partner: string, name: string, args: any, canAp
       return { error: 'Which target? Name one of these.', targets: (ts || []).map((t: any) => t.name) };
     }
     const send = args.confirm === true;
-    const syncUrl = `${SUPABASE_URL}/functions/v1/game-feed?sync=${encodeURIComponent(target)}${send ? '' : '&dry=1'}`;
+    // Narrowing is passed straight through; the edge function owns the rule that a caller can only
+    // ever shrink the target's own list, so it is not re-implemented (or second-guessed) here.
+    const only: string[] = Array.isArray(args.packs) ? args.packs.map((x: any) => String(x).trim()).filter(Boolean) : [];
+    const syncUrl = `${SUPABASE_URL}/functions/v1/game-feed?sync=${encodeURIComponent(target)}` +
+      (only.length ? `&packs=${encodeURIComponent(only.join(','))}` : '') +
+      (send ? '' : '&dry=1');
     const r = await fetch(syncUrl, { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` } });
     const out = await r.json().catch(() => null);
     if (!r.ok || !out || out.ok === false) {
@@ -1416,7 +1427,9 @@ async function callTool(db: any, partner: string, name: string, args: any, canAp
       return {
         would_send: out.would_send,
         note: 'NOTHING WAS SENT. This is what would go. Show the person the pack list and the counts, ' +
-              'and only call again with confirm: true once they have said yes.',
+              'and only call again with confirm: true once they have said yes.' +
+              (only.length ? ' THIS IS A PARTIAL SEND — say so plainly, and say that every pack NOT ' +
+                             'listed keeps whatever the game already has for it.' : ''),
       };
     }
     return { sent: out.sent, writes: out.writes,

@@ -17,6 +17,8 @@ function PublishHub({ packs, onSynced }) {
   const [sample, setSample] = useState({ packs: [], byPack: {}, questionCount: 0 });
   const [sub, setSub] = useState("profiles"); // profiles | targets | channels | history
   const [busyId, setBusyId] = useState(null);
+  // One-off partial send. { target, sel } — sel is a list of slugs. Never written to the target.
+  const [pick, setPick] = useState(null);
 
   useEffect(() => { fetchAllContent({ status: "published", question_status: "active" }, { expandLevels: true }).then(setSample).catch(() => {}); }, []);
 
@@ -47,19 +49,31 @@ function PublishHub({ packs, onSynced }) {
   // risk to save a button. Both exist until the server path has proven itself.
   // The edge function reads the target's own config, so this cannot send anywhere the browser
   // button would not have.
-  const serverSync = async (t) => {
+  // `only` is an OPTIONAL array of slugs for a one-off partial send. It never touches the target's
+  // stored config — the picker is deliberately not a shortcut for editing the target, because a
+  // filter you set once and forget is how a target silently stops sending things for weeks.
+  const serverSync = async (t, only) => {
     setBusyId(t.id);
     try {
-      const url = `${CFG.url}/functions/v1/game-feed?sync=${encodeURIComponent(t.name)}`;
+      const narrow = Array.isArray(only) && only.length ? `&packs=${encodeURIComponent(only.join(","))}` : "";
+      const url = `${CFG.url}/functions/v1/game-feed?sync=${encodeURIComponent(t.name)}${narrow}`;
       const res = await fetch(url, { headers: { apikey: CFG.key, Authorization: `Bearer ${CFG.key}` } });
       const out = await res.json();
       if (!res.ok || out.ok === false) throw new Error(out.error || `HTTP ${res.status}`);
       // The edge function writes its own pm_sync_log row, so this does NOT log again — two rows for
       // one sync would make the history lie about how often content went out.
-      await db_sync.markReleased(null);
-      logActivity("target", t.id, t.name, "import", `server-synced ${out.sent?.pack_count ?? "?"} packs`);
+      // markReleased(null) clears pending-changes on EVERY published pack. After a partial send that
+      // would be a lie: packs that were not sent still have changes the game has not seen. Only clear
+      // the flag on a full send.
+      if (!narrow) await db_sync.markReleased(null);
+      const sentSlugs = out.sent?.packs || [];
+      logActivity("target", t.id, t.name, "import",
+        narrow ? `server-synced ${sentSlugs.length} pack(s): ${sentSlugs.join(", ")}`
+               : `server-synced ${out.sent?.pack_count ?? "?"} packs`);
       onSynced && onSynced();
-      notify(`Server sync: ${out.writes} writes to ${t.name}`);
+      notify(narrow ? `Sent ${sentSlugs.length} pack(s) to ${t.name} — everything else in the game is unchanged`
+                    : `Server sync: ${out.writes} writes to ${t.name}`,
+             narrow ? { duration: 6000 } : undefined);
     } catch (e) {
       notify("Server sync failed: " + e.message, { kind: "error", duration: 6000 });
     } finally { setBusyId(null); }
@@ -231,6 +245,7 @@ function PublishHub({ packs, onSynced }) {
                           <Btn variant="ghost" size="sm" onClick={() => setEditTarget(t)}>Edit</Btn>
                           <Btn size="sm" disabled={busyId === t.id || !prof} onClick={() => syncTarget(t)} icon="🔥" title="Runs in this browser tab. The original path.">{busyId === t.id ? "Syncing…" : "Browser sync"}</Btn>
                           <Btn size="sm" variant="ghost" disabled={busyId === t.id || !prof} onClick={() => serverSync(t)} icon="☁" title="Runs on the server. Same result, and this is the one Claude can trigger.">{busyId === t.id ? "Syncing…" : "Server sync"}</Btn>
+                          <Btn size="sm" variant="ghost" disabled={busyId === t.id || !prof} onClick={() => setPick({ target: t, sel: [] })} icon="◧" title="Send only some packs, this once. Does not change the target.">Some packs…</Btn>
                           <Btn variant="danger" size="sm" onClick={() => deleteTarget(t)}>Delete</Btn>
                         </div>
                       </div>
@@ -241,6 +256,54 @@ function PublishHub({ packs, onSynced }) {
             )}
         </div>
       )}
+
+      {/* PARTIAL SEND PICKER. Deliberately separate from the target editor: this is a one-off for
+          THIS send and stores nothing. The target's own filter still bounds it — the server rejects
+          any slug the target would not have sent, so this list showing something the target excludes
+          is not a way around it. */}
+      <Modal open={pick !== null} onClose={() => setPick(null)} width={560}>
+        {pick !== null && (() => {
+          const avail = (sample.packs || []);
+          const cfgPacks = Array.isArray(pick.target.config?.packs) ? pick.target.config.packs : [];
+          const sendable = cfgPacks.length ? avail.filter(p => cfgPacks.includes(p.slug)) : avail;
+          return (
+            <div>
+              <h3 style={{ margin: "0 0 6px", fontSize: 17, fontWeight: 800, color: C.ink }}>Send some packs to {pick.target.name}</h3>
+              <div style={{ fontSize: 13, color: C.sub, lineHeight: 1.6, marginBottom: S.lg }}>
+                A one-off send. This does not change the target — its settings are untouched, and the next
+                ordinary Server sync still sends everything.
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {sendable.map(p => {
+                  const on = pick.sel.includes(p.slug);
+                  return (
+                    <button key={p.slug} type="button"
+                      onClick={() => setPick({ ...pick, sel: on ? pick.sel.filter(x => x !== p.slug) : [...pick.sel, p.slug] })}
+                      style={{ padding: "6px 11px", borderRadius: 999, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                               fontFamily: "inherit", border: `1px solid ${on ? C.brand : C.line}`,
+                               background: on ? C.brandSoft : C.card, color: on ? C.brandInk : C.ink2 }}>
+                      {p.emoji ? p.emoji + " " : ""}{p.name}
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ marginTop: S.lg, padding: "11px 13px", borderRadius: R.md, background: C.brandSoft,
+                            color: C.brandInk, fontSize: 12.5, lineHeight: 1.6, fontWeight: 600 }}>
+                Everything you do not tick keeps whatever the game already has for it. A send never deletes,
+                and it never refreshes a pack it was not asked for — so a pack you edited but leave unticked
+                stays out of date in the game.
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: S.lg, justifyContent: "flex-end" }}>
+                <Btn variant="ghost" onClick={() => setPick(null)}>Cancel</Btn>
+                <Btn disabled={!pick.sel.length} icon="☁"
+                  onClick={() => { const t = pick.target, sel = pick.sel; setPick(null); serverSync(t, sel); }}>
+                  Send {pick.sel.length || ""} pack{pick.sel.length === 1 ? "" : "s"}
+                </Btn>
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
 
       <Modal open={editProfile !== null} onClose={() => setEditProfile(null)} width={720}>
         {editProfile !== null && <ProfileBuilder profile={editProfile.id ? editProfile : null} sampleContent={sample} onSave={saveProfile} onClose={() => setEditProfile(null)} />}
