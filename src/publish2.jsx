@@ -41,6 +41,30 @@ function PublishHub({ packs, onSynced }) {
     if (!ok) return;
     await db_targets.remove(t.id); await targetsState.reload(); notify("Target deleted");
   };
+  // SERVER SYNC — the same job, done by the edge function instead of this browser.
+  // Kept as a SEPARATE button rather than replacing the browser one: the browser path is the only
+  // route to Firebase that has ever run, and swapping it out silently would put a working thing at
+  // risk to save a button. Both exist until the server path has proven itself.
+  // The edge function reads the target's own config, so this cannot send anywhere the browser
+  // button would not have.
+  const serverSync = async (t) => {
+    setBusyId(t.id);
+    try {
+      const url = `${CFG.url}/functions/v1/game-feed?sync=${encodeURIComponent(t.name)}`;
+      const res = await fetch(url, { headers: { apikey: CFG.key, Authorization: `Bearer ${CFG.key}` } });
+      const out = await res.json();
+      if (!res.ok || out.ok === false) throw new Error(out.error || `HTTP ${res.status}`);
+      // The edge function writes its own pm_sync_log row, so this does NOT log again — two rows for
+      // one sync would make the history lie about how often content went out.
+      await db_sync.markReleased(null);
+      logActivity("target", t.id, t.name, "import", `server-synced ${out.sent?.pack_count ?? "?"} packs`);
+      onSynced && onSynced();
+      notify(`Server sync: ${out.writes} writes to ${t.name}`);
+    } catch (e) {
+      notify("Server sync failed: " + e.message, { kind: "error", duration: 6000 });
+    } finally { setBusyId(null); }
+  };
+
   const syncTarget = async (t) => {
     const profile = profiles.find(p => p.id === t.profile_id);
     if (!profile) { notify("This target's profile is missing", { kind: "error" }); return; }
@@ -205,7 +229,8 @@ function PublishHub({ packs, onSynced }) {
                         </div>
                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                           <Btn variant="ghost" size="sm" onClick={() => setEditTarget(t)}>Edit</Btn>
-                          <Btn size="sm" disabled={busyId === t.id || !prof} onClick={() => syncTarget(t)} icon="🔥">{busyId === t.id ? "Syncing…" : "Sync now"}</Btn>
+                          <Btn size="sm" disabled={busyId === t.id || !prof} onClick={() => syncTarget(t)} icon="🔥" title="Runs in this browser tab. The original path.">{busyId === t.id ? "Syncing…" : "Browser sync"}</Btn>
+                          <Btn size="sm" variant="ghost" disabled={busyId === t.id || !prof} onClick={() => serverSync(t)} icon="☁" title="Runs on the server. Same result, and this is the one Claude can trigger.">{busyId === t.id ? "Syncing…" : "Server sync"}</Btn>
                           <Btn variant="danger" size="sm" onClick={() => deleteTarget(t)}>Delete</Btn>
                         </div>
                       </div>

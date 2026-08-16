@@ -530,6 +530,26 @@ const TOOLS = [
     },
   },
   {
+    name: 'sync_to_game',
+    description:
+      'Send approved content to the game (Firebase). THIS IS THE STEP THAT PUTS CONTENT IN FRONT OF ' +
+      'CHILDREN — approving a question adds it to a pack, but the game does not see it until a sync. ' +
+      'Call it WITHOUT confirm first: that is a dry run which reports exactly what would be sent and ' +
+      'writes nothing. Show the person the packs and counts, and only call again with confirm: true ' +
+      'once they have said yes. You cannot choose a destination or which packs go — the target is ' +
+      'configured in the CMS and its own settings decide. Requires approval rights.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        target: { type: 'string', description: 'The sync target name as configured in the CMS (e.g. "Firebase").' },
+        confirm: { type: 'boolean', description: 'Omit or false for a dry run. true actually sends.' },
+      },
+      required: ['target'],
+      additionalProperties: false,
+    },
+    annotations: { title: 'Send content to the game' },
+  },
+  {
     name: 'approve_question',
     description:
       'Approve ONE question from the review queue and make it LIVE. This is the last gate before a ' +
@@ -1371,6 +1391,38 @@ async function callTool(db: any, partner: string, name: string, args: any, canAp
     return data;
   }
 
+  // SYNC — the first tool that puts content in front of a CHILD.
+  // Everything else the connector does is contained: propose writes to a queue, reject removes,
+  // approve moves a question into a pack that still has to be SENT. This ships it.
+  // WHAT IT CANNOT DO: name a destination. It triggers a target that already exists in the CMS, and
+  // the edge function reads that target's own URL, credentials and pack filter. The connector never
+  // sees a credential and cannot point a sync somewhere new.
+  // DRY RUN BY DEFAULT: sending is the exception, so a caller has to mean it.
+  if (name === 'sync_to_game') {
+    if (!canApprove) return { error: 'This token cannot sync. Ask Albert to enable it.' };
+    const target = String(args.target || '').trim();
+    if (!target) {
+      const { data: ts } = await db.from('pm_sync_targets').select('name');
+      return { error: 'Which target? Name one of these.', targets: (ts || []).map((t: any) => t.name) };
+    }
+    const send = args.confirm === true;
+    const syncUrl = `${SUPABASE_URL}/functions/v1/game-feed?sync=${encodeURIComponent(target)}${send ? '' : '&dry=1'}`;
+    const r = await fetch(syncUrl, { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` } });
+    const out = await r.json().catch(() => null);
+    if (!r.ok || !out || out.ok === false) {
+      return { error: (out && (out.error || out.message)) || `Sync failed (HTTP ${r.status})`, detail: out };
+    }
+    if (!send) {
+      return {
+        would_send: out.would_send,
+        note: 'NOTHING WAS SENT. This is what would go. Show the person the pack list and the counts, ' +
+              'and only call again with confirm: true once they have said yes.',
+      };
+    }
+    return { sent: out.sent, writes: out.writes,
+             note: 'That content is now live for children on the game next read.' };
+  }
+
   if (name === 'reject_questions') {
     const ids: string[] = Array.isArray(args.ids) ? args.ids.filter(Boolean) : [];
     if (!ids.length) return { error: 'No ids given. Get them from preview_questions.' };
@@ -1803,7 +1855,7 @@ Deno.serve(async (req) => {
     // attempted, argued with, or half-explained — which is a better boundary than a refusal.
     const visible = who?.can_approve
       ? TOOLS
-      : TOOLS.filter((t: any) => t.name !== 'approve_question' && t.name !== 'unapprove_question');
+      : TOOLS.filter((t: any) => !['approve_question', 'unapprove_question', 'sync_to_game'].includes(t.name));
     return rpcOk({ tools: visible });
   }
 

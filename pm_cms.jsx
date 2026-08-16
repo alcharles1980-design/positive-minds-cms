@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.08.16-37", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.08.16-39", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -2828,6 +2828,30 @@ function PublishHub({ packs, onSynced }) {
     if (!ok) return;
     await db_targets.remove(t.id); await targetsState.reload(); notify("Target deleted");
   };
+  // SERVER SYNC — the same job, done by the edge function instead of this browser.
+  // Kept as a SEPARATE button rather than replacing the browser one: the browser path is the only
+  // route to Firebase that has ever run, and swapping it out silently would put a working thing at
+  // risk to save a button. Both exist until the server path has proven itself.
+  // The edge function reads the target's own config, so this cannot send anywhere the browser
+  // button would not have.
+  const serverSync = async (t) => {
+    setBusyId(t.id);
+    try {
+      const url = `${CFG.url}/functions/v1/game-feed?sync=${encodeURIComponent(t.name)}`;
+      const res = await fetch(url, { headers: { apikey: CFG.key, Authorization: `Bearer ${CFG.key}` } });
+      const out = await res.json();
+      if (!res.ok || out.ok === false) throw new Error(out.error || `HTTP ${res.status}`);
+      // The edge function writes its own pm_sync_log row, so this does NOT log again — two rows for
+      // one sync would make the history lie about how often content went out.
+      await db_sync.markReleased(null);
+      logActivity("target", t.id, t.name, "import", `server-synced ${out.sent?.pack_count ?? "?"} packs`);
+      onSynced && onSynced();
+      notify(`Server sync: ${out.writes} writes to ${t.name}`);
+    } catch (e) {
+      notify("Server sync failed: " + e.message, { kind: "error", duration: 6000 });
+    } finally { setBusyId(null); }
+  };
+
   const syncTarget = async (t) => {
     const profile = profiles.find(p => p.id === t.profile_id);
     if (!profile) { notify("This target's profile is missing", { kind: "error" }); return; }
@@ -2992,7 +3016,8 @@ function PublishHub({ packs, onSynced }) {
                         </div>
                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                           <Btn variant="ghost" size="sm" onClick={() => setEditTarget(t)}>Edit</Btn>
-                          <Btn size="sm" disabled={busyId === t.id || !prof} onClick={() => syncTarget(t)} icon="🔥">{busyId === t.id ? "Syncing…" : "Sync now"}</Btn>
+                          <Btn size="sm" disabled={busyId === t.id || !prof} onClick={() => syncTarget(t)} icon="🔥" title="Runs in this browser tab. The original path.">{busyId === t.id ? "Syncing…" : "Browser sync"}</Btn>
+                          <Btn size="sm" variant="ghost" disabled={busyId === t.id || !prof} onClick={() => serverSync(t)} icon="☁" title="Runs on the server. Same result, and this is the one Claude can trigger.">{busyId === t.id ? "Syncing…" : "Server sync"}</Btn>
                           <Btn variant="danger" size="sm" onClick={() => deleteTarget(t)}>Delete</Btn>
                         </div>
                       </div>
@@ -4353,6 +4378,33 @@ distinguishable from a pass, so a row below the current CHECKS_VERSION reports "
 version" and says to play it rather than trust the silence.
 Reported at approval AFTER the fact, never as a gate: blocking on stale checks would strand every
 question queued before the scanner existed.
+
+### TWO SYNC PATHS: browser and server
+
+**WHY TWO.** The CMS Sync button runs IN THE BROWSER — it reads content, reshapes it and posts to
+the target. That only works while a page is open, so nothing else could ever trigger a sync and a
+connector could not "press the button": with the tab closed there is no button running.
+game-feed?sync=<target> does the same job on the server. Both are kept and both are labelled —
+Browser sync and Server sync — because the browser path is the only route to Firebase that has ever
+run, and replacing it silently would risk a working thing to save a button. Switch the button over
+only once the server path has proven itself.
+
+**THE TRANSFORM IS NOT COPIED.** The server route calls build(), the same function game-feed already
+uses for every export, so what reaches Firebase is BY CONSTRUCTION the shape ?profile= returns. Only
+the write planner and the HTTP writers are new. A second copy of the builder would have been another
+byte-identical invariant to maintain (rule 4.42).
+
+**?dry=1** reports what would be sent and writes nothing. Every attempt is logged INCLUDING
+failures — a sync that failed is exactly what belongs in the history — with channel 'server' so it
+is distinguishable from a browser push. The edge function writes that row itself, so the CMS does
+NOT log again: two rows for one sync would make the history overstate how often content went out.
+
+**FROM CLAUDE: \`sync_to_game\`.** The first connector tool that puts content in front of a CHILD —
+everything else is contained (propose writes to a queue, reject removes, approve moves a question
+into a pack that still has to be sent). It is DRY RUN BY DEFAULT: without confirm:true it reports
+what would go and writes nothing. It cannot name a destination or choose packs; it triggers a target
+that exists in the CMS and that target's own config decides where content goes and which packs.
+The connector never sees a credential. Gated on can_approve, so tokens without it never see it.
 
 ### PER-TARGET PACK FILTER (Firebase sync)
 

@@ -1120,6 +1120,33 @@ version" and says to play it rather than trust the silence.
 Reported at approval AFTER the fact, never as a gate: blocking on stale checks would strand every
 question queued before the scanner existed.
 
+### TWO SYNC PATHS: browser and server
+
+**WHY TWO.** The CMS Sync button runs IN THE BROWSER — it reads content, reshapes it and posts to
+the target. That only works while a page is open, so nothing else could ever trigger a sync and a
+connector could not "press the button": with the tab closed there is no button running.
+game-feed?sync=<target> does the same job on the server. Both are kept and both are labelled —
+Browser sync and Server sync — because the browser path is the only route to Firebase that has ever
+run, and replacing it silently would risk a working thing to save a button. Switch the button over
+only once the server path has proven itself.
+
+**THE TRANSFORM IS NOT COPIED.** The server route calls build(), the same function game-feed already
+uses for every export, so what reaches Firebase is BY CONSTRUCTION the shape ?profile= returns. Only
+the write planner and the HTTP writers are new. A second copy of the builder would have been another
+byte-identical invariant to maintain (rule 4.42).
+
+**?dry=1** reports what would be sent and writes nothing. Every attempt is logged INCLUDING
+failures — a sync that failed is exactly what belongs in the history — with channel 'server' so it
+is distinguishable from a browser push. The edge function writes that row itself, so the CMS does
+NOT log again: two rows for one sync would make the history overstate how often content went out.
+
+**FROM CLAUDE: \`sync_to_game\`.** The first connector tool that puts content in front of a CHILD —
+everything else is contained (propose writes to a queue, reject removes, approve moves a question
+into a pack that still has to be sent). It is DRY RUN BY DEFAULT: without confirm:true it reports
+what would go and writes nothing. It cannot name a destination or choose packs; it triggers a target
+that exists in the CMS and that target's own config decides where content goes and which packs.
+The connector never sees a credential. Gated on can_approve, so tokens without it never see it.
+
 ### PER-TARGET PACK FILTER (Firebase sync)
 
 A sync target's \`config.packs\` is an optional list of slugs. EMPTY OR ABSENT = SEND EVERYTHING, so
