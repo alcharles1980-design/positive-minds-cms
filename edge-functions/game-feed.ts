@@ -308,6 +308,23 @@ Deno.serve(async (req) => {
     const packList = packs.filter((p) => (byPack[p.id]?.length || 0) > 0 || spec.include_empty || filters.include_empty);
     const body = build(spec, packList, byPack);
 
+    // Record the pull, fire and forget — a logging failure must never fail the sync it observes.
+    if (packList.length) {
+      const clientName = (url.searchParams.get('client') || req.headers.get('user-agent') || '').slice(0, 80) || null;
+      fetch(`${SUPABASE_URL}/rest/v1/pm_sync_log`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', apikey: SERVICE_KEY,
+                   Authorization: `Bearer ${SERVICE_KEY}`, Prefer: 'return=minimal' },
+        body: JSON.stringify({
+          direction: 'pull', endpoint: 'game-feed', client: clientName,
+          profile_id: profile.id, profile_name: profile.name,
+          mode: 'full', status: 'ok',
+          packs: packSlugs.length ? packSlugs : null,
+          pack_count: packList.length, question_count: questions.length,
+        }),
+      }).catch(() => {});
+    }
+
     const payload = spec.include_meta === false ? body : {
       meta: { generated_at: new Date().toISOString(), profile: profile.name, pack_count: packList.length, question_count: questions.length, levels_expanded: !!spec.expand_levels, filtered_packs: packSlugs.length ? packSlugs : undefined },
       ...(stats ? { stats } : {}),

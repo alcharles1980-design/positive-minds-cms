@@ -8,6 +8,10 @@
 //   • GET ?levels=1,2,3            → restrict expanded level-variations to these levels
 //   • GET ?format=xml              → XML instead of JSON (any of the above)
 //   • GET ?health=1                → liveness probe
+//   • GET ?client=<name>           → NAME YOURSELF. Recorded against the pull in pm_sync_log, so
+//                                    "when did the game last sync, and which packs did it take"
+//                                    is answerable. Optional; without it the pull is logged as
+//                                    unnamed. Ask pm_sync_status() for the answer.
 //
 // CHOOSING WHAT YOU PULL:
 //   • GET ?include=a,b,c           → pick the blocks you want. Any of:
@@ -240,6 +244,8 @@ Deno.serve(async (req) => {
   const p = url.searchParams;
 
   if (p.get('health')) {
+
+
     return json({ ok: true, service: 'content-api', auth_required: !!API_KEY, time: new Date().toISOString() });
   }
 
@@ -295,7 +301,15 @@ Deno.serve(async (req) => {
     // released_version >= content_version. Anything edited since the last release drops out until
     // it is released again.
     const releasedOnly = ['1', 'true', 'yes'].includes((p.get('released') || '').toLowerCase());
+    // Sync status, the same answer from either endpoint so a dashboard cannot get two versions.
+    if (p.get('sync_status')) {
+      const { data, error } = await db.rpc('pm_sync_status');
+      return error ? json({ error: String(error.message || error) }, 500) : json(data);
+    }
+
     const packSlugs = (p.get('packs') || '').split(',').map(s => s.trim()).filter(Boolean);
+    // Who is pulling. Explicit ?client= beats the user agent, which is usually a library name.
+    const clientName = (p.get('client') || req.headers.get('user-agent') || '').slice(0, 80) || null;
     const levelNums = (p.get('levels') || '').split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
     const sinceRaw = p.get('since');
     let since: Date | null = null;
@@ -452,9 +466,35 @@ Deno.serve(async (req) => {
       ...(since ? { deletions } : {}),
     };
 
-    const out = wantXml ? xmlResp(toXml(clean(payload), 'content')) : json(clean(payload));
+    const bodyText = wantXml ? toXml(clean(payload), 'content') : JSON.stringify(clean(payload));
+    const out = wantXml ? xmlResp(bodyText) : json(clean(payload));
     out.headers.set('ETag', etag);
     out.headers.set('Cache-Control', 'public, max-age=30');
+
+    // RECORD THE PULL. Only a real content pull is logged — not a 304, not a manifest poll, not a
+    // stats read — because "when did the game last sync" means when it last TOOK CONTENT. Logging
+    // every poll would bury that in noise from a client checking the manifest every minute.
+    // Fire-and-forget: a logging failure must never fail the sync it is observing.
+    if (packsOut.length || (flatQuestions && flatQuestions.length)) {
+      const rec = {
+        direction: 'pull',
+        endpoint: 'content-api',
+        client: clientName,
+        mode: since ? 'incremental' : 'full',
+        status: 'ok',
+        packs: packSlugs.length ? packSlugs : null,   // null = everything
+        pack_count: packsOut.length,
+        question_count: flatQuestions ? flatQuestions.length : questions.length,
+        version: String(globalVersion),
+        bytes: bodyText.length,
+      };
+      fetch(`${SUPABASE_URL}/rest/v1/pm_sync_log`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', apikey: SERVICE_KEY,
+                   Authorization: `Bearer ${SERVICE_KEY}`, Prefer: 'return=minimal' },
+        body: JSON.stringify(rec),
+      }).catch(() => {});
+    }
     return out;
   } catch (e) {
     return json({ error: String(e) }, 500);
