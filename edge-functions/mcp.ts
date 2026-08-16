@@ -1226,14 +1226,18 @@ async function callTool(db: any, partner: string, name: string, args: any, canAp
         `Check you have the right question and pass its correct word exactly.` };
     }
 
+    // Timestamped BEFORE the delete so the note lands only on the tombstone this delete creates. A
+    // question that was deactivated first ALREADY has a tombstone from the status trigger, and an
+    // unscoped update would back-date this reason onto that earlier, unrelated event.
+    const beforeDelete = new Date(Date.now() - 1000).toISOString();
     const { error: delErr } = await db.from('pm_questions').delete().eq('id', q.id);
     if (delErr) return { error: `Delete failed: ${delErr.message}` };
 
-    // The tombstone is written by a database trigger, not here — so it cannot be forgotten by a
+    // The tombstone is written by a BEFORE DELETE trigger, not here — so it cannot be forgotten by a
     // caller and cannot differ between the CMS and the connector.
     if (args.reason) {
       await db.from('pm_deletions').update({ note: String(args.reason).slice(0, 500) })
-        .eq('entity_id', q.id).eq('entity_type', 'question');
+        .eq('entity_id', q.id).eq('entity_type', 'question').gte('deleted_at', beforeDelete);
     }
     return {
       deleted: true,
@@ -1303,8 +1307,18 @@ async function callTool(db: any, partner: string, name: string, args: any, canAp
       .select('id,pack_id,template,answer,alt_answer,level,status')
       .in('pack_id', packIds);
     if (scope === 'live') qQ = qQ.eq('status', 'active');
-    const { data: allQs } = await qQ.limit(5000);
-    const questions = allQs || [];
+    // PAGINATED, not .limit(5000). A single large read is silently capped by PostgREST, and the
+    // failure mode for an AUDIT is the worst one available: it would scan the first page, find
+    // nothing wrong in the rest because it never looked, and report the bank clean. Invisible at 55
+    // questions, wrong at 1500. Pull in windows until a short page says we are done.
+    const questions: any[] = [];
+    for (let from = 0; from < 20000; from += 1000) {
+      const { data: page, error: pErr } = await qQ.range(from, from + 999);
+      if (pErr) return { error: `Could not read questions: ${pErr.message}` };
+      if (!page || !page.length) break;
+      questions.push(...page);
+      if (page.length < 1000) break;
+    }
 
     const byPack: Record<string, any[]> = {};
     for (const q of questions) (byPack[q.pack_id] ||= []).push(q);
@@ -1340,32 +1354,52 @@ async function callTool(db: any, partner: string, name: string, args: any, canAp
         const ans = (q.answer || '').toUpperCase(), alt = (q.alt_answer || '').toUpperCase();
         if (alt && answers.has(alt)) {
           byCode.cross_role = (byCode.cross_role || 0) + 1;
-          advisory.push({ ...where, issue: 'cross_role',
+          advisory.push({ ...where, issue: 'cross_role', word: alt,
             detail: `"${alt}" is the wrong option here and the correct answer to another question in this pack.` });
         } else if (ans && alts.has(ans)) {
           byCode.cross_role = (byCode.cross_role || 0) + 1;
-          advisory.push({ ...where, issue: 'cross_role',
+          advisory.push({ ...where, issue: 'cross_role', word: ans,
             detail: `"${ans}" is the answer here and a wrong option in another question in this pack.` });
         }
       }
     }
+
+    // A duplicate and a cross-role word are properties of a PAIR, so both members flag each other and
+    // ONE problem arrives as TWO findings. Collapse them, or the totals overstate the damage and a
+    // reviewer fixes one side then finds the count has only halved.
+    //   duplicate  — both members are by definition the same template+answer+alt, so the rendered
+    //                `question` string is identical and keys the pair directly.
+    //   cross_role — the two sides are DIFFERENT questions; what they share is the WORD, which is
+    //                why the finding carries `word` rather than being keyed on its text.
+    const seenPair = new Set<string>();
+    const dedupe = (arr: any[]) => arr.filter((f: any) => {
+      if (f.issue !== 'duplicate' && f.issue !== 'cross_role') return true;
+      const key = f.issue === 'cross_role'
+        ? `cross_role::${f.pack_slug}::${f.word}`
+        : `duplicate::${f.pack_slug}::${f.question}`;
+      if (seenPair.has(key)) return false;
+      seenPair.add(key);
+      return true;
+    });
 
     const CAP = 60;
     const trim = (arr: any[]) => arr.length > CAP
       ? { shown: arr.slice(0, CAP), omitted: arr.length - CAP, note: `Only the first ${CAP} are listed. Narrow with pack_slug to see the rest.` }
       : arr;
 
+    const seriousD = dedupe(serious), minorD = dedupe(minor), advisoryD = dedupe(advisory);
+
     return {
       scanned: { scope, packs: packs.length, questions: questions.length,
                  note: scope === 'live'
                    ? 'Active questions in published packs — what a child can actually reach.'
                    : 'Every saved question, including inactive ones and unpublished packs.' },
-      totals: { serious: serious.length, minor: minor.length, advisory: advisory.length },
+      totals: { serious: seriousD.length, minor: minorD.length, advisory: advisoryD.length },
       by_issue: byCode,
-      serious: trim(serious),
-      ...(includeMinor ? { minor: trim(minor) } : { minor_count_only: minor.length }),
-      ...(includeAdvisory ? { advisory: trim(advisory) } : { advisory_count_only: advisory.length }),
-      note: serious.length
+      serious: trim(seriousD),
+      ...(includeMinor ? { minor: trim(minorD) } : { minor_count_only: minorD.length }),
+      ...(includeAdvisory ? { advisory: trim(advisoryD) } : { advisory_count_only: advisoryD.length }),
+      note: seriousD.length
         ? 'SERIOUS findings mean a child meets a broken question. Show each one with its sentence and both words. Nothing here has been changed — fixing is a separate, human decision.'
         : 'No serious findings. Say that plainly before listing anything else. Nothing has been changed.',
     };

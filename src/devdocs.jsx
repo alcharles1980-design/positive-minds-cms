@@ -1760,6 +1760,17 @@ DELETION FROM THE CONNECTOR (16 Aug)
 - NEITHER REACHES FIREBASE. Deleting in the CMS does not remove anything from the game; Firebase
   keeps what it was last sent. Every delete response says so, because the natural assumption is the
   opposite and acting on it leaves bad content live.
+- CHECK PASS FINDINGS (same day): audit_content read questions with \`.limit(5000)\`, which PostgREST
+  silently caps. For an AUDIT that is the worst possible failure — it scans the first page, finds
+  nothing wrong in the rest because it never looked, and reports the bank CLEAN. Invisible at 55
+  questions, wrong at 1500. Now paginated in 1000-row windows.
+- Duplicate and cross-role findings are properties of a PAIR, so both members flagged each other and
+  one problem arrived as two findings. Deduped: duplicates key on the rendered question (identical
+  by definition for both members), cross-role keys on the WORD, since the two sides are different
+  questions and only the word is shared.
+- The delete reason was written with an unscoped update, so on a question that had been DEACTIVATED
+  first — i.e. every question the guard permits — it also back-dated the reason onto the earlier
+  status tombstone. Now scoped by \`deleted_at\`.
 - \`pm_deletions\` gained a nullable \`note\` column so a delete reason is actually stored. A reason
   collected and discarded is worse than not asking (4.40).
 - CAN_APPROVE NOW GATES THREE DISTINCT POWERS: approve, sync to production, and permanent deletion.
