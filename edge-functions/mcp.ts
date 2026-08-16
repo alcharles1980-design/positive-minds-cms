@@ -549,6 +549,51 @@ const TOOLS = [
     },
   },
   {
+    name: 'delete_question',
+    description:
+      'PERMANENTLY delete ONE question from the bank. There is no undo and no bulk form. Use it to ' +
+      'clear out a question that is genuinely wrong, not to hide one — hiding is what unapprove_question ' +
+      'does, and it is reversible.\n' +
+      'IT WILL REFUSE TO DELETE A QUESTION THAT IS STILL ACTIVE. Deactivate it first (unapprove_question, ' +
+      'or the CMS), look at it, and only then delete. That order exists so a delete can never remove ' +
+      'something a child is being shown at that moment, and so there is always a step between deciding ' +
+      'and destroying.\n' +
+      'You must pass confirm_answer — the correct word of the question you mean, exactly as it reads. A ' +
+      'wrong or stale id then fails instead of deleting a different question.\n' +
+      'THIS DOES NOT REMOVE IT FROM THE GAME. Firebase keeps whatever it was last sent; a delete here ' +
+      'only changes the CMS. Say so — do not let the person believe the question is gone from the game ' +
+      'when it is not.',
+    annotations: { destructiveHint: true, idempotentHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The question id. Get it from audit_content or preview_questions — never from memory.' },
+        confirm_answer: { type: 'string', description: 'The CORRECT word of that question, exactly as stored.' },
+        reason: { type: 'string', description: 'Why it is being deleted. Recorded on the tombstone.' },
+      },
+      required: ['id', 'confirm_answer'],
+    },
+  },
+  {
+    name: 'delete_pack',
+    description:
+      'PERMANENTLY delete an EMPTY, UNPUBLISHED pack. Refuses otherwise, and the refusal is not ' +
+      'negotiable: deleting a pack CASCADES in the database and would silently take every question in ' +
+      'it, every level override, and its whole review history with it. Requiring the pack to be empty ' +
+      'first means each question is deleted deliberately, one at a time, by someone who looked at it.\n' +
+      'So the order is: unpublish the pack, delete or move its questions, then delete the pack.\n' +
+      'You must pass confirm_name — the pack\'s display name, exactly.',
+    annotations: { destructiveHint: true, idempotentHint: false },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pack_slug: { type: 'string', description: 'The slug of the pack to delete.' },
+        confirm_name: { type: 'string', description: 'The pack\'s display name, exactly as shown.' },
+      },
+      required: ['pack_slug', 'confirm_name'],
+    },
+  },
+  {
     name: 'audit_content',
     description:
       'Scan questions ALREADY SAVED and list what is wrong with them. Read-only — it changes nothing ' +
@@ -1156,6 +1201,83 @@ async function callTool(db: any, partner: string, name: string, args: any, canAp
   // submissions, pending and decided, with attribution. This matches how the CMS itself works —
   // partners share the admin login, so scoping this per-caller was a boundary that did not actually
   // hold anywhere else. Seeing each other's rejections is also the fastest way to learn the bar.
+  if (name === 'delete_question') {
+    if (!canApprove) return { error: 'This token cannot delete content.' };
+    const { data: q } = await db.from('pm_questions')
+      .select('id,pack_id,template,answer,alt_answer,status').eq('id', args.id).maybeSingle();
+    if (!q) return { error: `No question with id ${args.id}. It may already be deleted — call audit_content or preview_questions for current ids rather than reusing one from earlier in the conversation.` };
+
+    // REFUSE, do not warn. An active question is one a child can be served right now; deleting it
+    // from under them is never the right first move, and making this a refusal rather than a
+    // caveat means the two-step cannot be talked past by an insistent conversation.
+    if (q.status === 'active') {
+      return { error: 'This question is still ACTIVE, so it will not be deleted. Deactivate it first ' +
+        '(unapprove_question, or the CMS), check it is the one you mean, then delete it. That order is ' +
+        'deliberate: it keeps a step between deciding and destroying, and stops a delete removing ' +
+        'something a child is being shown right now.',
+        question: `"${q.template}" — ${q.answer} / ${q.alt_answer}`, status: q.status };
+    }
+
+    // The id could be stale or hallucinated and would still name a REAL row. Matching the answer word
+    // means a wrong id fails loudly instead of destroying a different question.
+    const given = String(args.confirm_answer || '').trim().toUpperCase();
+    if (!given || given !== (q.answer || '').toUpperCase()) {
+      return { error: `confirm_answer does not match the question with that id, so nothing was deleted. ` +
+        `Check you have the right question and pass its correct word exactly.` };
+    }
+
+    const { error: delErr } = await db.from('pm_questions').delete().eq('id', q.id);
+    if (delErr) return { error: `Delete failed: ${delErr.message}` };
+
+    // The tombstone is written by a database trigger, not here — so it cannot be forgotten by a
+    // caller and cannot differ between the CMS and the connector.
+    if (args.reason) {
+      await db.from('pm_deletions').update({ note: String(args.reason).slice(0, 500) })
+        .eq('entity_id', q.id).eq('entity_type', 'question');
+    }
+    return {
+      deleted: true,
+      question: `"${q.template}" — ${q.answer} / ${q.alt_answer}`,
+      note: 'Gone from the CMS, permanently. THE GAME STILL HAS IT: Firebase keeps whatever it was ' +
+            'last sent, and a delete here does not reach it. Tell the person that, and that a sync is ' +
+            'what makes the game match.',
+    };
+  }
+
+  if (name === 'delete_pack') {
+    if (!canApprove) return { error: 'This token cannot delete content.' };
+    const { data: pack } = await db.from('pm_packs')
+      .select('id,slug,name,status').eq('slug', args.pack_slug).maybeSingle();
+    if (!pack) return { error: `No pack with slug "${args.pack_slug}".` };
+
+    if (String(args.confirm_name || '').trim() !== (pack.name || '').trim()) {
+      return { error: `confirm_name does not match. This pack is called "${pack.name}". Nothing was deleted.` };
+    }
+    if (pack.status === 'published') {
+      return { error: `"${pack.name}" is PUBLISHED and will not be deleted. Unpublish it first, and ` +
+        `give the feed a chance to stop serving it before it disappears entirely.` };
+    }
+
+    // THE CASCADE IS THE WHOLE REASON FOR THIS GUARD. pm_questions, pm_question_levels and
+    // pm_review_queue are all ON DELETE CASCADE from pm_packs, so deleting a pack with content in it
+    // would silently destroy every question, every level override and the entire review history in
+    // one statement, with one confirmation. Requiring it to be empty forces each question to be
+    // deleted on its own terms by someone who read it.
+    const { count } = await db.from('pm_questions')
+      .select('id', { count: 'exact', head: true }).eq('pack_id', pack.id);
+    if (count && count > 0) {
+      return { error: `"${pack.name}" still holds ${count} question(s) and will not be deleted. ` +
+        `Deleting a pack CASCADES — it would take every one of those questions, their level ` +
+        `overrides and the pack's whole review history with it, in one go. Empty it first, one ` +
+        `question at a time.`, questions_remaining: count };
+    }
+
+    const { error: delErr } = await db.from('pm_packs').delete().eq('id', pack.id);
+    if (delErr) return { error: `Delete failed: ${delErr.message}` };
+    return { deleted: true, pack: pack.name,
+      note: 'Gone from the CMS. Firebase keeps whatever it was last sent — a delete here does not reach the game.' };
+  }
+
   if (name === 'audit_content') {
     // READ ONLY. Reuses validateQuestion — the SAME function check_questions calls — so a question
     // this reports as broken is exactly a question that would have been refused at proposal time.
@@ -2012,7 +2134,7 @@ Deno.serve(async (req) => {
     // attempted, argued with, or half-explained — which is a better boundary than a refusal.
     const visible = who?.can_approve
       ? TOOLS
-      : TOOLS.filter((t: any) => !['approve_question', 'unapprove_question', 'sync_to_game'].includes(t.name));
+      : TOOLS.filter((t: any) => !['approve_question', 'unapprove_question', 'sync_to_game', 'delete_question', 'delete_pack'].includes(t.name));
     return rpcOk({ tools: visible });
   }
 

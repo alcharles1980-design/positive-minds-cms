@@ -536,6 +536,11 @@ async function handleRequest(request, env, ctx) {
               // Sending is listed LAST because it IS last: approving puts a question in a pack, and
               // the game does not have it until a sync. Leaving this off the menu is what made the
               // line below claim approval was the final gate (rule 4.42, second time).
+              // Delete sits AFTER undo deliberately: the reversible option should be read first.
+              { do: "Permanently delete a question, or an empty pack", icon: "\u2716",
+                how: "delete_question (deactivate it first — it refuses while active) or delete_pack " +
+                     "(empty and unpublished only). No undo, one at a time, and neither reaches the game",
+                say: "I want to permanently delete a question." },
               { do: "Send approved content to the game", icon: "\u2601",
                 how: "sync_to_game with no confirm (dry run), show the packs and counts, then only " +
                      "sync_to_game(confirm: true) once the person has said yes",
@@ -552,7 +557,9 @@ async function handleRequest(request, env, ctx) {
               "the dry run and said yes. There is no bulk approve on purpose: a same-length pair, or a " +
               "wrong word that also fits the sentence, only shows itself when you PLAY the question. " +
               "Approving and sending are available only to tokens granted them; if you do not see the " +
-              "tool, you do not have it.",
+              "tool, you do not have it. DELETING is the one thing here that cannot be undone, and it " +
+              "still does not reach the game: Firebase keeps whatever it was last sent until a sync " +
+              "says otherwise.",
             how_to_show_this: "Give the person a SHORT orientation, not this JSON. In this order:\n" +
               "1. The headline.\n" +
               "2. A bulleted list of the packs that have something in them (live or awaiting) with their " +
@@ -755,6 +762,7 @@ async function handleRequest(request, env, ctx) {
                   "Start a new pack, or sharpen an existing one's definition",
                   "Audit the saved questions and list what is wrong with them (changes nothing)",
                   "Review and approve a question into a pack, one at a time (and undo it)",
+                  "Permanently delete a question, or an empty pack — no undo, and it does not reach the game",
                   "Send approved content to the game, once a human has seen what would go and said yes",
                 ],
                 full_picture: "Call the 'overview' tool for live counts and the complete menu.",

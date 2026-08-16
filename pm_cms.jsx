@@ -17,7 +17,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 // ---------- config ----------
 const CFG = {
-  build: "2026.08.16-44", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+  build: "2026.08.16-45", // bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
   url: "https://tytrmjjucqijzcrbwjfm.supabase.co",
   key: "sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",
   adminEmail: "admin@positiveminds.app",
@@ -4070,6 +4070,8 @@ not a Supabase JWT). Speaks JSON-RPC 2.0 over Streamable HTTP. Ten tools, delibe
 | \`reject_questions\` | — | rejects PENDING queue items (never approves) |
 | \`edit_queued_question\` | — | fixes a PENDING queue item, re-validated |
 | \`audit_content\` | READ ONLY — scans saved questions, lists defects | nothing; it cannot fix |
+| \`delete_question\` | — | PERMANENT. Refuses while active; needs the answer word echoed back |
+| \`delete_pack\` | — | PERMANENT. Refuses unless unpublished AND empty (the FK cascade) |
 | \`sync_to_game\` | dry run reports what would be sent | with confirm:true, SENDS to the game; optional \`packs\` narrows this send only (gated on can_approve) |
 
 **PACK CREATION (Aug 2026).** \`create_pack\` mirrors the CMS's own PackEditor + \`savePack\` convention
@@ -5066,6 +5068,26 @@ LIVE AND WORKING
 SYNC — TWO PATHS, ONE TRANSFORM (16 Aug)
 - Content reaching a child is now TWO gates, not one: approve puts a question in a PACK, a sync puts
   the pack in the GAME. Any text claiming approval is the last gate is wrong (rule 4.49).
+DELETION FROM THE CONNECTOR (16 Aug)
+- \`delete_question\` and \`delete_pack\`. Both permanent, both one at a time, both gated on can_approve.
+- \`delete_question\` REFUSES while the question is active. Deactivate, look, then delete. A refusal
+  rather than a warning, so the two-step cannot be talked past, and so a delete can never remove
+  something a child is being served at that moment.
+- It also requires \`confirm_answer\` echoed back. A stale or invented id names a REAL row; matching
+  the answer word makes a wrong id fail loudly instead of destroying a different question.
+- \`delete_pack\` REFUSES unless the pack is unpublished AND empty. pm_questions, pm_question_levels
+  and pm_review_queue are ALL \`on delete cascade\` from pm_packs — one statement, one confirmation,
+  and every question plus the entire review history would be gone. Emptying first forces each
+  question to be deleted on its own terms.
+- NEITHER REACHES FIREBASE. Deleting in the CMS does not remove anything from the game; Firebase
+  keeps what it was last sent. Every delete response says so, because the natural assumption is the
+  opposite and acting on it leaves bad content live.
+- \`pm_deletions\` gained a nullable \`note\` column so a delete reason is actually stored. A reason
+  collected and discarded is worse than not asking (4.40).
+- CAN_APPROVE NOW GATES THREE DISTINCT POWERS: approve, sync to production, and permanent deletion.
+  That is a lot behind one boolean and it was never a decision — see the can_sync note above. Any
+  split should probably cover deletion too.
+
 - \`audit_content\` (16 Aug) scans SAVED questions and lists defects, tiered serious/minor/advisory.
   It calls the SAME \`validateQuestion\` that check_questions calls — a second validator would drift
   and then the two would disagree about what a defect is, which is worse than not auditing. Scope
@@ -7105,6 +7127,11 @@ token is genuinely dead or the 7 days elapse. Anon publishable key authorizes re
    summary), check_questions (validate drafts, SAVE NOTHING — this is what lets Claude fix its own
    mistakes before proposing), propose_questions (writes to the REVIEW QUEUE ONLY), create_pack and
    update_pack, review_status, preview_questions, reject_questions and edit_queued_question.
+   Add delete_question and delete_pack, gated. delete_question REFUSES while active (deactivate
+   first) and requires the answer word echoed back so a stale id cannot destroy a different row.
+   delete_pack REFUSES unless unpublished AND empty, because the pm_packs FKs are ON DELETE CASCADE
+   and would take every question and the whole review history with them. Say in both responses that
+   the deletion does NOT reach Firebase.
    Add audit_content: read-only, scans SAVED questions, tiers findings serious/minor/advisory, and
    MUST call the same validateQuestion as check_questions rather than carrying its own copy. Exclude
    the question itself from \`existing\` or every question is its own duplicate.
