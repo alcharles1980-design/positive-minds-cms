@@ -73,7 +73,7 @@ function _extends(){return _extends=Object.assign?Object.assign.bind():function(
 //   - App shell (auth gate, routing via history, command surface)
 // ============================================================
 // ---------- config ----------
-const CFG={build:"2026.08.16-47",// bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
+const CFG={build:"2026.08.16-48",// bump on every deploy; shown in the sidebar so you can tell if a cached build is stale
 url:"https://tytrmjjucqijzcrbwjfm.supabase.co",key:"sb_publishable_S16YFhxUtKsUYlUixYGW8g_t5nk28Ev",adminEmail:"admin@positiveminds.app",sessionStore:"pm_admin_session_v2",sessionMaxAgeMs:7*24*60*60*1000,// keep users logged in for 7 days
 pageSize:40};// ============================================================
 // Session + Auth
@@ -2067,7 +2067,7 @@ THE LAYOUT, so nothing is a surprise:
 
 ### 3. Read, in this order
   1. This file's section 11z — current state, what is temporary, what is outstanding.
-  2. DOC_CLAUDE_MD's golden rules, 4.1-4.49. EVERY ONE EXISTS BECAUSE SOMETHING BROKE. They are
+  2. DOC_CLAUDE_MD's golden rules, 4.1-4.50. EVERY ONE EXISTS BECAUSE SOMETHING BROKE. They are
      numbered oldest-first, listed newest-first, and none is theoretical.
   3. DOC_BUILD_PROMPT if you need to understand a subsystem you have not touched.
 
@@ -2080,8 +2080,9 @@ index.html; \`verify\` proves split->assemble is byte-identical and the two HTML
 NEVER hand-edit pm_cms.jsx or index.html — they are generated and will be overwritten.
 
 ### 5. The test suites — run ALL of them before pushing
-    npm test        # runs SIX suites: engine, runtime, interact, inspect, visual, read
-There are six, not two. engine.js and runtime.js are the ones people remember; read.js, inspect.js,
+    npm test        # runs SEVEN: types FIRST, then engine, runtime, interact, inspect, visual, read
+\`test:types\` runs first on purpose and is the one that catches what a bundler cannot.
+There are seven, not two. engine.js and runtime.js are the ones people remember; read.js, inspect.js,
 interact.js and visual.js exist, do real work, and are easy to skip for a whole session without
 noticing (rule 4.47). Then, after any change under mcp-shim/, run these three by hand — npm test
 does NOT cover them:
@@ -2090,8 +2091,12 @@ does NOT cover them:
     node mcp-shim/logging-test.mjs     # redaction — asserts no secret can reach the log
 KNOW THE BASELINE: test:visual reports ~153 MINOR defects and 0 serious. That is steady state (touch
 targets under 40px in a desktop-density UI), not a regression. Watch the SERIOUS count.
-Edge function changes: compile-check before deploying, because a syntax error ships silently:
-    npx esbuild edge-functions/mcp.ts --outfile=/tmp/check.js --format=esm --target=es2022
+Edge function changes: TYPE-check, do not merely compile:
+    npm run test:types
+This line used to recommend esbuild. IT IS NOT A TYPE CHECKER — it parses without resolving
+identifiers and shipped a ReferenceError to production (rule 4.48). Two sentences in this very
+document disagreed for weeks: one said use esbuild, the rule said esbuild is not enough. If you
+find a contradiction like that, the RULE wins; then fix the other sentence in the same commit.
 
 ### 6. What deploys where, and how
 Everything deploys from a push to main. There are three workflows:
@@ -2107,6 +2112,20 @@ nothing) or mode=deploy, optionally only=<slug>.
 Deploys take roughly 60-90 seconds. VERIFY OVER THE WIRE AFTERWARDS — a green Action is not proof
 (rule 4.26). Fetch the site and check CFG.build appears; call the shim and check the behaviour.
 
+TWO DEPLOY FAILURE MODES, BOTH SEEN ON 16 AUG, WITH DIFFERENT ANSWERS:
+- Fails in ~4 SECONDS WITH ZERO STEPS EXECUTED. The job never starts. That is quota or billing, not
+  code — check github.com/settings/billing. No amount of re-running helps until minutes exist.
+- Fails MID-RUN with "failed to bundle function: exit 135" on a function you did not touch. That is
+  a flake in the Supabase bundler image. It is NOT harmless: the workflow deploys functions in
+  sequence and STOPS at the failure, so everything after it silently does not deploy. On 16 Aug that
+  left the shim advertising tools the mcp function did not have. Just re-dispatch, then CHECK ALL
+  FIVE, not the one that failed:
+    Supabase -> list edge functions -> compare every updated_at, they should share a timestamp.
+
+CLOUDFLARE ALSO HAS ITS OWN GIT INTEGRATION on the site Worker, deploying independently of
+deploy.yml. Two systems deploying one Worker is a race nobody chose. It has not misfired yet.
+Decide which owns the site rather than discovering it during an incident.
+
 ### 7. Services and identifiers
   Supabase project ref  tytrmjjucqijzcrbwjfm
   Site                  https://positive-minds-cms.alcharles1980.workers.dev
@@ -2116,9 +2135,22 @@ Deploys take roughly 60-90 seconds. VERIFY OVER THE WIRE AFTERWARDS — a green 
 
 ### 8. How to verify anything
 Read pm_connector_log for connector behaviour — it answers in one query what inference cannot:
-    select to_char(at,'HH24:MI:SS') t, phase, method, path, status, had_auth, country, ua
-    from pm_connector_log where at > now() - interval '30 minutes' order by at;
-For the app, fetch the deployed site and grep for what you changed. For edge functions, call them.
+    select to_char(at,'HH24:MI:SS') t, phase, rpc_method, status, partner
+    from pm_connector_log where at > now() - interval '30 minutes' order by at desc;
+
+"THE NEW TOOL IS NOT THERE" IS ALMOST ALWAYS A CACHED TOOL LIST, AND THE LOG PROVES IT.
+A client that genuinely reconnected leaves an \`initialize\` row followed by a \`tools/list\` row,
+seconds apart. If the newest such pair PREDATES your deploy, the client is serving a cached list and
+NOTHING you change can reach it. Compare that timestamp against the function's updated_at before
+debugging anything else — on 16 Aug an hour went into a "missing tool" that was deployed correctly
+and never re-fetched. Note also that transport rows (phase \`mcp\`, no rpc_method) appear even when
+the handshake does NOT complete, so their presence is not evidence of a reconnect.
+To force one: REMOVE the connector in Settings, re-add it, then start a NEW chat — an open
+conversation keeps whatever tool list it began with, and so does the assistant working in it.
+
+For the app, fetch the deployed site and grep for what you changed. For edge functions, call them —
+and prefer calling with a deliberately WRONG input too, since a rejection path is where the useless
+error message hides (a typo'd pack slug once came back with an empty list of alternatives).
 
 ### 9. Things that will bite you
 - Doc text lives inside JS template literals. ESCAPE EVERY BACKTICK or the build breaks.
@@ -2127,6 +2159,14 @@ For the app, fetch the deployed site and grep for what you changed. For edge fun
 - The connector is in REAL USE. pm_review_approve is the only route content takes into a pack.
 - The Connectors page badge lies (upstream bug). Test with a tool call, never the badge.
 - On EVERY change, update ALL THREE docs in devdocs.jsx in the SAME pass.
+- YOU MAY NOT BE THE ONLY SESSION WORKING ON THIS. On 16 Aug a commit appeared between two of this
+  assistant's own commits, authored with the same identity, unaccounted for by the conversation.
+  Its content was sound — it was verified line by line rather than trusted. So: \`git log\` and
+  \`git fetch\` BEFORE you start and again BEFORE you push; if a commit you did not make is there,
+  READ ITS DIFF rather than its message, and never force-push over it.
+- CAPABILITY TEXT IS HAND-MAINTAINED IN THE SHIM and there is no test that catches it drifting.
+  When you add a tool, grep mcp-shim/index.js for the capability menus AND for every sentence
+  containing "cannot", "only", or "nothing goes live", and update them in the same commit (4.49).
 
 ### 10. Before you finish
 Bump CFG.build, run every suite, update all three docs, push, and VERIFY THE DEPLOY OVER THE WIRE.
@@ -2134,6 +2174,64 @@ If you found something that surprised you, write a numbered rule — that list i
 thing in the repo.
 
 ## 11z. WHERE THINGS STAND (read this first when picking the project back up)
+
+=== SESSION OF 16 AUG 2026 — READ THIS BLOCK FIRST, THEN THE REST ===
+
+STATE AT END OF SESSION: build 2026.08.16-47 live on the site, all five edge functions deployed
+from the same commit, shim current, repo clean and matching origin/main. Everything below was
+verified over the wire, not inferred from a green Action.
+
+WHAT SHIPPED TODAY, IN ORDER
+  1. Connector now advertises sync_to_game (it had been deployed but invisible — the shim's
+     hand-written menus never mentioned it, and both claimed approval was the last gate).
+  2. Per-call pack narrowing on sync: "Some packs…" in the CMS, ?packs= on game-feed, packs[] on
+     sync_to_game. Narrow-only, unknown slug is a 400.
+  3. audit_content — read-only scan of SAVED questions, tiered serious/minor/advisory.
+  4. validateQuestion gained a \`truncated\` check (unfinished sentences).
+  5. delete_question and delete_pack, both guarded (see DELETION section below).
+  6. Migration: pm_deletions.note (nullable).
+
+THE FOUR THINGS STILL OPEN — none is blocking, all need a decision rather than more code:
+  A. CLOUD FUNCTION GRANULARITY. Does the Firebase Cloud Function replace at the ROOT or
+     per-document? Albert said "replace" but not at which level, and the two answers lead to
+     opposite designs. UNTIL ANSWERED: the "Some packs…" picker is DISABLED for cloudfn targets,
+     because a root-replace would make a one-pack send delete the other fourteen. Full sends are
+     safe either way. Answer this before touching sync again.
+  B. ARCHIVE SEMANTICS. Agreed in principle, not built. The insight worth keeping: archive is not a
+     third sync behaviour, it is the reversible way to build removal — archive, sync, confirm it
+     left the game, unarchive, sync, confirm it came back, all without anything irreversible. Also
+     it separates "never shipped" (draft) from "was shipped, needs withdrawing" (archived), which is
+     the signal the sync path currently has no way to express. Beware adding a FOURTH vocabulary:
+     packs are published/draft, questions active/inactive, review pending/approved/rejected.
+  C. can_approve NOW GATES THREE DISTINCT POWERS — approve content, ship to production, permanently
+     delete. That was never a decision, it accumulated. A can_sync split was proposed and never
+     overridden; any split should probably cover deletion too.
+  D. KIND/MEAN. Deactivated (so out of the feed, 55 live questions became 54) but NOT deleted, and
+     still present in Firebase, because sync is additive and nothing has withdrawn it. A full server
+     sync should remove it IF the function root-replaces — which is question A.
+
+ALSO OUTSTANDING
+- ?sync_status=1 exists on content-api ONLY. It was never written into game-feed despite a handover
+  claiming "both API endpoints". Add it or stop claiming it.
+- Twelve cross-role words in live content, and test-pack is PUBLISHED (it was long assumed draft,
+  and that assumption is what let KIND/MEAN sit in the feed). audit_content will list both.
+- The GitHub PAT used through these sessions has been pasted into chat repeatedly. Rotate it.
+- Cloudflare's Git integration deploys the site Worker independently of deploy.yml. Undecided.
+
+HOW TODAY'S BUGS WERE ACTUALLY FOUND — this is the transferable part:
+  - Running the REJECTION path, not the success path. ?packs=<typo> returned a correct refusal with
+    an EMPTY list of alternatives, because "allowed" was computed from an already-filtered list.
+  - Running a new heuristic against LIVE content before trusting it. The truncated-sentence check's
+    first word list flagged two perfectly good questions; it ends in a pronoun far more often than
+    anyone guesses.
+  - Unit-testing a pattern that merely LOOKED fine. The paginated read reuses one PostgREST builder
+    across awaits; stubbing fetch proved it issues two requests with filters preserved. It is
+    correct — but that was established, not assumed.
+  - Reading two numbers in one response and noticing they disagreed (by_issue counted pre-dedup,
+    totals post-dedup).
+  None of these came from reading the diff. Exercise the thing.
+
+=== END OF 16 AUG BLOCK ===
 
 LIVE AND WORKING
 - Connector is in real use. Questions have been proposed, approved and rejected through it.
@@ -3295,6 +3393,17 @@ there were two 4t, two 4u, two 4r, two 4s, two 4v and two 4d, so "see rule 4t" w
    the edge function didn't, so a question with its own letter_position rendered differently
    in-game than in the CMS.) After any engine edit, diff the two by fetching the deployed edge
    function and comparing, or run a parity test with a question that has its own overrides.
+4.50. **Run the refusal, not just the success.** Three defects this session hid exclusively in paths
+   that only execute when something is WRONG: a typo'd pack slug rejected correctly but offering an
+   empty list of alternatives; a delete-reason update scoped by a clock comparison that only matters
+   when a prior tombstone exists; a count that only disagrees with its own totals once a duplicate
+   is present. Every one passed a reading of the diff and every existing test. The success path is
+   the path you were thinking about while writing it — it is the least likely place for a surprise.
+   BEFORE SHIPPING, CALL IT WRONG ON PURPOSE: bad slug, missing row, stale id, empty selection,
+   duplicate input. And run any new heuristic against LIVE content before trusting it — a
+   sentence-truncation check flagged two perfectly good questions because English sentences end in
+   pronouns constantly.
+
 4.49. **A capability list is an advertisement too, and it is the one nobody re-reads.** \`sync_to_game\`
    shipped in the mcp function, deployed, and gated correctly — and was still invisible, because the
    shim's \`what_you_can_do\` menu and its \`also_available\` fallback are HAND-MAINTAINED lists that
